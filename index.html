@@ -65,12 +65,19 @@
             border-radius: 15px;
             backdrop-filter: blur(10px);
             border: 1px solid rgba(255, 255, 255, 0.08);
+            transition: border-color 0.3s ease;
+        }
+
+        .more-settings:hover {
+            border-color: rgba(233, 69, 96, 0.25);
         }
 
         .more-settings > summary {
             list-style: none;
             cursor: pointer;
-            padding: 14px 0;
+            padding: 14px 16px;
+            margin: 0 -16px;
+            border-radius: 10px;
             font-size: 15px;
             font-weight: bold;
             color: #ccc;
@@ -78,6 +85,19 @@
             display: flex;
             align-items: center;
             gap: 8px;
+            transition: all 0.25s ease;
+            position: relative;
+        }
+
+        .more-settings > summary:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.06);
+            transform: translateX(2px);
+        }
+
+        .more-settings > summary:active {
+            transform: translateX(1px) scale(0.98);
+            background: rgba(255, 255, 255, 0.03);
         }
 
         .more-settings > summary::-webkit-details-marker {
@@ -88,12 +108,37 @@
             content: '▶';
             font-size: 11px;
             color: #e94560;
-            transition: transform 0.2s ease;
+            transition: transform 0.3s ease, color 0.25s ease;
             display: inline-block;
+        }
+
+        .more-settings > summary:hover::before {
+            color: #ff6b6b;
         }
 
         .more-settings[open] > summary::before {
             transform: rotate(90deg);
+        }
+
+        .more-settings[open] > summary {
+            color: #e94560;
+        }
+
+        .more-settings > summary::after {
+            content: '点击展开';
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.2);
+            font-weight: normal;
+            margin-left: auto;
+            transition: opacity 0.3s ease;
+        }
+
+        .more-settings > summary:hover::after {
+            opacity: 0.6;
+        }
+
+        .more-settings[open] > summary::after {
+            content: '点击收起';
         }
 
         .more-settings-grid {
@@ -136,6 +181,11 @@
             outline: none;
             border-color: #e94560;
             box-shadow: 0 0 15px rgba(233, 69, 96, 0.3);
+        }
+
+        #mode-select {
+            min-width: 80px;
+            text-align: center;
         }
 
         .btn {
@@ -369,6 +419,10 @@
         <div class="controls">
             <div class="control-group">
                 <label>🎹 调性：</label>
+                <select id="mode-select">
+                    <option value="major">大调</option>
+                    <option value="minor">小调</option>
+                </select>
                 <select id="key-select">
                     <option value="C">C 大调</option>
                     <option value="G">G 大调</option>
@@ -382,18 +436,6 @@
                     <option value="Eb">Eb 大调</option>
                     <option value="Ab">Ab 大调</option>
                     <option value="Db">Db 大调</option>
-                    <option value="Cm">C 小调</option>
-                    <option value="Gm">G 小调</option>
-                    <option value="Dm">D 小调</option>
-                    <option value="Am">A 小调</option>
-                    <option value="Em">E 小调</option>
-                    <option value="Bm">B 小调</option>
-                    <option value="F#m">F# 小调</option>
-                    <option value="Fm">F 小调</option>
-                    <option value="Bbm">Bb 小调</option>
-                    <option value="Ebm">Eb 小调</option>
-                    <option value="Abm">Ab 小调</option>
-                    <option value="Dbm">Db 小调</option>
                 </select>
             </div>
 
@@ -553,17 +595,17 @@
             'Eb': ['Eb', 'F', 'G', 'Ab', 'Bb', 'C', 'D'],
             'Ab': ['Ab', 'Bb', 'C', 'Db', 'Eb', 'F', 'G'],
             'Db': ['Db', 'Eb', 'F', 'Gb', 'Ab', 'Bb', 'C'],
-            'Cm': ['C', 'D', 'Eb', 'F', 'G', 'Ab', 'Bb'],
-            'Gm': ['G', 'A', 'Bb', 'C', 'D', 'Eb', 'F'],
-            'Dm': ['D', 'E', 'F', 'G', 'A', 'Bb', 'C'],
-            'Am': ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
-            'Em': ['E', 'F#', 'G', 'A', 'B', 'C', 'D'],
-            'Bm': ['B', 'C#', 'D', 'E', 'F#', 'G', 'A'],
-            'F#m': ['F#', 'G#', 'A', 'B', 'C#', 'D', 'E'],
-            'Fm': ['F', 'G', 'Ab', 'Bb', 'C', 'Db', 'Eb'],
-            'Bbm': ['Bb', 'C', 'Db', 'Eb', 'F', 'Gb', 'Ab'],
-            'Ebm': ['Eb', 'F', 'Gb', 'Ab', 'Bb', 'Db', 'Eb'],
-            'Abm': ['Ab', 'Bb', 'Db', 'Eb', 'F', 'Gb', 'Ab'],
+            'Cm': ['C', 'D', 'Eb', 'F', 'G', 'Ab', 'B'],
+            'Gm': ['G', 'A', 'Bb', 'C', 'D', 'Eb', 'F#'],
+            'Dm': ['D', 'E', 'F', 'G', 'A', 'Bb', 'C#'],
+            'Am': ['A', 'B', 'C', 'D', 'E', 'F', 'G#'],
+            'Em': ['E', 'F#', 'G', 'A', 'B', 'C', 'D#'],
+            'Bm': ['B', 'C#', 'D', 'E', 'F#', 'G', 'A#'],
+            'F#m': ['F#', 'G#', 'A', 'B', 'C#', 'D', 'E#'],
+            'Fm': ['F', 'G', 'Ab', 'Bb', 'C', 'Db', 'E'],
+            'Bbm': ['Bb', 'C', 'Db', 'Eb', 'F', 'Gb', 'A'],
+            'Ebm': ['Eb', 'F', 'Gb', 'Ab', 'Bb', 'Cb', 'D'],
+            'Abm': ['Ab', 'Bb', 'Cb', 'Db', 'Eb', 'Fb', 'G'],
             'Dbm': ['Db', 'Eb', 'F', 'Gb', 'Ab', 'Bb', 'C']
         };
 
@@ -626,6 +668,7 @@
         const bufferCache = new Map();  // filename → AudioBuffer
 
         const keySelect = document.getElementById('key-select');
+        const modeSelect = document.getElementById('mode-select');
         const lengthSelect = document.getElementById('length-select');
         const tempoSlider = document.getElementById('tempo-slider');
         const tempoValue = document.getElementById('tempo-value');
@@ -690,6 +733,90 @@
             currentKey = e.target.value;
             currentKeyEl.textContent = currentKey;
         });
+
+        // 大调/小调分组数据（用于动态填充调性下拉框）
+        const keyGroups = {
+            major: {
+                natural: [{ value: 'C', label: 'C 大调' }],
+                sharp: [
+                    { value: 'G', label: 'G 大调' },
+                    { value: 'D', label: 'D 大调' },
+                    { value: 'A', label: 'A 大调' },
+                    { value: 'E', label: 'E 大调' },
+                    { value: 'B', label: 'B 大调' },
+                    { value: 'F#', label: 'F# 大调' }
+                ],
+                flat: [
+                    { value: 'F', label: 'F 大调' },
+                    { value: 'Bb', label: 'Bb 大调' },
+                    { value: 'Eb', label: 'Eb 大调' },
+                    { value: 'Ab', label: 'Ab 大调' },
+                    { value: 'Db', label: 'Db 大调' }
+                ]
+            },
+            minor: {
+                natural: [{ value: 'Am', label: 'A 小调' }],
+                sharp: [
+                    { value: 'Em', label: 'E 小调' },
+                    { value: 'Bm', label: 'B 小调' },
+                    { value: 'F#m', label: 'F# 小调' }
+                ],
+                flat: [
+                    { value: 'Dm', label: 'D 小调' },
+                    { value: 'Gm', label: 'G 小调' },
+                    { value: 'Cm', label: 'C 小调' },
+                    { value: 'Fm', label: 'F 小调' },
+                    { value: 'Bbm', label: 'Bb 小调' },
+                    { value: 'Ebm', label: 'Eb 小调' },
+                    { value: 'Abm', label: 'Ab 小调' },
+                    { value: 'Dbm', label: 'Db 小调' }
+                ]
+            }
+        };
+
+        function populateKeySelect(mode) {
+            const groups = keyGroups[mode];
+            // 保存当前值，尝试恢复
+            const prevValue = keySelect.value;
+            keySelect.innerHTML = '';
+
+            const groupsConfig = [
+                { key: 'natural', label: '无升降号' },
+                { key: 'sharp', label: mode === 'major' ? '升号大调' : '升号小调' },
+                { key: 'flat', label: mode === 'major' ? '降号大调' : '降号小调' }
+            ];
+
+            groupsConfig.forEach((cfg, idx) => {
+                const items = groups[cfg.key];
+                if (items.length === 0) return;
+                const optgroup = document.createElement('optgroup');
+                optgroup.label = cfg.label;
+                items.forEach(item => {
+                    const opt = document.createElement('option');
+                    opt.value = item.value;
+                    opt.textContent = item.label;
+                    optgroup.appendChild(opt);
+                });
+                keySelect.appendChild(optgroup);
+            });
+
+            // 恢复之前选中的值，如果不在当前模式中则选第一个
+            const exists = Array.from(keySelect.options).some(o => o.value === prevValue);
+            if (exists) {
+                keySelect.value = prevValue;
+            } else {
+                keySelect.selectedIndex = 0;
+            }
+            currentKey = keySelect.value;
+            currentKeyEl.textContent = currentKey;
+        }
+
+        modeSelect.addEventListener('change', (e) => {
+            populateKeySelect(e.target.value);
+        });
+
+        // 初始填充（大调）
+        populateKeySelect('major');
 
         lengthSelect.addEventListener('change', (e) => {
             melodyLength = parseInt(e.target.value);
@@ -840,7 +967,7 @@
         // （含按钮文案、disabled 状态、内部变量等联动同步）
         const SETTINGS_KEY = 'singingTrainerSettings';
         const PERSISTENT_IDS = [
-            'key-select','length-select','tempo-slider','leap-probability','density-slider',
+            'key-select','mode-select','length-select','tempo-slider','leap-probability','density-slider',
             'harmony-mode-toggle','accompaniment-toggle','vocal-volume-slider','vocal-mute-btn',
             'sing-accidentals-toggle','piano-volume-slider','piano-mute-btn',
             'measures-per-line-select','range-start','range-end'
@@ -849,6 +976,7 @@
         function collectSettings() {
             return {
                 currentKey: keySelect.value,
+                mode: modeSelect.value,
                 melodyLength: lengthSelect.value,
                 tempo: tempoSlider.value,
                 leapProbability: leapProbSlider.value,
@@ -881,6 +1009,7 @@
             if (!s || typeof s !== 'object') return;
 
             if (s.currentKey) { keySelect.value = s.currentKey; currentKey = s.currentKey; currentKeyEl.textContent = currentKey; }
+            if (s.mode) { modeSelect.value = s.mode; populateKeySelect(s.mode); }
             if (s.melodyLength) { lengthSelect.value = s.melodyLength; melodyLength = parseInt(s.melodyLength); }
             if (s.tempo !== undefined) { tempoSlider.value = s.tempo; tempo = parseInt(s.tempo); tempoValue.textContent = tempo; }
             if (s.leapProbability !== undefined) { leapProbSlider.value = s.leapProbability; leapProbability = parseInt(s.leapProbability) / 100; leapProbValue.textContent = s.leapProbability + '%'; }
@@ -1364,6 +1493,12 @@
                             Vex.Dot.buildAndAttach([note], { all: true });
                         }
                         
+                        // 临时记号：判断音符是否与调号冲突，需要则添加升降/还原号
+                        const acc = getNoteAccidental(item.note, currentKey);
+                        if (acc) {
+                            note.addModifier(new (Vex.Accidental || Vex.Flow.Accidental)(acc), 0);
+                        }
+                        
                         const noteMidi = midiFromNote(item.note + item.octave);
                         note.setStemDirection(noteMidi > 71 ? -1 : 1);
                         return note;
@@ -1565,6 +1700,49 @@
                 'Fm': 'Fm', 'Bbm': 'Bbm', 'Ebm': 'Ebm', 'Abm': 'Abm', 'Dbm': 'Dbm'
             };
             return signatures[key] || 'C';
+        }
+
+        // 调号内各音名的升降情况（用于判断音符是否需要临时记号）
+        const keySigAccidentals = {
+            'C': {}, 'G': {'F': '#'}, 'D': {'F': '#', 'C': '#'},
+            'A': {'F': '#', 'C': '#', 'G': '#'},
+            'E': {'F': '#', 'C': '#', 'G': '#', 'D': '#'},
+            'B': {'F': '#', 'C': '#', 'G': '#', 'D': '#', 'A': '#'},
+            'F#': {'F': '#', 'C': '#', 'G': '#', 'D': '#', 'A': '#', 'E': '#'},
+            'F': {'B': 'b'}, 'Bb': {'B': 'b', 'E': 'b'},
+            'Eb': {'B': 'b', 'E': 'b', 'A': 'b'},
+            'Ab': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b'},
+            'Db': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b', 'G': 'b'},
+            'Cm': {'B': 'b', 'E': 'b', 'A': 'b'},
+            'Gm': {'B': 'b', 'E': 'b'}, 'Dm': {'B': 'b'},
+            'Am': {}, 'Em': {'F': '#'}, 'Bm': {'F': '#', 'C': '#'},
+            'F#m': {'F': '#', 'C': '#', 'G': '#'},
+            'Fm': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b'},
+            'Bbm': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b', 'G': 'b'},
+            'Ebm': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b', 'G': 'b', 'C': 'b'},
+            'Abm': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b', 'G': 'b', 'C': 'b', 'F': 'b'},
+            'Dbm': {'B': 'b', 'E': 'b', 'A': 'b', 'D': 'b', 'G': 'b', 'C': 'b'}
+        };
+
+        // 判断音符是否需要临时记号，返回 '#'/'b'/'n' 或 null
+        function getNoteAccidental(noteName, key) {
+            const sig = keySigAccidentals[key];
+            if (!sig) return null;
+            const baseNote = noteName[0]; // 音名基干（C/D/E/F/G/A/B）
+            const hasAcc = noteName.length > 1;
+            const noteAcc = hasAcc ? noteName[1] : ''; // '#' 或 'b' 或 ''
+            if (sig[baseNote] !== undefined) {
+                // 调号中该音名有升降记号
+                const sigAcc = sig[baseNote];
+                if (noteAcc !== sigAcc) {
+                    return 'n'; // 与调号不一致 → 加还原号
+                }
+            } else {
+                // 调号中该音名无升降记号
+                if (noteAcc === '#') return '#';
+                if (noteAcc === 'b') return 'b';
+            }
+            return null;
         }
 
         function updateStats(melody) {
