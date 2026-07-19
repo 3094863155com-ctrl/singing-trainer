@@ -5,7 +5,7 @@
 ## 项目结构
 
 ```
-视唱练耳/
+singing-trainer/
 ├── deploy/                  # 部署目录（可直接运行）
 │   ├── singing_trainer.html # 主页面 - 唱歌训练器
 │   ├── harmony_melody.js    # 和声与旋律生成逻辑
@@ -35,10 +35,10 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/3094863155com-ctrl/视唱练耳.git
+git clone https://github.com/3094863155com-ctrl/singing-trainer.git
 
 # 进入项目
-cd 视唱练耳
+cd singing-trainer
 
 # 用浏览器打开主页面
 open deploy/singing_trainer.html
