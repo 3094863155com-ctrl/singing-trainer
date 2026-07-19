@@ -2056,19 +2056,7 @@
                 generateBtn.disabled = false;
                 setRingProgress(0);
                 renderAnim.state = 'idle';
-                // phase2 完成 = 绿光圈已平滑滑到 12 点；现在开始播放音频，
-                // 让"光圈转完"与"音频响起"视觉同步（避免光圈没转完就提前播放）
-                if (renderedAudioEl) {
-                    renderInfo.textContent = '播放中（可锁屏继续）…';
-                    // 立即同步启动绿线（不依赖 play 的 promise，避免 promise 未 resolve 时绿线不显示）
-                    startRenderCursor();
-                    renderedAudioEl.play().catch(err => {
-                        console.warn('渲染播放失败:', err);
-                        renderInfo.textContent = '播放失败: ' + err.message;
-                        stopRenderCursor();
-                        hidePlaybackCursor();
-                    });
-                }
+                // 播放已在 doRender 中提前执行（在用户手势链内），此处仅负责清理动画状态
             }
         }
 
@@ -2129,6 +2117,7 @@
                 ensureRenderedAudioEl();
                 renderedAudioEl.pause();
                 renderedAudioEl.src = renderedBlobUrl;
+                renderedAudioEl.onended = handlePlaybackEnded;
 
                 // Media Session 元数据：每曲更新（actionHandler 等在 ensure 时只注册一次）
                 if ('mediaSession' in navigator) {
@@ -2140,13 +2129,19 @@
                     navigator.mediaSession.playbackState = 'playing';
                 }
 
-                renderInfo.textContent = '渲染完成，等待光圈转完…';
-                // 提前注册 onended（phase2 完成后由 tryFinishRender 启动 play）
-                renderedAudioEl.onended = handlePlaybackEnded;
+                // ★ 关键修改：渲染完成后立即播放（仍在用户手势链内）
+                //   之前延迟到 requestAnimationFrame 回调中播放，移动端会抛 NotAllowedError
+                renderInfo.textContent = '播放中（可锁屏继续）…';
+                startRenderCursor();
+                renderedAudioEl.play().catch(err => {
+                    console.warn('渲染播放失败:', err);
+                    renderInfo.textContent = '播放失败: ' + err.message;
+                    stopRenderCursor();
+                    hidePlaybackCursor();
+                });
 
                 // 渲染工作完成，通知动画系统进入 Phase 2 收尾
-                // play() 推迟到 phase2 完成（绿光圈转到 12 点）后由 tryFinishRender 触发，
-                // 让"光圈转完"与"音频响起"同步，避免光圈还没转完就开始播放
+                // 动画继续运行但不再负责播放（播放已在上一步立即执行）
                 renderWorkDone = true;
                 notifyRenderDone();
                 tryFinishRender();
