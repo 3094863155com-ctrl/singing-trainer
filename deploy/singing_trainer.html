@@ -1,0 +1,2451 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>视唱旋律生成器</title>
+    <script src="vexflow.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <script src="harmony_melody.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+            min-height: 100vh;
+            padding: 20px;
+            color: white;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            font-size: 32px;
+            background: linear-gradient(135deg, #e94560, #0f3460);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 8px;
+        }
+
+        .subtitle {
+            color: #aaa;
+            font-size: 14px;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 30px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+
+        .more-settings {
+            margin-bottom: 30px;
+            padding: 0 20px 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+
+        .more-settings > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 14px 0;
+            font-size: 15px;
+            font-weight: bold;
+            color: #ccc;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .more-settings > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .more-settings > summary::before {
+            content: '▶';
+            font-size: 11px;
+            color: #e94560;
+            transition: transform 0.2s ease;
+            display: inline-block;
+        }
+
+        .more-settings[open] > summary::before {
+            transform: rotate(90deg);
+        }
+
+        .more-settings-grid {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 15px;
+            padding-top: 10px;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .control-group label {
+            font-size: 14px;
+            color: #ccc;
+            font-weight: bold;
+        }
+
+        select {
+            padding: 10px 20px;
+            font-size: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            background: rgba(0, 0, 0, 0.3);
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        select:hover {
+            border-color: #e94560;
+            background: rgba(0, 0, 0, 0.5);
+        }
+
+        select:focus {
+            outline: none;
+            border-color: #e94560;
+            box-shadow: 0 0 15px rgba(233, 69, 96, 0.3);
+        }
+
+        .btn {
+            padding: 12px 30px;
+            font-size: 16px;
+            font-weight: bold;
+            border: none;
+            border-radius: 30px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #e94560, #ff6b6b);
+            color: white;
+            box-shadow: 0 4px 15px rgba(233, 69, 96, 0.4);
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(233, 69, 96, 0.6);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.2);
+            border-color: rgba(255, 255, 255, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
+        }
+
+        /* === 渲染按钮绿光圈动画（JS 驱动：按小节数自适应时长 + 90% 等待渲染完成） === */
+        /* @property 注册 --ring-progress 为 <angle>，JS 在 #render-btn 上 setProperty，
+           inherits: true 让 ::after 伪元素继承该值，驱动 conic-gradient 进度。
+           状态机见 JS：phase1(0→90%) → waiting(90→92% 极慢爬行) → phase2(92→100% 线性收尾) */
+        @property --ring-progress {
+            syntax: '<angle>';
+            inherits: true;
+            initial-value: 0deg;
+        }
+
+        #render-btn {
+            position: relative;
+            isolation: isolate;  /* 创建层叠上下文，让 ::after 绿圈覆盖在按钮上层 */
+            --ring-progress: 0deg;
+        }
+
+        /* 按下渲染：按钮变灰（不被 disabled 的 opacity 压暗），突出周围绿线 */
+        #render-btn.rendering {
+            opacity: 1 !important;
+            background: #6b7280 !important;
+            color: #cbd5e1 !important;
+            box-shadow: none !important;
+            border-color: rgba(255, 255, 255, 0.1) !important;
+        }
+
+        /* 椭圆周围绿光圈：从 12 点（top）顺时针绕一圈回 12 点 */
+        /* conic-gradient 起点 from 0deg 即 12 点方向；mask-composite 抠出环形描边 */
+        #render-btn.rendering::after {
+            content: '';
+            position: absolute;
+            inset: -4px;                 /* 比按钮大 4px，光圈在按钮外 */
+            border-radius: inherit;       /* 继承椭圆形状 */
+            padding: 2px;                /* 描边宽度 */
+            background: conic-gradient(from 0deg,
+                #4ade80 0deg,
+                #4ade80 var(--ring-progress),
+                rgba(74, 222, 128, 0.12) var(--ring-progress),
+                rgba(74, 222, 128, 0.12) 360deg);
+            -webkit-mask:
+                linear-gradient(#000 0 0) content-box,
+                linear-gradient(#000 0 0);
+            -webkit-mask-composite: xor;
+            mask:
+                linear-gradient(#000 0 0) content-box,
+                linear-gradient(#000 0 0);
+            mask-composite: exclude;
+            pointer-events: none;
+            z-index: 1;
+            filter: drop-shadow(0 0 6px rgba(74, 222, 128, 0.7));
+        }
+
+        .sheet-music-container {
+            background: #FBF6E3;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow-x: auto;
+            margin-bottom: 30px;
+        }
+
+        #sheet-music {
+            display: flex;
+            justify-content: center;
+        }
+
+        #sheet-music svg {
+            display: block;
+        }
+
+        /* 手机竖屏：SVG 等比缩放适配屏幕宽度，消除上下空白；容器 padding 收小 */
+        @media (max-width: 768px) {
+            .sheet-music-container {
+                padding: 12px;
+            }
+            #sheet-music svg {
+                max-width: 100%;
+                height: auto;
+            }
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            margin-bottom: 30px;
+            overflow: hidden;
+            cursor: pointer;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #e94560, #ff6b6b);
+            width: 0%;
+            transition: width 0.1s linear;
+            border-radius: 4px;
+        }
+
+        .playback-info {
+            text-align: center;
+            font-size: 14px;
+            color: #aaa;
+            margin-bottom: 10px;
+        }
+
+        .tempo-control {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .tempo-control input[type="range"] {
+            width: 150px;
+            height: 6px;
+            -webkit-appearance: none;
+            appearance: none;
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+            outline: none;
+        }
+
+        .tempo-control input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 18px;
+            height: 18px;
+            background: #e94560;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .tempo-control input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+            box-shadow: 0 0 10px rgba(233, 69, 96, 0.6);
+        }
+
+        .tempo-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: #e94560;
+            min-width: 45px;
+        }
+
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 40px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #888;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #e94560;
+        }
+
+        .key-hint {
+            text-align: center;
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 10px;
+        }
+
+        .loading-indicator {
+            text-align: center;
+            color: #e94560;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="controls">
+            <div class="control-group">
+                <label>🎹 调性：</label>
+                <select id="key-select">
+                    <option value="C">C 大调</option>
+                    <option value="G">G 大调</option>
+                    <option value="D">D 大调</option>
+                    <option value="A">A 大调</option>
+                    <option value="E">E 大调</option>
+                    <option value="B">B 大调</option>
+                    <option value="F#">F# 大调</option>
+                    <option value="F">F 大调</option>
+                    <option value="Bb">Bb 大调</option>
+                    <option value="Eb">Eb 大调</option>
+                    <option value="Ab">Ab 大调</option>
+                    <option value="Db">Db 大调</option>
+                    <option value="Cm">C 小调</option>
+                    <option value="Gm">G 小调</option>
+                    <option value="Dm">D 小调</option>
+                    <option value="Am">A 小调</option>
+                    <option value="Em">E 小调</option>
+                    <option value="Bm">B 小调</option>
+                    <option value="F#m">F# 小调</option>
+                    <option value="Fm">F 小调</option>
+                    <option value="Bbm">Bb 小调</option>
+                    <option value="Ebm">Eb 小调</option>
+                    <option value="Abm">Ab 小调</option>
+                    <option value="Dbm">Db 小调</option>
+                </select>
+            </div>
+
+            <button class="btn btn-primary" id="generate-btn">🎲 生成旋律</button>
+            <button class="btn btn-secondary" id="play-btn" disabled>▶️ 播放</button>
+            <button class="btn btn-secondary" id="stop-btn" disabled>⏹️ 停止</button>
+            <button class="btn btn-secondary" id="render-btn" disabled>🎧 渲染播放</button>
+            <button class="btn btn-secondary" id="loop-mode-btn" title="循环模式：点击切换">🔁 不循环</button>
+        </div>
+
+        <details class="more-settings">
+            <summary>⚙️ 更多设置</summary>
+            <div class="more-settings-grid">
+            <div class="control-group">
+                <label>📏 小节数：</label>
+                <select id="length-select">
+                    <option value="8">8 小节</option>
+                    <option value="12">12 小节</option>
+                    <option value="16" selected>16 小节</option>
+                    <option value="24">24 小节</option>
+                </select>
+            </div>
+
+            <div class="tempo-control">
+                <label>⚡ 速度：</label>
+                <input type="range" id="tempo-slider" min="20" max="70" value="35">
+                <span class="tempo-value" id="tempo-value">35</span>
+                <span style="color: #888;">BPM</span>
+            </div>
+
+            <div class="control-group">
+                <label>📊 跳进概率：</label>
+                <input type="range" id="leap-probability" min="0" max="100" value="35" style="width: 150px; height: 6px; -webkit-appearance: none; appearance: none; background: rgba(255,255,255,0.2); border-radius: 3px; outline: none;">
+                <span class="tempo-value" id="leap-prob-value">35%</span>
+            </div>
+
+            <div class="control-group">
+                <label>🎵 音符密集度：</label>
+                <input type="range" id="density-slider" min="0" max="100" value="40" style="width: 150px; height: 6px; -webkit-appearance: none; appearance: none; background: rgba(255,255,255,0.2); border-radius: 3px; outline: none;">
+                <span class="tempo-value" id="density-value">40</span>
+                <span style="color: #888; font-size: 12px;">←8/4分多 · 16分多→</span>
+            </div>
+
+            <div class="control-group">
+                <label>🎼 和声旋律模式：</label>
+                <input type="checkbox" id="harmony-mode-toggle" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: #e94560;">
+                <span style="color: #888; font-size: 12px;">开启后按和声进行生成</span>
+            </div>
+
+            <div class="control-group">
+                <label>🎹 钢琴伴奏：</label>
+                <input type="checkbox" id="accompaniment-toggle" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: #e94560;">
+                <span style="color: #888; font-size: 12px;">需和声模式开启</span>
+            </div>
+
+            <div class="control-group">
+                <label>♯♭ 唱出升降号：</label>
+                <input type="checkbox" id="sing-accidentals-toggle" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: #e94560;">
+                <span style="color: #888; font-size: 12px;">关闭后用第二套采样(不唱升降记号)</span>
+            </div>
+
+            <div class="control-group">
+                <label>🎤 人声音量：</label>
+                <input type="range" id="vocal-volume-slider" min="0" max="100" value="100" style="width: 120px; height: 6px; -webkit-appearance: none; appearance: none; background: rgba(255,255,255,0.2); border-radius: 3px; outline: none;">
+                <span class="tempo-value" id="vocal-volume-value">100</span>
+                <button id="vocal-mute-btn" class="btn btn-secondary" style="padding: 6px 12px; font-size: 14px; min-width: 44px;">🔊</button>
+            </div>
+
+            <div class="control-group">
+                <label>🎹 钢琴音量：</label>
+                <input type="range" id="piano-volume-slider" min="0" max="100" value="35" style="width: 120px; height: 6px; -webkit-appearance: none; appearance: none; background: rgba(255,255,255,0.2); border-radius: 3px; outline: none;">
+                <span class="tempo-value" id="piano-volume-value" style="color: #e94560;">35</span>
+                <button id="piano-mute-btn" class="btn btn-secondary" style="padding: 6px 12px; font-size: 14px; min-width: 44px;">🔊</button>
+                <span style="color: #888; font-size: 12px;">需和声模式开启</span>
+            </div>
+
+            <div class="control-group">
+                <label>📐 谱面：</label>
+                <select id="measures-per-line-select">
+                    <option value="2" selected>一行 2 小节（大）</option>
+                    <option value="4">一行 4 小节（紧凑）</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>� 音域：</label>
+                <select id="range-start">
+                    <option value="C3">C3</option>
+                    <option value="D3">D3</option>
+                    <option value="E3">E3</option>
+                    <option value="F3">F3</option>
+                    <option value="G3">G3</option>
+                    <option value="A3">A3</option>
+                    <option value="B3">B3</option>
+                    <option value="C4" selected>C4</option>
+                    <option value="D4">D4</option>
+                    <option value="E4">E4</option>
+                </select>
+                <span style="color: #888;">-</span>
+                <select id="range-end">
+                    <option value="C4">C4</option>
+                    <option value="D4">D4</option>
+                    <option value="E4">E4</option>
+                    <option value="F4">F4</option>
+                    <option value="G4">G4</option>
+                    <option value="A4">A4</option>
+                    <option value="B4">B4</option>
+                    <option value="C5">C5</option>
+                    <option value="D5">D5</option>
+                    <option value="E5" selected>E5</option>
+                    <option value="F5">F5</option>
+                    <option value="G5">G5</option>
+                </select>
+            </div>
+
+            </div>
+        </details>
+
+        <div class="playback-info" id="playback-info">点击"生成旋律"开始</div>
+        <div class="playback-info" id="render-info" style="display: none; color: #e94560; min-height: 20px;"></div>
+
+        <div class="progress-bar" id="progress-bar">
+            <div class="progress-fill" id="progress-fill"></div>
+        </div>
+
+        <div class="sheet-music-container">
+            <div id="sheet-music"></div>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-label">旋律音符数</div>
+                <div class="stat-value" id="note-count">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">音域范围</div>
+                <div class="stat-value" id="range-value">-</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">当前调性</div>
+                <div class="stat-value" id="current-key">C</div>
+            </div>
+        </div>
+
+        <div class="key-hint">提示：旋律从主音开始，结束于主音，适合视唱练习</div>
+    </div>
+
+    <script>
+        const scales = {
+            'C': ['C', 'D', 'E', 'F', 'G', 'A', 'B'],
+            'G': ['G', 'A', 'B', 'C', 'D', 'E', 'F#'],
+            'D': ['D', 'E', 'F#', 'G', 'A', 'B', 'C#'],
+            'A': ['A', 'B', 'C#', 'D', 'E', 'F#', 'G#'],
+            'E': ['E', 'F#', 'G#', 'A', 'B', 'C#', 'D#'],
+            'B': ['B', 'C#', 'D#', 'E', 'F#', 'G#', 'A#'],
+            'F#': ['F#', 'G#', 'A#', 'B', 'C#', 'D#', 'E#'],
+            'F': ['F', 'G', 'A', 'Bb', 'C', 'D', 'E'],
+            'Bb': ['Bb', 'C', 'D', 'Eb', 'F', 'G', 'A'],
+            'Eb': ['Eb', 'F', 'G', 'Ab', 'Bb', 'C', 'D'],
+            'Ab': ['Ab', 'Bb', 'C', 'Db', 'Eb', 'F', 'G'],
+            'Db': ['Db', 'Eb', 'F', 'Gb', 'Ab', 'Bb', 'C'],
+            'Cm': ['C', 'D', 'Eb', 'F', 'G', 'Ab', 'Bb'],
+            'Gm': ['G', 'A', 'Bb', 'C', 'D', 'Eb', 'F'],
+            'Dm': ['D', 'E', 'F', 'G', 'A', 'Bb', 'C'],
+            'Am': ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
+            'Em': ['E', 'F#', 'G', 'A', 'B', 'C', 'D'],
+            'Bm': ['B', 'C#', 'D', 'E', 'F#', 'G', 'A'],
+            'F#m': ['F#', 'G#', 'A', 'B', 'C#', 'D', 'E'],
+            'Fm': ['F', 'G', 'Ab', 'Bb', 'C', 'Db', 'Eb'],
+            'Bbm': ['Bb', 'C', 'Db', 'Eb', 'F', 'Gb', 'Ab'],
+            'Ebm': ['Eb', 'F', 'Gb', 'Ab', 'Bb', 'Db', 'Eb'],
+            'Abm': ['Ab', 'Bb', 'Db', 'Eb', 'F', 'Gb', 'Ab'],
+            'Dbm': ['Db', 'Eb', 'F', 'Gb', 'Ab', 'Bb', 'C']
+        };
+
+        const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+        // 将音名转为半音索引（0-11），支持降号音名
+        function noteNameIndex(name) {
+            const flatMap = { 'Db': 1, 'Eb': 3, 'Gb': 6, 'Ab': 8, 'Bb': 10 };
+            const idx = noteNames.indexOf(name);
+            return idx !== -1 ? idx : (flatMap[name] ?? -1);
+        }
+        
+        const vexflowNoteNames = {
+            'C': 'C', 'C#': 'C#', 'Db': 'Db',
+            'D': 'D', 'D#': 'D#', 'Eb': 'Eb',
+            'E': 'E', 'E#': 'E#', 'Fb': 'Fb',
+            'F': 'F', 'F#': 'F#', 'Gb': 'Gb',
+            'G': 'G', 'G#': 'G#', 'Ab': 'Ab',
+            'A': 'A', 'A#': 'A#', 'Bb': 'Bb',
+            'B': 'B', 'B#': 'B#', 'Cb': 'Cb'
+        };
+
+        const solfegeNames = ['do', 're', 'mi', 'fa', 'sol', 'la', 'si'];
+
+        // 音名 → 唱名映射（用于构造文件名，不含八度）
+        const noteToSolfege = {
+            'C':  'do',    'C#': '#do',  'Db': '♭re',
+            'D':  're',    'D#': '#re',  'Eb': '♭mi',
+            'E':  'mi',    'E#': 'fa',   'Fb': 'mi',
+            'F':  'fa',    'F#': '#fa',  'Gb': '♭sol',
+            'G':  'sol',   'G#': '#sol', 'Ab': '♭la',
+            'A':  'la',    'A#': '#la',  'Bb': '♭si',
+            'B':  'si',    'B#': 'do',   'Cb': 'si'
+        };
+
+        // 音频采样文件后缀：wav(无损体积大) / mp3(有损体积约1/10，利于预加载和移动端)
+        // 切换格式时改这里即可，文件名主体格式（如 #fa_5、#fa_5re）不变
+        const AUDIO_EXT = '.mp3';
+
+        let currentKey = 'C';
+        let melodyLength = 16;
+        let tempo = 35;
+        let leapProbability = 0.35;
+        let density = 0.6;  // 音符密集度：0 (最密集，多16分) ~ 1 (最稀疏，多4分/附点/2分)
+                            // 滑块方向已反转(右=密集)，故默认滑块40对应 density=0.6
+        let rangeStart = 'C4';
+        let rangeEnd = 'E5';
+        let currentMelody = [];
+        let isPlaying = false;
+        let playbackTimer = null;
+        let noteTimers = [];
+        let currentNoteIndex = 0;
+        let startTime = 0;
+
+        // === 播放位置绿线指示器（实时播放 + 渲染播放共用） ===
+        // notePositions: 每个音符在 SVG 中的坐标信息，renderSheetMusic 渲染时收集
+        // playbackCursor: SVG 内的 <line> 元素，移动 x/y 即可指示当前位置
+        // 渲染播放用 renderedAudioEl 的 timeupdate 事件驱动（详见 startRenderCursor）
+        let notePositions = [];            // [{ x, y, yBottom, line, noteIndex }]
+        let playbackCursor = null;         // SVG <line> 元素
+        let cachedVocalSchedule = null;    // 缓存 buildVocalSchedule 输出，渲染播放时按 currentTime 查找
+        let activeAudios = [];
+        // Web Audio API 相关：用于爆音修复（淡入淡出 + 重叠）
+        let audioContext = null;
+        const bufferCache = new Map();  // filename → AudioBuffer
+        let activeSources = [];          // { source, gainNode, stopTime }
+
+        const keySelect = document.getElementById('key-select');
+        const lengthSelect = document.getElementById('length-select');
+        const tempoSlider = document.getElementById('tempo-slider');
+        const tempoValue = document.getElementById('tempo-value');
+        const rangeStartSelect = document.getElementById('range-start');
+        const rangeEndSelect = document.getElementById('range-end');
+        const generateBtn = document.getElementById('generate-btn');
+        const playBtn = document.getElementById('play-btn');
+        const stopBtn = document.getElementById('stop-btn');
+        const renderBtn = document.getElementById('render-btn');
+        const renderInfo = document.getElementById('render-info');
+        const playbackInfo = document.getElementById('playback-info');
+        const progressFill = document.getElementById('progress-fill');
+        const progressBar = document.getElementById('progress-bar');
+        const noteCountEl = document.getElementById('note-count');
+        const rangeValueEl = document.getElementById('range-value');
+        const currentKeyEl = document.getElementById('current-key');
+        const leapProbSlider = document.getElementById('leap-probability');
+        const leapProbValue = document.getElementById('leap-prob-value');
+        const densitySlider = document.getElementById('density-slider');
+        const densityValueEl = document.getElementById('density-value');
+        const harmonyModeToggle = document.getElementById('harmony-mode-toggle');
+        const accompanimentToggle = document.getElementById('accompaniment-toggle');
+
+        // 音量控件
+        const vocalVolumeSlider = document.getElementById('vocal-volume-slider');
+        const vocalVolumeValueEl = document.getElementById('vocal-volume-value');
+        const vocalMuteBtn = document.getElementById('vocal-mute-btn');
+        const singAccidentalsToggle = document.getElementById('sing-accidentals-toggle');
+        const pianoVolumeSlider = document.getElementById('piano-volume-slider');
+        const pianoVolumeValueEl = document.getElementById('piano-volume-value');
+        const pianoMuteBtn = document.getElementById('piano-mute-btn');
+        const measuresPerLineSelect = document.getElementById('measures-per-line-select');
+        const loopModeBtn = document.getElementById('loop-mode-btn');
+
+        // 和声模式状态：harmonyModeEnabled 控制生成路径；currentHarmonyData 保存和声数据供伴奏使用
+        let harmonyModeEnabled = true;
+        let currentHarmonyData = null;
+
+        // 人声音量状态（全局可用，原 playNote 的 0.8 替换为 vocalVolume）
+        let vocalVolume = 1.0;
+        let vocalMuted = false;
+        // 渲染播放状态（离线渲染为 WAV Blob，audio 元素播放，实现 iOS 锁屏播放）
+        let renderedAudioEl = null;
+        let renderedBlobUrl = null;
+        // "唱出升降号"开关：true=唱升降记号(用#fa/♭mi等带号采样)；false=用第二套采样(re后缀，音调带升降但发音不唱)
+        let singAccidentals = true;
+        // 钢琴音量状态（仅和声模式启用控件，但状态始终保留）
+        let pianoVolumePercent = 35;
+        let pianoMuted = false;
+        // 钢琴时间偏移（秒）：让钢琴晚 50ms 触发，补偿人声采样音头建立时间
+        // 原理：人声采样开头虽无静默（ffmpeg silencedetect 已验证），但声带起振/辅音
+        // 建立需要 ~30-50ms 才达到可听音量；钢琴 PolySynth envelope attack 仅 5ms 就到峰值。
+        // 若两者同时开始（offset=0），钢琴必然先被听到 → 拍点提前。
+        // offset=0.05 让钢琴等人声 50ms，两者同时达到可听音量，对齐。
+        // 注：渲染播放里钢琴/人声都用 e.time 调度（无运行时延迟），offset 仍需保留，
+        // 因为它补偿的是采样本身的音头建立，不是调度链路延迟。
+        const pianoOffsetSec = 0.05;
+        // 乐谱每行小节数：默认 2（更大更清晰），可切到 4（紧凑）
+        let measuresPerLine = 2;
+        // 循环播放模式：'none'（不循环）| 'single'（单曲循环，停2秒重播）| 'auto-next'（自动下一首，重新生成+渲染+播放）
+        let loopMode = 'none';
+
+        keySelect.addEventListener('change', (e) => {
+            currentKey = e.target.value;
+            currentKeyEl.textContent = currentKey;
+        });
+
+        lengthSelect.addEventListener('change', (e) => {
+            melodyLength = parseInt(e.target.value);
+        });
+
+        tempoSlider.addEventListener('input', (e) => {
+            tempo = parseInt(e.target.value);
+            tempoValue.textContent = tempo;
+        });
+
+        leapProbSlider.addEventListener('input', (e) => {
+            leapProbability = parseInt(e.target.value) / 100;
+            leapProbValue.textContent = e.target.value + '%';
+        });
+
+        densitySlider.addEventListener('input', (e) => {
+            // 滑块方向已反转：右=密集(16分多)。内部 density 仍为 0=密集~1=稀疏，故取反。
+            density = (100 - parseInt(e.target.value)) / 100;
+            densityValueEl.textContent = e.target.value;
+        });
+
+        harmonyModeToggle.addEventListener('change', (e) => {
+            harmonyModeEnabled = e.target.checked;
+            // 关闭和声模式时联动关闭伴奏并清除和声数据
+            if (!harmonyModeEnabled) {
+                accompanimentToggle.checked = false;
+                currentHarmonyData = null;
+                if (window.HarmonyMelody) {
+                    HarmonyMelody.setAccompanimentEnabled(false);
+                }
+                // 禁用钢琴音量控件，但保留状态值
+                pianoVolumeSlider.disabled = true;
+                pianoMuteBtn.disabled = true;
+                pianoVolumeValueEl.style.color = '#888';
+                // 静音钢琴，防止之前已调度的伴奏继续发声
+                if (window.HarmonyMelody) {
+                    HarmonyMelody.setPianoMuted(true);
+                }
+            } else {
+                // 开启和声模式：恢复钢琴音量控件可用，并同步当前状态
+                pianoVolumeSlider.disabled = false;
+                pianoMuteBtn.disabled = false;
+                pianoVolumeValueEl.style.color = '#e94560';
+                if (window.HarmonyMelody) {
+                    HarmonyMelody.setPianoVolume(pianoVolumePercent);
+                    HarmonyMelody.setPianoMuted(pianoMuted);
+                }
+            }
+        });
+
+        // === 人声音量滑块 ===
+        vocalVolumeSlider.addEventListener('input', (e) => {
+            const v = parseInt(e.target.value);
+            vocalVolume = v / 100;
+            vocalVolumeValueEl.textContent = v;
+        });
+
+        // === 人声 mute 按钮（独立切换，不影响滑块值） ===
+        vocalMuteBtn.addEventListener('click', () => {
+            vocalMuted = !vocalMuted;
+            vocalMuteBtn.textContent = vocalMuted ? '🔇' : '🔊';
+            // 静音时立即停掉当前正在播放的人声音频
+            if (vocalMuted) {
+                stopAllAudios();
+            }
+        });
+
+        // === "唱出升降号" 开关 ===
+        // 勾选：升降音唱出升降记号（用 #fa/♭mi 等带号采样）
+        // 取消勾选：升降音改用同音名自然音采样 + playbackRate 做±半音处理（音准正确，发音省略升降记号）
+        singAccidentalsToggle.addEventListener('change', (e) => {
+            singAccidentals = e.target.checked;
+        });
+
+        // === 钢琴音量滑块（仅和声模式可用） ===
+        pianoVolumeSlider.addEventListener('input', (e) => {
+            const v = parseInt(e.target.value);
+            pianoVolumePercent = v;
+            pianoVolumeValueEl.textContent = v;
+            if (window.HarmonyMelody) {
+                HarmonyMelody.setPianoVolume(v);
+            }
+        });
+
+        // === 钢琴 mute 按钮（独立切换，仅和声模式可用） ===
+        pianoMuteBtn.addEventListener('click', () => {
+            pianoMuted = !pianoMuted;
+            pianoMuteBtn.textContent = pianoMuted ? '🔇' : '🔊';
+            if (window.HarmonyMelody) {
+                HarmonyMelody.setPianoMuted(pianoMuted);
+            }
+        });
+
+        // 谱面每行小节数切换：更新状态并立即重渲染（若有旋律）
+        measuresPerLineSelect.addEventListener('change', (e) => {
+            measuresPerLine = parseInt(e.target.value);
+            if (currentMelody && currentMelody.length > 0) {
+                renderSheetMusic(currentMelody);
+            }
+        });
+
+        // === 循环模式切换（三态点击：不循环 → 单曲循环 → 自动下一首 → 不循环）===
+        function setLoopMode(mode) {
+            loopMode = mode;
+            if (mode === 'none') {
+                loopModeBtn.textContent = '🔁 不循环';
+                loopModeBtn.title = '当前：不循环（点击切到单曲循环）';
+            } else if (mode === 'single') {
+                loopModeBtn.textContent = '🔂 单曲循环';
+                loopModeBtn.title = '当前：单曲循环，播完停 2 秒重播（点击切到自动下一首）';
+            } else if (mode === 'auto-next') {
+                loopModeBtn.textContent = '🔀 自动下一首';
+                loopModeBtn.title = '当前：自动生成下一首并渲染播放（点击切到不循环）';
+            }
+            saveSettings();
+        }
+        loopModeBtn.addEventListener('click', () => {
+            if (loopMode === 'none') setLoopMode('single');
+            else if (loopMode === 'single') setLoopMode('auto-next');
+            else setLoopMode('none');
+        });
+
+        accompanimentToggle.addEventListener('change', async (e) => {
+            const enabled = e.target.checked;
+            // 伴奏依赖和声模式
+            if (enabled && !harmonyModeEnabled) {
+                accompanimentToggle.checked = false;
+                return;
+            }
+            if (window.HarmonyMelody) {
+                if (enabled) {
+                    await HarmonyMelody.initPiano();
+                    HarmonyMelody.setAccompanimentEnabled(true);
+                } else {
+                    HarmonyMelody.setAccompanimentEnabled(false);
+                }
+            }
+        });
+
+        rangeStartSelect.addEventListener('change', (e) => {
+            rangeStart = e.target.value;
+        });
+
+        rangeEndSelect.addEventListener('change', (e) => {
+            rangeEnd = e.target.value;
+        });
+
+        // === 参数持久化（localStorage 自动保存/恢复） ===
+        // 所有滑块/开关/选择器变化时自动保存；页面加载时读取并恢复
+        // （含按钮文案、disabled 状态、内部变量等联动同步）
+        const SETTINGS_KEY = 'singingTrainerSettings';
+        const PERSISTENT_IDS = [
+            'key-select','length-select','tempo-slider','leap-probability','density-slider',
+            'harmony-mode-toggle','accompaniment-toggle','vocal-volume-slider','vocal-mute-btn',
+            'sing-accidentals-toggle','piano-volume-slider','piano-mute-btn',
+            'measures-per-line-select','range-start','range-end'
+        ];
+
+        function collectSettings() {
+            return {
+                currentKey: keySelect.value,
+                melodyLength: lengthSelect.value,
+                tempo: tempoSlider.value,
+                leapProbability: leapProbSlider.value,
+                density: densitySlider.value,
+                rangeStart: rangeStartSelect.value,
+                rangeEnd: rangeEndSelect.value,
+                harmonyModeEnabled: harmonyModeToggle.checked,
+                accompaniment: accompanimentToggle.checked,
+                vocalVolume: vocalVolumeSlider.value,
+                vocalMuted: vocalMuted,
+                singAccidentals: singAccidentalsToggle.checked,
+                pianoVolume: pianoVolumeSlider.value,
+                pianoMuted: pianoMuted,
+                measuresPerLine: measuresPerLineSelect.value,
+                loopMode: loopMode
+            };
+        }
+
+        function saveSettings() {
+            try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(collectSettings())); }
+            catch (e) { console.warn('保存设置失败:', e); }
+        }
+
+        function loadSettings() {
+            let raw;
+            try { raw = localStorage.getItem(SETTINGS_KEY); } catch (e) { return; }
+            if (!raw) return;
+            let s;
+            try { s = JSON.parse(raw); } catch (e) { return; }
+            if (!s || typeof s !== 'object') return;
+
+            if (s.currentKey) { keySelect.value = s.currentKey; currentKey = s.currentKey; currentKeyEl.textContent = currentKey; }
+            if (s.melodyLength) { lengthSelect.value = s.melodyLength; melodyLength = parseInt(s.melodyLength); }
+            if (s.tempo !== undefined) { tempoSlider.value = s.tempo; tempo = parseInt(s.tempo); tempoValue.textContent = tempo; }
+            if (s.leapProbability !== undefined) { leapProbSlider.value = s.leapProbability; leapProbability = parseInt(s.leapProbability) / 100; leapProbValue.textContent = s.leapProbability + '%'; }
+            if (s.density !== undefined) { densitySlider.value = s.density; density = (100 - parseInt(s.density)) / 100; densityValueEl.textContent = s.density; }
+            if (s.rangeStart) { rangeStartSelect.value = s.rangeStart; rangeStart = s.rangeStart; }
+            if (s.rangeEnd) { rangeEndSelect.value = s.rangeEnd; rangeEnd = s.rangeEnd; }
+            if (s.harmonyModeEnabled !== undefined) { harmonyModeToggle.checked = s.harmonyModeEnabled; harmonyModeEnabled = s.harmonyModeEnabled; }
+            if (s.accompaniment !== undefined) { accompanimentToggle.checked = s.accompaniment; }
+            if (s.vocalVolume !== undefined) { vocalVolumeSlider.value = s.vocalVolume; vocalVolume = parseInt(s.vocalVolume) / 100; vocalVolumeValueEl.textContent = s.vocalVolume; }
+            if (s.vocalMuted !== undefined) { vocalMuted = s.vocalMuted; vocalMuteBtn.textContent = vocalMuted ? '🔇' : '🔊'; }
+            if (s.singAccidentals !== undefined) { singAccidentalsToggle.checked = s.singAccidentals; singAccidentals = s.singAccidentals; }
+            if (s.pianoVolume !== undefined) { pianoVolumeSlider.value = s.pianoVolume; pianoVolumePercent = parseInt(s.pianoVolume); pianoVolumeValueEl.textContent = s.pianoVolume; }
+            if (s.pianoMuted !== undefined) { pianoMuted = s.pianoMuted; pianoMuteBtn.textContent = pianoMuted ? '🔇' : '🔊'; }
+            if (s.measuresPerLine) { measuresPerLineSelect.value = s.measuresPerLine; measuresPerLine = parseInt(s.measuresPerLine); }
+            if (s.loopMode) { setLoopMode(s.loopMode); }  // setLoopMode 内部会 saveSettings，重复保存无害
+
+            // 联动：钢琴控件 disabled 状态根据和声模式（与 harmonyModeToggle change 监听器逻辑一致）
+            if (harmonyModeEnabled) {
+                pianoVolumeSlider.disabled = false;
+                pianoMuteBtn.disabled = false;
+                pianoVolumeValueEl.style.color = '#e94560';
+            } else {
+                pianoVolumeSlider.disabled = true;
+                pianoMuteBtn.disabled = true;
+                pianoVolumeValueEl.style.color = '#888';
+                accompanimentToggle.checked = false;  // 和声关时伴奏必关
+            }
+            // 同步钢琴音量/静音状态到合成器（若 piano 已初始化则即时生效，否则仅记录待 initPiano 时应用）
+            if (window.HarmonyMelody) {
+                HarmonyMelody.setPianoVolume(pianoVolumePercent);
+                HarmonyMelody.setPianoMuted(pianoMuted);
+            }
+        }
+
+        // 统一事件委托：任意持久化控件变化（input/change/click）即保存
+        ['input', 'change', 'click'].forEach(evt => {
+            document.addEventListener(evt, (e) => {
+                if (!e.target || !e.target.id || !PERSISTENT_IDS.includes(e.target.id)) return;
+                saveSettings();
+            });
+        });
+
+        // 页面加载时恢复上次设置（在所有监听器注册之后调用）
+        loadSettings();
+
+        function initAudio() {
+            // 初始化 Web Audio API 的 AudioContext（用于爆音修复）
+            if (!audioContext) {
+                try {
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                } catch (e) {
+                    console.warn('AudioContext 初始化失败，回退到 Audio 对象:', e);
+                }
+            }
+            if (audioContext && audioContext.state === 'suspended') {
+                // 无用户手势时 resume() 会拒绝（自动下一首场景），静默处理
+                audioContext.resume().catch(() => {});
+            }
+            return Promise.resolve();
+        }
+
+        function loadSamples() {
+            playBtn.disabled = false;
+            return Promise.resolve();
+        }
+
+        function stopAllAudios() {
+            // 停止旧 Audio 对象（兼容遗留）
+            activeAudios.forEach(audio => {
+                try {
+                    audio.pause();
+                    audio.src = '';
+                } catch(e) {}
+            });
+            activeAudios = [];
+            // 停止 Web Audio SourceNode：快速淡出避免点击声
+            if (audioContext) {
+                const now = audioContext.currentTime;
+                activeSources.forEach(item => {
+                    try {
+                        item.gainNode.gain.cancelScheduledValues(now);
+                        item.gainNode.gain.setValueAtTime(item.gainNode.gain.value, now);
+                        item.gainNode.gain.linearRampToValueAtTime(0, now + 0.01);
+                        item.source.stop(now + 0.02);
+                    } catch(e) {}
+                });
+            }
+            activeSources = [];
+        }
+
+        function getSolfege(noteName, scale) {
+            const index = scale.indexOf(noteName);
+            if (index >= 0) {
+                return solfegeNames[index];
+            }
+            return noteName;
+        }
+
+        // 异步加载音频缓冲（带缓存）
+        // 失败情形（file:// 协议、CORS、404、解码失败）返回 null，由 playNote 回退到 new Audio()
+        async function getAudioBuffer(filename, encodedPath) {
+            if (bufferCache.has(filename)) return bufferCache.get(filename);
+            try {
+                const response = await fetch(encodedPath);
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const arrayBuffer = await response.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                bufferCache.set(filename, audioBuffer);
+                return audioBuffer;
+            } catch (e) {
+                console.warn('音频加载失败（将回退到 Audio 对象）:', filename, e.message);
+                return null;
+            }
+        }
+
+        // 构造人声采样文件名（playNote 和预加载共用，确保命名一致）
+        // 规则：singAccidentals=false 且带升降号 → 第二套采样（re 后缀）；否则原版
+        function getSampleFilename(noteName, octave) {
+            const solfege = noteToSolfege[noteName];
+            if (!solfege) return null;
+            const hasAccidental = solfege.startsWith('#') || solfege.startsWith('♭');
+            let fn = (!singAccidentals && hasAccidental)
+                ? `${solfege}_${octave}re${AUDIO_EXT}`
+                : `${solfege}_${octave}${AUDIO_EXT}`;
+            // 升号 '#' 在 file:// 协议下经 new Audio() 加载会被误当作 URL fragment 分隔符，
+            // 导致采样加载失败；用 's'（sharp）替代 '#' 作为文件名前缀（#fa_5.mp3 → sfa_5.mp3）
+            // 降号 '♭' 非特殊字符不受影响，保持原样
+            return fn.replace(/^#/, 's');
+        }
+
+        // 预加载所有采样到 bufferCache（解决首次播放并发 fetch 导致的错乱/重叠）
+        // 仅 http:// 协议有效；file:// 下 fetch 被 CORS 阻止，跳过（playNote 回退到 new Audio）
+        async function preloadSamples(melody) {
+            const filenames = new Set();
+            melody.forEach(item => {
+                const fn = getSampleFilename(item.note, item.octave);
+                if (fn) filenames.add(fn);
+            });
+
+            const total = filenames.size;
+            if (total === 0) return;
+
+            let loaded = 0;
+            const promises = [];
+            for (const filename of filenames) {
+                const encodedPath = `音源/${encodeURIComponent(filename)}`;
+                promises.push(
+                    getAudioBuffer(filename, encodedPath).then(() => {
+                        loaded++;
+                        playbackInfo.textContent = `预加载采样 ${loaded}/${total}…`;
+                    })
+                );
+            }
+            await Promise.all(promises);
+        }
+
+        // 回退方案：用 new Audio() 播放（file:// 协议或 fetch 失败时使用）
+        function fallbackPlayAudio(encodedPath, durationSeconds) {
+            const audio = new Audio(encodedPath);
+            audio.volume = vocalVolume;
+            activeAudios.push(audio);
+            audio.play().catch(() => {});
+            setTimeout(() => {
+                const idx = activeAudios.indexOf(audio);
+                if (idx !== -1) activeAudios.splice(idx, 1);
+                try { audio.pause(); audio.src = ''; } catch(e) {}
+            }, durationSeconds * 1000);
+        }
+
+        // 播放一个音符：Web Audio API + 淡入淡出 + 重叠，消除连奏爆音
+        // 策略：前音末尾 25ms 淡出 + 后音开头 15ms 淡入 + 30ms 重叠
+        // 失败回退：fetch/decodeAudioData 失败时自动回退到 new Audio()（保证有声音）
+        function playNote(noteName, octave, durationSeconds) {
+            const solfege = noteToSolfege[noteName];
+            if (!solfege) {
+                console.warn('未找到音名映射:', noteName);
+                return;
+            }
+
+            // 人声被静音时直接跳过
+            if (vocalMuted) return;
+
+            // 文件名构造抽取到 getSampleFilename，与预加载共用，确保命名一致
+            const filename = getSampleFilename(noteName, octave);
+            const encodedPath = `音源/${encodeURIComponent(filename)}`;
+
+            // file:// 协议下 fetch 会被浏览器 CORS 阻止，直接走 new Audio() 回退
+            // （双击打开 / 手机端本地打开均走此路径；http:// 下走完整 Web Audio 路径）
+            if (!audioContext || location.protocol === 'file:') {
+                fallbackPlayAudio(encodedPath, durationSeconds);
+                return;
+            }
+
+            if (audioContext.state === 'suspended') {
+                audioContext.resume().catch(() => {});
+            }
+
+            getAudioBuffer(filename, encodedPath).then(audioBuffer => {
+                // 加载期间可能被静音
+                if (vocalMuted) return;
+
+                // Web Audio 加载失败 → 回退到 new Audio()（保证有声音）
+                if (!audioBuffer) {
+                    fallbackPlayAudio(encodedPath, durationSeconds);
+                    return;
+                }
+
+                const now = audioContext.currentTime;
+                // 实际播放时长延长 30ms，用于与下一音重叠
+                const playDuration = durationSeconds + 0.03;
+
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+
+                const gainNode = audioContext.createGain();
+                source.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                // 淡入：5ms 从 0 升到 vocalVolume（与钢琴 envelope attack 5ms 对齐，避免钢琴先响）
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(vocalVolume, now + 0.005);
+
+                // 淡出：末尾 25ms 降到 0
+                const fadeOutStart = now + playDuration - 0.025;
+                gainNode.gain.setValueAtTime(vocalVolume, fadeOutStart);
+                gainNode.gain.linearRampToValueAtTime(0, now + playDuration);
+
+                source.start(now);
+                source.stop(now + playDuration);
+
+                // 加入活跃列表（用于 stopAllAudios）
+                const entry = { source, gainNode, stopTime: now + playDuration };
+                activeSources.push(entry);
+
+                // 播放结束后自动清理
+                source.onended = () => {
+                    const idx = activeSources.indexOf(entry);
+                    if (idx !== -1) activeSources.splice(idx, 1);
+                };
+            });
+        }
+
+        function generateMelody() {
+            const scale = scales[currentKey];
+            const melody = [];
+            
+            const startMidi = midiFromNote(rangeStart);
+            const endMidi = midiFromNote(rangeEnd);
+            
+            const scaleMidiNotes = [];
+            for (let octave = Math.floor(startMidi / 12); octave <= Math.floor(endMidi / 12); octave++) {
+                for (const noteName of scale) {
+                    const noteIndex = noteNameIndex(noteName);
+                    if (noteIndex === -1) continue;
+                    const midi = noteIndex + octave * 12;
+                    if (midi >= startMidi && midi <= endMidi) {
+                        scaleMidiNotes.push(midi);
+                    }
+                }
+            }
+            
+            scaleMidiNotes.sort((a, b) => a - b);
+            
+            let startMidiNote = scaleMidiNotes[0];
+            for (const midi of scaleMidiNotes) {
+                if (midi >= startMidi) {
+                    startMidiNote = midi;
+                    break;
+                }
+            }
+            
+            let currentMidi = startMidiNote;
+
+            // 计算调性主音（取音域中点附近的主音，作为结尾音）
+            // 例如 D 大调主音为 D，结尾音应落在音域中点附近的 D 上
+            const tonicIndex = noteNameIndex(scale[0]);
+            const tonicMidiCandidates = scaleMidiNotes.filter(midi => midi % 12 === tonicIndex);
+            const midMidi = (startMidi + endMidi) / 2;
+            const tonicMidi = tonicMidiCandidates.length > 0
+                ? tonicMidiCandidates.reduce((closest, midi) =>
+                    Math.abs(midi - midMidi) < Math.abs(closest - midMidi) ? midi : closest,
+                    tonicMidiCandidates[0])
+                : scaleMidiNotes[0];
+
+            const enharmonicMap = {
+                'A#': 'Bb', 'C#': 'Db', 'D#': 'Eb', 'F#': 'Gb', 'G#': 'Ab'
+            };
+            
+            function midiToNoteEntry(midi) {
+                const noteIndex = midi % 12;
+                const rawNote = noteNames[noteIndex];
+                const octave = Math.floor(midi / 12) - 1;
+                let note = rawNote;
+                if (enharmonicMap[rawNote]) {
+                    const enharmonic = enharmonicMap[rawNote];
+                    if (scale.includes(enharmonic)) {
+                        note = enharmonic;
+                    }
+                }
+                return { note, octave };
+            }
+            
+            function getBeatModule(density) {
+                // density: 0 (最密集，多16分) ~ 1 (最稀疏，多4分/附点)
+                const patterns = [
+                    { pattern: ['4n'],                              base: 3,   type: 'sparse' }, // 四分
+                    { pattern: ['8n', '8n'],                        base: 2,   type: 'medium' }, // 两个八分
+                    { pattern: ['16n', '16n', '16n', '16n'],       base: 1.5, type: 'dense'  }, // 四个十六分
+                    { pattern: ['8n', '16n', '16n'],                base: 2,   type: 'dense'  }, // 八分+两十六分
+                    { pattern: ['16n', '16n', '8n'],                base: 2,   type: 'dense'  }, // 两十六分+八分
+                    { pattern: ['16n', '8n', '16n'],                base: 2,   type: 'dense'  }, // 十六分+八分+十六分
+                    { pattern: ['8d', '16n'],                      base: 1.5, type: 'medium' }, // 附点八分+十六分
+                ];
+                // 根据 density 调整各类权重：dense 随 density 增大而衰减，sparse 随 density 增大而增强，medium 中间最高
+                const weighted = patterns.map(p => {
+                    let mult;
+                    if (p.type === 'dense') {
+                        // density=0 → 1.0, density=1 → 0.05（几乎不出现）
+                        mult = Math.max(0.05, 1 - density * 0.95);
+                    } else if (p.type === 'sparse') {
+                        // density=0 → 0.3, density=1 → 1.7
+                        mult = 0.3 + density * 1.4;
+                    } else { // medium
+                        // density=0.5 时最高（1.3），两端衰减到 0.7
+                        mult = 0.7 + (1 - Math.abs(density - 0.5) * 2) * 0.6;
+                    }
+                    return { pattern: p.pattern, weight: p.base * mult };
+                });
+                const totalWeight = weighted.reduce((s, p) => s + p.weight, 0);
+                let r = Math.random() * totalWeight;
+                for (const p of weighted) {
+                    r -= p.weight;
+                    if (r <= 0) return p.pattern;
+                }
+                return weighted[0].pattern;
+            }
+            
+            for (let measureCount = 0; measureCount < melodyLength; measureCount++) {
+                let beat = 0;
+                while (beat < 4) {
+                    const isLastBeat = (measureCount === melodyLength - 1) && (beat === 3);
+                    
+                    if (isLastBeat) {
+                        // 最后一小节最后一拍强制停在调性主音（音域中点附近）
+                        const entry = midiToNoteEntry(tonicMidi);
+                        melody.push({ note: entry.note, octave: entry.octave, duration: '4n' });
+                        currentMidi = tonicMidi;
+                        beat++;
+                    } else if (beat <= 2 && measureCount < melodyLength - 1 && Math.random() < (0.05 + density * 0.15)) {
+                        // 2拍组合：density 极高时偶尔用 2 分音符，否则附点四分+八分
+                        const useHalfNote = density > 0.8 && Math.random() < 0.2;
+                        const twoBeatModule = useHalfNote ? ['2n'] : ['4d', '8n'];
+                        for (const duration of twoBeatModule) {
+                            currentMidi = getNextNoteMidi(scaleMidiNotes, currentMidi, leapProbability);
+                            const entry = midiToNoteEntry(currentMidi);
+                            melody.push({ note: entry.note, octave: entry.octave, duration });
+                        }
+                        beat += 2;
+                    } else {
+                        const beatModule = getBeatModule(density);
+                        for (const duration of beatModule) {
+                            currentMidi = getNextNoteMidi(scaleMidiNotes, currentMidi, leapProbability);
+                            const entry = midiToNoteEntry(currentMidi);
+                            melody.push({ note: entry.note, octave: entry.octave, duration });
+                        }
+                        beat++;
+                    }
+                }
+            }
+            
+            return melody;
+        }
+
+        function midiFromNote(note) {
+            const match = note.match(/^([A-G][#b]?)(\d+)$/);
+            if (!match) return 60;
+            const name = match[1];
+            const octave = parseInt(match[2]);
+            const index = noteNameIndex(name);
+            if (index === -1) return 60;
+            return index + (octave + 1) * 12;
+        }
+
+        function getDurationFromNoteValue(value) {
+            const durations = {
+                '16n': 0.25,
+                '8n': 0.5,
+                '8d': 0.75,
+                '4n': 1,
+                '4d': 1.5,
+                '2n': 2,
+                '1n': 4
+            };
+            return durations[value] || 1;
+        }
+
+        function getNextNoteMidi(scaleMidiNotes, currentMidi, leapProb) {
+            const currentIndex = scaleMidiNotes.indexOf(currentMidi);
+            if (currentIndex === -1) {
+                return scaleMidiNotes[Math.floor(scaleMidiNotes.length / 2)];
+            }
+
+            const rand = Math.random();
+
+            // 跳进逻辑（三度及以上音程）
+            if (rand < leapProb) {
+                // 音程权重：三度最多，七度最少
+                const intervals = [
+                    { steps: 2, weight: 0.40 },  // 三度
+                    { steps: 3, weight: 0.20 },  // 四度
+                    { steps: 4, weight: 0.20 },  // 五度
+                    { steps: 5, weight: 0.12 },  // 六度
+                    { steps: 6, weight: 0.08 },  // 七度
+                ];
+
+                // 按权重随机选择音程
+                let r = Math.random();
+                let selectedSteps = 2;
+                let cumulative = 0;
+                for (const interval of intervals) {
+                    cumulative += interval.weight;
+                    if (r <= cumulative) {
+                        selectedSteps = interval.steps;
+                        break;
+                    }
+                }
+
+                // 随机选择方向
+                const direction = Math.random() < 0.5 ? 1 : -1;
+                const targetIndex = currentIndex + direction * selectedSteps;
+
+                if (targetIndex >= 0 && targetIndex < scaleMidiNotes.length) {
+                    return scaleMidiNotes[targetIndex];
+                }
+
+                // 超出边界时尝试反方向
+                const oppositeIndex = currentIndex - direction * selectedSteps;
+                if (oppositeIndex >= 0 && oppositeIndex < scaleMidiNotes.length) {
+                    return scaleMidiNotes[oppositeIndex];
+                }
+
+                // 都超出边界，回退到级进
+                // (fall through)
+            }
+
+            // 级进逻辑
+            const up = Math.random() < 0.5;
+            if (up) {
+                if (currentIndex < scaleMidiNotes.length - 1) {
+                    return scaleMidiNotes[currentIndex + 1];
+                }
+                if (currentIndex > 0) {
+                    return scaleMidiNotes[currentIndex - 1];
+                }
+            } else {
+                if (currentIndex > 0) {
+                    return scaleMidiNotes[currentIndex - 1];
+                }
+                if (currentIndex < scaleMidiNotes.length - 1) {
+                    return scaleMidiNotes[currentIndex + 1];
+                }
+            }
+
+            return scaleMidiNotes[currentIndex];
+        }
+
+        function renderSheetMusic(melody) {
+            const container = document.getElementById('sheet-music');
+            container.innerHTML = '';
+            // 重置绿线状态（旧 <line> 随 innerHTML='' 已被清除）
+            playbackCursor = null;
+            notePositions = [];
+
+            try {
+                const Vex = VexFlow;
+                // measuresPerLine 使用全局变量（默认 2，可在「更多设置」切换为 4）
+                const beatsPerMeasure = 4;
+
+                // === 整体放大：用 ctx.scale 等比放大所有元素（符头/谱号/符干/标注），SVG 矢量不模糊 ===
+                const SCALE = 2.0;
+                const canvasWidth = 1400;           // 画布像素宽（不溢出页面）
+                const width = Math.round(canvasWidth / SCALE);  // 逻辑坐标宽（放大后填满 1400）
+                const lineHeight = 140;             // 行距（逻辑）：谱表+符干+标注，去掉多余余量
+                const topPad = 40;                  // 首行上方留白（逻辑）：容纳谱号/高音符干向上延伸
+                const lastRowHeight = 170;          // 末行内容高度（逻辑）：谱表+符干+和弦标注+底边距（实测 bbox 末行约需 166，留余量避免标注被裁切）
+                const durations = { '16n': 0.25, '8n': 0.5, '8d': 0.75, '4n': 1, '4d': 1.5, '2n': 2, '1n': 4 };
+
+                // 第一遍：按小节分组，统计每小节的音符数量
+                // 同时记录每个小节内音符的全局起始拍（供和弦标注对齐到实际切换位置）
+                const measureItemsGroups = [];
+                const measureNoteBeats = [];  // measureNoteBeats[m] = 该小节每个音符的全局起始拍数组
+                let noteIndex = 0;
+                let globalBeatAcc = 0;
+                while (noteIndex < melody.length) {
+                    const items = [];
+                    const noteBeats = [];
+                    let measureBeats = 0;
+                    while (measureBeats < beatsPerMeasure && noteIndex < melody.length) {
+                        items.push(melody[noteIndex]);
+                        noteBeats.push(globalBeatAcc);
+                        const dur = durations[melody[noteIndex].duration] || 1;
+                        measureBeats += dur;
+                        globalBeatAcc += dur;
+                        noteIndex++;
+                    }
+                    measureItemsGroups.push(items);
+                    measureNoteBeats.push(noteBeats);
+                }
+
+                const totalMeasures = measureItemsGroups.length;
+                const totalLines = Math.ceil(totalMeasures / measuresPerLine);
+                // 逻辑总高 = 首行留白 + (行数-1)*行距 + 末行内容高度；精确到末行标注底，无尾部空白
+                const height = topPad + (totalLines - 1) * lineHeight + lastRowHeight;
+
+                const renderer = new Vex.Renderer(container, Vex.Renderer.Backends.SVG);
+                renderer.resize(canvasWidth, Math.round(height * SCALE));
+
+                const ctx = renderer.getContext();
+                ctx.scale(SCALE, SCALE);  // 后续所有逻辑坐标自动按 2.0 倍放大绘制
+                ctx.setFont('Arial', 10, '').setBackgroundFillStyle('#FBF6E3');
+
+                const clef = 'treble';
+                const keySignature = getKeySignature(currentKey);
+                const availableWidth = width - 40;
+
+                // 第二遍：按音符数量比例分配宽度，绘制谱表
+                // 收集每个音符渲染后的 x/y 坐标与所属 stave，供和弦标注对齐 + 绿线指示器使用
+                notePositions = [];  // 重置模块级数组（每次重新渲染都重建）
+                for (let measureIndex = 0; measureIndex < totalMeasures; measureIndex++) {
+                    const line = Math.floor(measureIndex / measuresPerLine);
+                    const measureInLine = measureIndex % measuresPerLine;
+                    const y = topPad + line * lineHeight;
+                    
+                    // 计算当前行各小节的宽度比例（基于音符数量）
+                    const lineStart = line * measuresPerLine;
+                    const lineEnd = Math.min(lineStart + measuresPerLine, totalMeasures);
+                    const lineNoteCounts = measureItemsGroups.slice(lineStart, lineEnd).map(g => g.length);
+                    const totalNoteCount = lineNoteCounts.reduce((a, b) => a + b, 0);
+                    
+                    // 计算当前小节的 x 位置和宽度
+                    // 行首小节因有谱号+调号占用空间，额外分配固定宽度，避免挤压音符
+                    const isFirstMeasureInLine = measureInLine === 0;
+                    const CLEF_KEY_WIDTH = 80;
+                    const proportionWidth = availableWidth - CLEF_KEY_WIDTH;
+                    
+                    let x = 20;
+                    for (let i = 0; i < measureInLine; i++) {
+                        const extra = (i === 0) ? CLEF_KEY_WIDTH : 0;
+                        x += (lineNoteCounts[i] / totalNoteCount) * proportionWidth + extra;
+                    }
+                    const baseWidth = (lineNoteCounts[measureInLine] / totalNoteCount) * proportionWidth;
+                    const extraWidth = isFirstMeasureInLine ? CLEF_KEY_WIDTH : 0;
+                    const staveWidth = Math.max(50, baseWidth + extraWidth);
+                    
+                    const stave = new Vex.Stave(x, y, staveWidth);
+                    stave.setContext(ctx);
+                    
+                    // 每行行首小节添加谱号和调号
+                    if (isFirstMeasureInLine) {
+                        stave.addClef(clef).addKeySignature(keySignature);
+                        // 仅乐曲第一小节添加 4/4 拍号
+                        if (measureIndex === 0) {
+                            stave.setTimeSignature('4/4');
+                        }
+                    }
+                    
+                    // 仅乐曲最后一个小节用双纵线（终止线），其余各行末尾保持默认单纵线
+                    const isLastMeasure = measureIndex === totalMeasures - 1;
+                    if (isLastMeasure) {
+                        stave.setEndBarType(Vex.Barline.type.END);
+                    }
+                    
+                    stave.draw();
+                    
+                    // 创建当前小节的音符
+                    const items = measureItemsGroups[measureIndex];
+                    const noteBeats = measureNoteBeats[measureIndex];
+                    const measureNotes = items.map(item => {
+                        const noteName = vexflowNoteNames[item.note] || item.note;
+                        const noteStr = `${noteName}/${item.octave}`;
+                        
+                        // 使用 duration 字符串（'8d' 等附点格式由 VexFlow 自动解析 tick 计数）
+                        const note = new Vex.StaveNote({
+                            keys: [noteStr],
+                            duration: item.duration
+                        });
+                        
+                        // 附点音符：VexFlow 的 'd' 后缀只用于 tick 计算，还需手动添加视觉附点
+                        if (item.duration === '8d' || item.duration === '4d') {
+                            Vex.Dot.buildAndAttach([note], { all: true });
+                        }
+                        
+                        const noteMidi = midiFromNote(item.note + item.octave);
+                        note.setStemDirection(noteMidi > 71 ? -1 : 1);
+                        return note;
+                    });
+                    
+                    // 按拍分组，为每拍内多个带符尾的音符创建符梁（Beam）
+                    const beams = [];
+                    let beatStart = 0;
+                    let beatAccum = 0;
+                    for (let i = 0; i < items.length; i++) {
+                        beatAccum += durations[items[i].duration] || 1;
+                        // 检测是否到达整数拍边界（支持1拍和2拍组合）
+                        if (Math.abs(beatAccum - Math.round(beatAccum)) < 0.01) {
+                            const groupSize = i - beatStart + 1;
+                            if (groupSize > 1) {
+                                // 检查该拍内所有音符是否都有符尾（8分、附点8分或16分音符）
+                                const allHaveFlags = items.slice(beatStart, i + 1).every(
+                                    item => item.duration === '8n' || item.duration === '8d' || item.duration === '16n'
+                                );
+                                if (allHaveFlags) {
+                                    const beamNotes = measureNotes.slice(beatStart, i + 1);
+                                    const BeamClass = Vex.Beam || Vex.Flow.Beam;
+                                    
+                                    // 根据首尾音符音高确定符干/符梁方向
+                                    // 如果最后一个音符比第一个高 → 符梁朝上（符干朝上），符梁在符头上方
+                                    // 如果最后一个音符比第一个低 → 符梁朝下（符干朝下），符梁在符头下方
+                                    // 这样可以确保符梁不会跨越符头造成遮挡
+                                    const firstItem = items[beatStart];
+                                    const lastItem = items[i];
+                                    const firstMidi = midiFromNote(firstItem.note + firstItem.octave);
+                                    const lastMidi = midiFromNote(lastItem.note + lastItem.octave);
+                                    const beamDirection = lastMidi > firstMidi ? 1 : -1; // 1 = UP, -1 = DOWN
+                                    
+                                    // 统一设置该组所有音符的符干方向
+                                    for (const n of beamNotes) {
+                                        n.setStemDirection(beamDirection);
+                                    }
+                                    
+                                    const beam = new BeamClass(beamNotes);
+                                    
+                                    // 设置最小符干长度，确保符梁远离符头
+                                    const MIN_STEM_LENGTH = 50;
+                                    for (const n of beamNotes) {
+                                        const currentLen = n.getStemLength();
+                                        if (currentLen < MIN_STEM_LENGTH) {
+                                            n.setStemLength(MIN_STEM_LENGTH);
+                                        }
+                                        // 重新计算符头位移，确保符头在正确的一侧
+                                        n.calcNoteDisplacements();
+                                    }
+                                    
+                                    beams.push(beam);
+                                }
+                            }
+                            beatStart = i + 1;
+                            beatAccum = 0;
+                        }
+                    }
+                    
+                    // 创建 Voice 并格式化
+                    const voice = new Vex.Voice({
+                        num_beats: beatsPerMeasure,
+                        beat_value: 4
+                    });
+                    
+                    voice.setStrict(true);
+                    voice.addTickables(measureNotes);
+                    
+                    // 行首小节有谱号和调号，需用 getNoteStartX() 减去它们占用的空间
+                    // 右侧留白 30px，避免每小节最后一个音符紧贴小节线
+                    const formatterWidth = isFirstMeasureInLine 
+                        ? (x + staveWidth) - stave.getNoteStartX() - 30
+                        : staveWidth - 30;
+                    const formatter = new Vex.Formatter();
+                    formatter.format([voice], formatterWidth);
+                    voice.draw(ctx, stave);
+                    
+                    // 绘制符梁（需在 voice 绘制之后）
+                    beams.forEach(beam => {
+                        beam.setContext(ctx);
+                        beam.draw();
+                    });
+
+                    // 渲染后获取每个音符的 x/y 坐标，供和弦标注对齐 + 绿线指示器使用
+                    // y/yBottom 覆盖谱表 5 线 + 向下延伸到和弦标注（+55 与和弦标注 labelY 对齐）
+                    measureNotes.forEach((note, i) => {
+                        notePositions.push({
+                            x: note.getAbsoluteX(),
+                            stave: stave,
+                            globalBeat: noteBeats[i],
+                            y: stave.getYForLine(0) - 8,             // 谱表顶线上方 8px
+                            yBottom: stave.getYForLine(4) + 60,      // 谱表底线下方 60px（覆盖和弦标注）
+                            line: line,
+                            noteIndex: notePositions.length           // 全局音符索引（递增）
+                        });
+                    });
+                }
+
+                // === 绘制和弦级数标注（按实际和弦切换位置，对齐到对应音符 x） ===
+                // 一小节内若有多个和弦切换（含第4拍经过和弦），分别标注
+                if (currentHarmonyData && currentHarmonyData.progression) {
+                    const progression = currentHarmonyData.progression;
+                    const isMinor = typeof currentKey === 'string' && currentKey.endsWith('m');
+
+                    let moduleStartBeat = 0;
+                    for (const mod of progression) {
+                        // 在 notePositions 中找到 globalBeat === moduleStartBeat 的音符
+                        const noteData = notePositions.find(n => Math.abs(n.globalBeat - moduleStartBeat) < 0.01);
+                        if (noteData) {
+                            const label = degreeToRoman(mod.degree, isMinor, mod);
+                            if (label) {
+                                ctx.save();
+                                ctx.setFont('Arial', 13, '');
+                                ctx.setFillStyle('#555');
+                                // +55 避让符干和连线（比之前 +35 再向下约 50%）
+                                const labelY = noteData.stave.getYForLine(4) + 55;
+                                const estimatedWidth = label.length * 7;
+                                ctx.fillText(label, noteData.x - estimatedWidth / 2, labelY);
+                                ctx.restore();
+                            }
+                        }
+                        moduleStartBeat += mod.beats;
+                    }
+                }
+
+                // VexFlow 5 的 SVG backend 已用 viewBox 实现 ctx.scale 缩放：
+                //   resize(1400, H*SCALE) 设 svg 物理尺寸；ctx.scale(2.0) 设 viewBox=0 0 (1400/2.0) (H)
+                //   内容画在逻辑坐标，自动放大 2.0 倍铺满物理画布。
+                // 切勿在此覆盖 viewBox/preserveAspectRatio，否则会破坏缩放 → 内容缩在左上、右下方空白。
+                // 手机竖屏：部分移动浏览器对 SVG 的 height:auto 不按 viewBox 比例缩放（保持 height 属性值
+                //   如 1463px），而 width 被 max-width:100% 压到屏幕宽，导致 SVG 又窄又高、内容只占顶部、
+                //   下方大面积空白。此处按 viewBox 比例显式设 height 修正；桌面端（>768px）清除内联高度不受影响。
+                const svgEl = container.querySelector('svg');
+                if (svgEl) {
+                    const vb = svgEl.getAttribute('viewBox');
+                    if (vb) {
+                        const p = vb.split(/\s+/);
+                        const vbW = parseFloat(p[2]);
+                        const vbH = parseFloat(p[3]);
+                        if (vbW > 0 && vbH > 0) {
+                            const fixMobH = () => {
+                                if (window.innerWidth > 768) { svgEl.style.height = ''; return; }
+                                const w = svgEl.getBoundingClientRect().width;
+                                if (w > 0) {
+                                    svgEl.style.height = (w * vbH / vbW) + 'px';
+                                    console.log('[SVG手机端] 容器宽=' + w + ' viewBox=' + vbW + 'x' + vbH + ' 设高=' + (w * vbH / vbW).toFixed(1));
+                                }
+                            };
+                            requestAnimationFrame(fixMobH);
+                        }
+                    }
+
+                    // === 创建播放位置绿线（SVG 内 <line>，与音符同坐标系，无需转换）===
+                    // 默认 opacity=0 隐藏；movePlaybackCursor(idx) 设置坐标并显示
+                    playbackCursor = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    playbackCursor.setAttribute('id', 'playback-cursor');
+                    playbackCursor.setAttribute('stroke', '#4ade80');
+                    playbackCursor.setAttribute('stroke-width', '2');
+                    playbackCursor.setAttribute('stroke-linecap', 'round');
+                    playbackCursor.style.filter = 'drop-shadow(0 0 4px rgba(74,222,128,0.85))';
+                    playbackCursor.style.opacity = '0';
+                    playbackCursor.style.pointerEvents = 'none';
+                    playbackCursor.style.transition = 'opacity 0.15s ease';
+                    svgEl.appendChild(playbackCursor);
+                }
+
+                console.log('Sheet music rendered successfully with VexFlow');
+            } catch (error) {
+                console.error('Error rendering sheet music:', error);
+                container.innerHTML = `<div style="color: red; padding: 20px;">五线谱渲染出错: ${error.message}</div>`;
+            }
+        }
+
+        // 级数转罗马数字：大三和弦大写，小三和弦小写，减三加 °
+        // 大调：Ⅰ ⅱ ⅲ Ⅳ Ⅴ ⅵ ⅶ°
+        // 自然小调：ⅰ ⅱ° Ⅲ ⅳ ⅴ Ⅵ Ⅶ
+        function degreeToRoman(degree, isMinor, module) {
+            const majorMap = ['Ⅰ', 'ⅱ', 'ⅲ', 'Ⅳ', 'Ⅴ', 'ⅵ', 'ⅶ°'];
+            const minorMap = ['ⅰ', 'ⅱ°', 'Ⅲ', 'ⅳ', 'ⅴ', 'Ⅵ', 'Ⅶ'];
+            const idx = degree - 1;
+            if (idx < 0 || idx > 6) return '';
+            let roman = isMinor ? minorMap[idx] : majorMap[idx];
+            // K46 标注为 Ⅰ₆₄（属五六和弦前缀）
+            if (module && module.cad64) {
+                roman = roman + '₆₄';
+            }
+            // 七和弦加 7 上标
+            if (module && module.seventh) {
+                roman = roman + '⁷';
+            }
+            return roman;
+        }
+
+        function getKeySignature(key) {
+            const signatures = {
+                'C': 'C', 'G': 'G', 'D': 'D', 'A': 'A', 'E': 'E', 'B': 'B', 'F#': 'F#',
+                'F': 'F', 'Bb': 'Bb', 'Eb': 'Eb', 'Ab': 'Ab', 'Db': 'Db',
+                'Cm': 'Cm', 'Gm': 'Gm', 'Dm': 'Dm', 'Am': 'Am', 'Em': 'Em', 'Bm': 'Bm', 'F#m': 'F#m',
+                'Fm': 'Fm', 'Bbm': 'Bbm', 'Ebm': 'Ebm', 'Abm': 'Abm', 'Dbm': 'Dbm'
+            };
+            return signatures[key] || 'C';
+        }
+
+        function updateStats(melody) {
+            noteCountEl.textContent = melody.length;
+            
+            if (melody.length === 0) {
+                rangeValueEl.textContent = '-';
+                return;
+            }
+            
+            let minNote = Infinity;
+            let maxNote = -Infinity;
+            
+            melody.forEach(item => {
+                const noteIndex = noteNameIndex(item.note) + (item.octave * 12);
+                minNote = Math.min(minNote, noteIndex);
+                maxNote = Math.max(maxNote, noteIndex);
+            });
+            
+            const minOctave = Math.floor(minNote / 12);
+            const minNoteName = noteNames[minNote % 12];
+            const maxOctave = Math.floor(maxNote / 12);
+            const maxNoteName = noteNames[maxNote % 12];
+            
+            rangeValueEl.textContent = `${minNoteName}${minOctave} - ${maxNoteName}${maxOctave}`;
+        }
+
+        // 构建人声时间表（纯函数，供实时播放和离线渲染共用）
+        // 返回: [{ time, item, index, duration, filename, solfege }] 按时间递增
+        //   time: 触发时间（秒）；filename: 采样文件名；duration: 持续时间（秒）
+        // 末尾渐慢：最后一小节（4 拍）开始，速度降至原速 60%（factor 1.0 → 1.667）
+        //   曲线为 ease-in 1.5 次方（progress^1.5），前 2 拍减速明显，后 2 拍仍末端加速；
+        //   短旋律（<=4 拍）不触发。
+        function buildVocalSchedule(melody) {
+            const scale = scales[currentKey];
+            const beatDuration = 60 / tempo;
+            // 渐慢参数：最后一小节（4 拍）开始渐慢，速度降至原速 60%（factor 1.0 → 1.667）
+            // 曲线为 ease-in 二次方（progress²），开头几乎不慢，越到末尾越明显减速（"末端加速减速"）
+            const RIT_BEATS = 4;
+            const RIT_FINAL_FACTOR = 1 / 0.6;  // 1.667，即速度降至 60%
+            let totalBeats = 0;
+            for (const item of melody) totalBeats += getDurationFromNoteValue(item.duration);
+            const ritStartBeat = totalBeats > RIT_BEATS ? totalBeats - RIT_BEATS : Number.POSITIVE_INFINITY;
+            let accumulatedTime = 0;
+            let currentBeatPosition = 0;  // 实际拍位置（小数，用于推进）
+            return melody.map((item, index) => {
+                const noteBeats = getDurationFromNoteValue(item.duration);
+                // currentBeat 用整数拍位置（Math.floor），与 buildPianoSchedule 一致
+                // 否则人声有 8n(0.5拍)/16n(0.25拍)/4d(1.5拍) 等小数拍音符时，
+                // currentBeat 推进与钢琴（每拍+1）不同步，导致渐慢 factor 计算错位，
+                // 人声/钢琴 time 错开（"渐慢错开"根因，越到末尾越明显）
+                const currentBeat = Math.floor(currentBeatPosition + 1e-9);  // +1e-9 避免浮点误差
+                // 渐慢因子：progress^1.5（1.5 次 ease-in）实现末端加速减速
+                // 比 progress² 更平衡：前 2 拍减速更明显，后 2 拍仍保留末端加速感
+                let factor = 1.0;
+                if (currentBeat >= ritStartBeat) {
+                    const progress = Math.min(1, (currentBeat - ritStartBeat) / RIT_BEATS);
+                    factor = 1.0 + (RIT_FINAL_FACTOR - 1.0) * Math.pow(progress, 1.5);
+                }
+                const duration = noteBeats * beatDuration * factor;
+                const event = {
+                    time: accumulatedTime,
+                    item: item,
+                    index: index,
+                    duration: duration,
+                    filename: getSampleFilename(item.note, item.octave),
+                    solfege: getSolfege(item.note, scale)
+                };
+                accumulatedTime += duration;
+                currentBeatPosition += noteBeats;
+                return event;
+            });
+        }
+
+        async function playMelody() {
+            stopMelody();
+
+            isPlaying = true;
+            playBtn.disabled = true;
+            stopBtn.disabled = false;
+            generateBtn.disabled = true;
+            currentNoteIndex = 0;
+
+            const noteEvents = buildVocalSchedule(currentMelody);
+            const totalDuration = noteEvents.length > 0
+                ? noteEvents[noteEvents.length - 1].time + noteEvents[noteEvents.length - 1].duration
+                : 0;
+
+            startTime = Date.now();
+
+            noteTimers = [];
+
+            const scheduleNote = (event) => {
+                const timerId = setTimeout(() => {
+                    if (!isPlaying) return;
+
+                    playNote(event.item.note, event.item.octave, event.duration);
+
+                    playbackInfo.textContent = `正在播放: ${event.item.note}${event.item.octave} (${event.solfege})`;
+
+                    const progress = ((event.index + 1) / currentMelody.length) * 100;
+                    progressFill.style.width = `${progress}%`;
+                }, event.time * 1000);
+                noteTimers.push(timerId);
+                // 绿线延后 50ms 移动：实时播放链路有 ~50ms 运行时延迟（setTimeout + Web Audio
+                // 触发链路），绿线若同步触发会提前 50ms 显示（视觉与听觉不同步）。
+                // 渲染播放无此延迟，绿线查找不加偏移（见 tickRenderCursor）。
+                const cursorTimerId = setTimeout(() => {
+                    if (isPlaying) movePlaybackCursor(event.index);
+                }, event.time * 1000 + 50);
+                noteTimers.push(cursorTimerId);
+            };
+
+            noteEvents.forEach(scheduleNote);
+
+            // 和声模式下，若伴奏开关开启，同步启动钢琴伴奏
+            if (harmonyModeEnabled && accompanimentToggle.checked && currentHarmonyData && window.HarmonyMelody) {
+                HarmonyMelody.playAccompaniment(currentHarmonyData, tempo, pianoOffsetSec);
+            }
+
+            playbackTimer = setTimeout(() => {
+                if (isPlaying) {
+                    stopMelody();
+                }
+            }, totalDuration * 1000 + 500);
+        }
+
+        // === 播放位置绿线指示器控制 ===
+        // 移动绿线到第 noteIndex 个音符位置（跨行时直接跳到新行，"跳跃式"）
+        function movePlaybackCursor(noteIndex) {
+            if (!playbackCursor) return;
+            if (noteIndex < 0 || noteIndex >= notePositions.length) {
+                hidePlaybackCursor();
+                return;
+            }
+            const pos = notePositions[noteIndex];
+            playbackCursor.setAttribute('x1', pos.x);
+            playbackCursor.setAttribute('x2', pos.x);
+            playbackCursor.setAttribute('y1', pos.y);
+            playbackCursor.setAttribute('y2', pos.yBottom);
+            playbackCursor.style.opacity = '1';
+        }
+
+        function hidePlaybackCursor() {
+            if (playbackCursor) playbackCursor.style.opacity = '0';
+        }
+
+        // 渲染播放时用 <audio> 的 timeupdate 事件按 currentTime 查找当前音符位置
+        // （timeupdate 是媒体事件，浏览器在后台 tab 也会触发，比 rAF 可靠 —— rAF 在
+        //   不可见 tab 会被暂停，但音频继续播放，导致绿线卡住）
+        function startRenderCursor() {
+            cachedVocalSchedule = buildVocalSchedule(currentMelody);
+            if (!renderedAudioEl) return;
+            // 避免重复绑定（自动下一首、single 循环重播时会再调）
+            renderedAudioEl.removeEventListener('timeupdate', tickRenderCursor);
+            renderedAudioEl.addEventListener('timeupdate', tickRenderCursor);
+            // 立即同步触发一次，让绿线在播放起始就显示，不等首个 timeupdate
+            tickRenderCursor();
+        }
+
+        function tickRenderCursor() {
+            if (!renderedAudioEl || !cachedVocalSchedule || cachedVocalSchedule.length === 0) return;
+            // 渲染播放：currentTime 与采样声响严格同步（音频是预渲染的，无运行时调度延迟）
+            // 但 timeupdate 事件触发频率较低（~4Hz），绿线 x1 实际更新时刻可能滞后于声音。
+            // 加 200ms 偏移让绿线提前显示，补偿 timeupdate 触发延迟造成的视觉滞后。
+            // （实时播放的 50ms 是 setTimeout + Web Audio 触发延迟，已在 scheduleNote 单独处理）
+            const t = renderedAudioEl.currentTime + 0.20;
+            // 二分查找：找到 time <= t < time+duration 的音符
+            // 若 t 超出最后一个音符（播放结束），取最后一个音符
+            let lo = 0, hi = cachedVocalSchedule.length - 1, idx = cachedVocalSchedule.length - 1;
+            while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                const ev = cachedVocalSchedule[mid];
+                if (t < ev.time) {
+                    hi = mid - 1;
+                } else if (t >= ev.time + ev.duration) {
+                    lo = mid + 1;
+                } else {
+                    idx = mid;
+                    break;
+                }
+            }
+            if (lo > hi) idx = Math.max(0, Math.min(cachedVocalSchedule.length - 1, lo - 1));
+            movePlaybackCursor(idx);
+        }
+
+        function stopRenderCursor() {
+            if (renderedAudioEl) {
+                renderedAudioEl.removeEventListener('timeupdate', tickRenderCursor);
+            }
+        }
+
+        function stopMelody() {
+            isPlaying = false;
+            playBtn.disabled = false;
+            stopBtn.disabled = true;
+            generateBtn.disabled = false;
+
+            // 清除所有待执行的音符定时器（防止旧定时器与新播放重叠）
+            noteTimers.forEach(clearTimeout);
+            noteTimers = [];
+
+            // 停止钢琴伴奏（若启用）
+            if (window.HarmonyMelody) {
+                HarmonyMelody.stopAccompaniment();
+            }
+
+            stopAllAudios();
+
+            // 停止渲染播放（若在播放）
+            if (renderedAudioEl) {
+                renderedAudioEl.pause();
+            }
+
+            // 停止播放位置绿线
+            stopRenderCursor();
+            hidePlaybackCursor();
+
+            if (playbackTimer) {
+                clearTimeout(playbackTimer);
+                playbackTimer = null;
+            }
+
+            playbackInfo.textContent = '已停止';
+            progressFill.style.width = '0%';
+        }
+
+        // === 离线渲染：生成旋律 → WAV Blob，供 audio 元素播放（实现 iOS 锁屏播放）===
+
+        // AudioBuffer → WAV Blob（16bit PCM 交错，标准 WAV 头，供 audio 元素 / blob URL 播放）
+        function audioBufferToWav(buffer) {
+            const numChannels = buffer.numberOfChannels;
+            const sampleRate = buffer.sampleRate;
+            const numSamples = buffer.length;
+            const bitDepth = 16;
+            const blockAlign = numChannels * bitDepth / 8;
+            const byteRate = sampleRate * blockAlign;
+            const dataSize = numSamples * blockAlign;
+            const arrayBuffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(arrayBuffer);
+
+            const writeString = (offset, str) => {
+                for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+            };
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + dataSize, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);              // PCM
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitDepth, true);
+            writeString(36, 'data');
+            view.setUint32(40, dataSize, true);
+
+            const channels = [];
+            for (let ch = 0; ch < numChannels; ch++) channels.push(buffer.getChannelData(ch));
+            let offset = 44;
+            for (let i = 0; i < numSamples; i++) {
+                for (let ch = 0; ch < numChannels; ch++) {
+                    let s = Math.max(-1, Math.min(1, channels[ch][i]));
+                    s = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                    view.setInt16(offset, s, true);
+                    offset += 2;
+                }
+            }
+            return new Blob([arrayBuffer], { type: 'audio/wav' });
+        }
+
+        // 离线渲染整首旋律为 WAV Blob（人声采样 + 钢琴合成器混音）
+        // 流程：buildVocalSchedule + buildPianoSchedule → Tone.Offline 渲染钢琴 →
+        //       OfflineAudioContext 混音人声采样 → audioBufferToWav
+        // onProgress: 可选回调 (text) => void，用于报告渲染阶段
+        async function renderToAudio(onProgress) {
+            const report = (text) => { if (onProgress) onProgress(text); };
+
+            // 1. 构建时间表（与实时播放共用，保证渲染结果一致）
+            report('构建时间表…');
+            const vocalEvents = buildVocalSchedule(currentMelody);
+            let pianoEvents = [];
+            if (harmonyModeEnabled && accompanimentToggle.checked && currentHarmonyData && window.HarmonyMelody) {
+                pianoEvents = HarmonyMelody.buildPianoSchedule(currentHarmonyData, tempo, pianoOffsetSec);
+            }
+
+            // 2. 总时长 = 人声/钢琴末尾最大值 + 尾音释放余量
+            let totalDuration = 0;
+            vocalEvents.forEach(e => { totalDuration = Math.max(totalDuration, e.time + e.duration); });
+            pianoEvents.forEach(e => { totalDuration = Math.max(totalDuration, e.time + e.dur); });
+            totalDuration += 1.0;
+            const sampleRate = 44100;
+
+            // 3. Tone.Offline 渲染钢琴合成器 → Tone.AudioBuffer → 原生 AudioBuffer
+            let pianoNativeBuffer = null;
+            if (pianoEvents.length > 0 && typeof Tone !== 'undefined') {
+                report('渲染钢琴伴奏…');
+                const pianoVolumeDb = pianoMuted ? -Infinity
+                    : 20 * Math.log10(Math.max(0.001, pianoVolumePercent / 100));
+                const toneBuffer = await Tone.Offline(() => {
+                    const synth = new Tone.PolySynth(Tone.Synth, {
+                        oscillator: { type: 'triangle' },
+                        envelope: { attack: 0.005, decay: 0.4, sustain: 0.3, release: 0.3 }
+                    }).toDestination();
+                    synth.volume.value = pianoVolumeDb;
+                    for (const e of pianoEvents) {
+                        synth.triggerAttackRelease(e.freqs, e.dur, e.time);
+                    }
+                }, totalDuration, 2, sampleRate);
+                // Tone.AudioBuffer → 原生 AudioBuffer（兼容不同版本返回类型）
+                pianoNativeBuffer = (toneBuffer && typeof toneBuffer.get === 'function')
+                    ? toneBuffer.get() : toneBuffer;
+            }
+
+            // 4. OfflineAudioContext 混音：钢琴整段 + 人声采样逐个接入
+            report('混音中…');
+            const OfflineAudioCtx = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+            const renderLength = Math.ceil(totalDuration * sampleRate);
+            const offlineCtx = new OfflineAudioCtx(2, renderLength, sampleRate);
+
+            // 钢琴 buffer 整段一次性 start
+            if (pianoNativeBuffer) {
+                const pianoSource = offlineCtx.createBufferSource();
+                pianoSource.buffer = pianoNativeBuffer;
+                pianoSource.connect(offlineCtx.destination);
+                pianoSource.start(0);
+            }
+
+            // 人声采样逐个接入（带 15ms 淡入 / 25ms 淡出，复用 playNote 包络消除连奏爆音）
+            if (!vocalMuted) {
+                for (const e of vocalEvents) {
+                    if (!e.filename) continue;
+                    const buffer = bufferCache.get(e.filename);
+                    if (!buffer) continue;   // file:// 下未预加载则跳过该音
+
+                    const source = offlineCtx.createBufferSource();
+                    source.buffer = buffer;
+                    const gainNode = offlineCtx.createGain();
+                    source.connect(gainNode);
+                    gainNode.connect(offlineCtx.destination);
+
+                    const playDuration = e.duration + 0.03;
+                    const t = e.time;
+                    gainNode.gain.setValueAtTime(0, t);
+                    gainNode.gain.linearRampToValueAtTime(vocalVolume, t + 0.005);
+                    gainNode.gain.setValueAtTime(vocalVolume, t + playDuration - 0.025);
+                    gainNode.gain.linearRampToValueAtTime(0, t + playDuration);
+
+                    source.start(t);
+                    source.stop(t + playDuration);
+                }
+            }
+
+            // 5. 离线渲染
+            const mixedBuffer = await offlineCtx.startRendering();
+
+            // 6. 编码 WAV
+            report('编码 WAV…');
+            return audioBufferToWav(mixedBuffer);
+        }
+
+        async function doGenerate() {
+            // 先停止实时播放与渲染播放（避免旧音频与新旋律重叠）
+            stopMelody();
+
+            playbackInfo.textContent = '正在初始化音频...';
+            await initAudio();
+
+            // 和声模式+伴奏默认开启时，确保钢琴合成器已初始化（首次生成在用户手势内，Tone.start 可用）
+            if (harmonyModeEnabled && accompanimentToggle.checked && window.HarmonyMelody) {
+                await HarmonyMelody.initPiano();
+                HarmonyMelody.setAccompanimentEnabled(true);
+                HarmonyMelody.setPianoVolume(pianoVolumePercent);
+                HarmonyMelody.setPianoMuted(pianoMuted);
+            }
+
+            if (harmonyModeEnabled && window.HarmonyMelody) {
+                // 和声旋律模式：调用隔离模块生成
+                const result = HarmonyMelody.generateMelody({
+                    currentKey: currentKey,
+                    melodyLength: melodyLength,
+                    rangeStart: rangeStart,
+                    rangeEnd: rangeEnd,
+                    density: density,
+                    leapProbability: leapProbability
+                });
+                currentMelody = result.melody;
+                currentHarmonyData = result;  // 保存和声数据供伴奏使用
+            } else {
+                // 原随机生成路径（不受影响）
+                currentMelody = generateMelody();
+                currentHarmonyData = null;
+            }
+
+            renderSheetMusic(currentMelody);
+            updateStats(currentMelody);
+
+            // 预加载采样（解决首次播放并发 fetch 导致的错乱/重叠）
+            // http:// 下批量解码到缓存；file:// 下 fetch 被 CORS 阻止，跳过（playNote 回退到 new Audio）
+            if (audioContext && location.protocol !== 'file:') {
+                playBtn.disabled = true;
+                playbackInfo.textContent = '预加载采样中…';
+                await preloadSamples(currentMelody);
+            }
+
+            playBtn.disabled = false;
+            renderBtn.disabled = false;
+            playbackInfo.textContent = '旋律已生成，点击播放';
+        }
+
+        generateBtn.addEventListener('click', () => doGenerate());
+
+        playBtn.addEventListener('click', playMelody);
+        stopBtn.addEventListener('click', stopMelody);
+
+        // === 渲染按钮绿光圈动画（JS 驱动：按小节数自适应时长 + 90% 等待渲染完成信号）===
+        // 状态机：phase1(0→90%) → waiting(90→92% 极慢爬行) → phase2(92→100% 线性收尾) → done
+        //   - Phase 1 时长 = 小节数 × 100ms，ease-out 减速曲线（接近 90% 时已明显减速，
+        //     "在做等待动作前就已经开始缓慢减速，缓缓地到达这个等待点"）
+        //   - Waiting：渲染未完成时在 324→331.2deg 间极慢爬行，避免视觉死寂
+        //   - Phase 2：渲染完成信号触发，从当前角度线性缓慢收尾到 360deg
+        //     （"等到感应到真正的渲染完成之后，再缓慢地用这种线性动画完成闭环"）
+        //   - 渲染完成信号若在 Phase 1 期间到达，Phase 1 跑完后直接进 Phase 2（跳过等待）
+        const RING_PHASE1_END_DEG = 324;       // 90%
+        const RING_CRAWL_END_DEG = 331.2;      // 92%
+        const RING_FULL_DEG = 360;
+        const RING_PHASE2_SPEED = 36 / 400;    // deg/ms（默认 324→360 用 400ms）
+
+        const renderAnim = {
+            state: 'idle',              // idle / phase1 / waiting / phase2 / done
+            rafId: 0,
+            phase1StartTs: 0,
+            phase1Duration: 800,         // = 小节数 × 100ms（startRenderAnim 中赋值）
+            crawlStartTs: 0,
+            crawlDuration: 480,          // = phase1 × 0.6
+            phase2StartTs: 0,
+            phase2Duration: 400,
+            phase2FromDeg: RING_PHASE1_END_DEG,
+            currentDeg: 0,
+        };
+        let renderWorkDone = false;
+
+        function setRingProgress(deg) {
+            renderAnim.currentDeg = deg;
+            renderBtn.style.setProperty('--ring-progress', deg + 'deg');
+        }
+
+        function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+        function startRenderAnim(measures) {
+            const a = renderAnim;
+            // phase1 时长 = 基础（小节数 × 100ms）+ 大段额外等待
+            // 24 小节渲染耗时长，加 3s 让绿光圈晚到等待点；16 小节加 0.7s；
+            // 8/12 小节保持基础时长
+            let extra = 0;
+            if (measures === 24) extra = 3000;
+            else if (measures === 16) extra = 700;
+            a.phase1Duration = Math.max(500, measures * 100 + extra);
+            a.crawlDuration = a.phase1Duration * 0.6;
+            a.state = 'phase1';
+            a.phase1StartTs = performance.now();
+            setRingProgress(0);
+            cancelAnimationFrame(a.rafId);
+            a.rafId = requestAnimationFrame(tickRenderAnim);
+        }
+
+        function tickRenderAnim() {
+            const a = renderAnim;
+            const now = performance.now();
+            let scheduleNext = false;
+
+            if (a.state === 'phase1') {
+                const t = Math.min(1, (now - a.phase1StartTs) / a.phase1Duration);
+                const deg = RING_PHASE1_END_DEG * easeOutCubic(t);
+                setRingProgress(deg);
+                if (t >= 1) {
+                    if (renderWorkDone) {
+                        enterPhase2(RING_PHASE1_END_DEG);  // 渲染已提前完成，直接收尾
+                        return;
+                    }
+                    a.state = 'waiting';
+                    a.crawlStartTs = now;
+                    // fall through：同帧跑一次 waiting，过渡更平滑
+                } else {
+                    scheduleNext = true;
+                }
+            }
+
+            if (a.state === 'waiting') {
+                const t = Math.min(1, (now - a.crawlStartTs) / a.crawlDuration);
+                const deg = RING_PHASE1_END_DEG + (RING_CRAWL_END_DEG - RING_PHASE1_END_DEG) * t;
+                setRingProgress(deg);
+                if (renderWorkDone) {
+                    enterPhase2(deg);
+                    return;
+                }
+                if (t < 1) scheduleNext = true;
+                // 爬完仍等 renderWorkDone：停在 RING_CRAWL_END_DEG 不动，不调度下一帧
+            } else if (a.state === 'phase2') {
+                const t = Math.min(1, (now - a.phase2StartTs) / a.phase2Duration);
+                const deg = a.phase2FromDeg + (RING_FULL_DEG - a.phase2FromDeg) * t;  // 线性
+                setRingProgress(deg);
+                if (t >= 1) {
+                    a.state = 'done';
+                    tryFinishRender();
+                    return;
+                }
+                scheduleNext = true;
+            }
+
+            if (scheduleNext) {
+                a.rafId = requestAnimationFrame(tickRenderAnim);
+            }
+        }
+
+        function enterPhase2(fromDeg) {
+            const a = renderAnim;
+            a.state = 'phase2';
+            a.phase2StartTs = performance.now();
+            a.phase2FromDeg = fromDeg;
+            // 保持线性速度恒定：324→360 默认 400ms，距离按比例缩放
+            const remainingDeg = RING_FULL_DEG - fromDeg;
+            a.phase2Duration = Math.max(150, remainingDeg / RING_PHASE2_SPEED);
+            cancelAnimationFrame(a.rafId);
+            a.rafId = requestAnimationFrame(tickRenderAnim);
+        }
+
+        function notifyRenderDone() {
+            renderWorkDone = true;
+            // 若 waiting 已停在 331deg 等待，重启 raf 触发进 phase2
+            // 若 phase1 还在跑，tick 会在跑完后自动检查
+            if (renderAnim.state === 'waiting') {
+                cancelAnimationFrame(renderAnim.rafId);
+                renderAnim.rafId = requestAnimationFrame(tickRenderAnim);
+            }
+        }
+
+        function abortRenderAnim() {
+            cancelAnimationFrame(renderAnim.rafId);
+            renderAnim.state = 'idle';
+            setRingProgress(0);
+        }
+
+        function tryFinishRender() {
+            if (renderAnim.state === 'done' && renderWorkDone && renderBtn.classList.contains('rendering')) {
+                cancelAnimationFrame(renderAnim.rafId);
+                renderBtn.classList.remove('rendering');
+                renderBtn.disabled = false;
+                playBtn.disabled = false;
+                generateBtn.disabled = false;
+                setRingProgress(0);
+                renderAnim.state = 'idle';
+                // phase2 完成 = 绿光圈已平滑滑到 12 点；现在开始播放音频，
+                // 让"光圈转完"与"音频响起"视觉同步（避免光圈没转完就提前播放）
+                if (renderedAudioEl) {
+                    renderInfo.textContent = '播放中（可锁屏继续）…';
+                    // 立即同步启动绿线（不依赖 play 的 promise，避免 promise 未 resolve 时绿线不显示）
+                    startRenderCursor();
+                    renderedAudioEl.play().catch(err => {
+                        console.warn('渲染播放失败:', err);
+                        renderInfo.textContent = '播放失败: ' + err.message;
+                        stopRenderCursor();
+                        hidePlaybackCursor();
+                    });
+                }
+            }
+        }
+
+        // === 渲染播放：离线渲染为 WAV Blob，用 audio 元素播放（实现 iOS 锁屏播放）===
+        async function doRender() {
+            if (!currentMelody || currentMelody.length === 0) return;
+
+            // 停止实时播放（避免和渲染播放重叠）
+            stopMelody();
+
+            renderBtn.disabled = true;
+            playBtn.disabled = true;
+            generateBtn.disabled = true;
+            renderInfo.style.display = 'block';
+            renderBtn.classList.add('rendering');  // 启动绿光圈动画
+            renderWorkDone = false;   // 重置渲染完成信号
+            // 启动 JS 驱动动画：Phase 1 时长按小节数等比例（100ms/小节，最小 500ms）
+            startRenderAnim(melodyLength);
+
+            try {
+                await initAudio();
+
+                // 确保采样已预加载（http:// 下；file:// 下跳过，渲染只有钢琴）
+                if (audioContext && location.protocol !== 'file:') {
+                    renderInfo.textContent = '预加载采样…';
+                    await preloadSamples(currentMelody);
+                }
+
+                // 离线渲染（进度回调实时更新文字）
+                const wavBlob = await renderToAudio((text) => {
+                    renderInfo.textContent = text;
+                });
+
+                // 释放上一次的 blob URL，避免内存泄漏
+                if (renderedBlobUrl) {
+                    URL.revokeObjectURL(renderedBlobUrl);
+                }
+                renderedBlobUrl = URL.createObjectURL(wavBlob);
+
+                // ★ 复用 Audio 元素：首次在用户手势内创建并"解锁"，后续（自动下一首等
+                //   无手势场景）只改 src。每次 new Audio() 创建的新元素在无手势场景下
+                //   play() 会抛 NotAllowedError，复用已解锁元素即可规避此问题。
+                ensureRenderedAudioEl();
+                renderedAudioEl.pause();
+                renderedAudioEl.src = renderedBlobUrl;
+
+                // Media Session 元数据：每曲更新（actionHandler 等在 ensure 时只注册一次）
+                if ('mediaSession' in navigator) {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: `视唱旋律 (${currentKey} 调)`,
+                        artist: '视唱练耳',
+                        album: 'Singing Trainer'
+                    });
+                    navigator.mediaSession.playbackState = 'playing';
+                }
+
+                renderInfo.textContent = '渲染完成，等待光圈转完…';
+                // 提前注册 onended（phase2 完成后由 tryFinishRender 启动 play）
+                renderedAudioEl.onended = handlePlaybackEnded;
+
+                // 渲染工作完成，通知动画系统进入 Phase 2 收尾
+                // play() 推迟到 phase2 完成（绿光圈转到 12 点）后由 tryFinishRender 触发，
+                // 让"光圈转完"与"音频响起"同步，避免光圈还没转完就开始播放
+                renderWorkDone = true;
+                notifyRenderDone();
+                tryFinishRender();
+            } catch (e) {
+                console.error('渲染失败:', e);
+                renderInfo.textContent = '渲染失败: ' + e.message;
+                abortRenderAnim();
+                renderBtn.classList.remove('rendering');
+                renderBtn.disabled = false;
+                playBtn.disabled = false;
+                generateBtn.disabled = false;
+            }
+        }
+
+        // 首次创建渲染 Audio 元素并配置 MediaSession（只执行一次，后续 doRender 复用元素）
+        // 关键：必须在用户手势内首次创建并 play() 过，元素才算"解锁"，
+        // 后续无手势场景（自动下一首）只改 src 再 play() 才不会抛 NotAllowedError。
+        function ensureRenderedAudioEl() {
+            if (renderedAudioEl) return;
+            renderedAudioEl = new Audio();
+
+            if (!('mediaSession' in navigator)) return;
+
+            // Media Session API：iOS 锁屏显示播放控件
+            // 增强：1) 可拖动进度条（seekto + positionState 实时更新）
+            //       2) 上一首/下一首键实际为「倒退5秒/前进5秒」（previoustrack/nexttrack，兼容 AirPods 双击耳机）
+            //       3) 不注册 seekbackward/seekforward → 锁屏显示上一首/下一首图标（非倒退/快进）
+            const updatePositionState = () => {
+                if (!renderedAudioEl) return;
+                const dur = renderedAudioEl.duration;
+                if (!isFinite(dur) || dur <= 0) return;  // 元数据未加载时不更新
+                try {
+                    navigator.mediaSession.setPositionState({
+                        duration: dur,
+                        playbackRate: renderedAudioEl.playbackRate || 1,
+                        position: Math.min(renderedAudioEl.currentTime, dur)
+                    });
+                } catch (e) { /* 部分浏览器对非法值会抛错，忽略 */ }
+            };
+
+            navigator.mediaSession.setActionHandler('play', () => {
+                if (renderedAudioEl) renderedAudioEl.play();
+                navigator.mediaSession.playbackState = 'playing';
+            });
+            navigator.mediaSession.setActionHandler('pause', () => {
+                if (renderedAudioEl) renderedAudioEl.pause();
+                navigator.mediaSession.playbackState = 'paused';
+                updatePositionState();
+            });
+            navigator.mediaSession.setActionHandler('previoustrack', () => {
+                if (renderedAudioEl) {
+                    renderedAudioEl.currentTime = Math.max(0, renderedAudioEl.currentTime - 5);
+                }
+                updatePositionState();
+            });
+            navigator.mediaSession.setActionHandler('nexttrack', () => {
+                if (renderedAudioEl) {
+                    const dur = renderedAudioEl.duration || 0;
+                    renderedAudioEl.currentTime = Math.min(dur, renderedAudioEl.currentTime + 5);
+                }
+                updatePositionState();
+            });
+            navigator.mediaSession.setActionHandler('seekto', (details) => {
+                if (!renderedAudioEl) return;
+                if (details.fastSeek && 'fastSeek' in renderedAudioEl) {
+                    renderedAudioEl.fastSeek(details.seekTime);
+                } else {
+                    renderedAudioEl.currentTime = details.seekTime;
+                }
+                updatePositionState();
+            });
+
+            // 用 onXXX 赋值（覆盖式），避免每次 doRender addEventListener 累积监听器
+            renderedAudioEl.onloadedmetadata = updatePositionState;
+            renderedAudioEl.ontimeupdate = updatePositionState;
+        }
+
+        renderBtn.addEventListener('click', () => doRender());
+
+        // === 渲染播放结束后的循环逻辑（按 loopMode 分流）===
+        // 'none'：什么都不做；'single'：停 2 秒后重播同一首；'auto-next'：自动生成下一首 + 渲染 + 播放
+        function handlePlaybackEnded() {
+            renderInfo.textContent = '播放结束';
+            // 停止绿线 rAF；不循环时隐藏绿线，循环时保留以便重播
+            stopRenderCursor();
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'none';
+                // 进度归零，便于下次重播从 0 开始
+                try {
+                    navigator.mediaSession.setPositionState({
+                        duration: renderedAudioEl ? renderedAudioEl.duration || 0 : 0,
+                        playbackRate: 1,
+                        position: 0
+                    });
+                } catch (e) {}
+            }
+            if (loopMode === 'single') {
+                renderInfo.textContent = '2 秒后重播（单曲循环）…';
+                setTimeout(() => {
+                    // 2 秒内用户可能切换模式或开始实时播放，重播前检查
+                    if (loopMode !== 'single' || isPlaying || !renderedAudioEl) return;
+                    renderedAudioEl.currentTime = 0;
+                    renderedAudioEl.play().catch(() => {});
+                    renderInfo.textContent = '重播中（单曲循环）…';
+                    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+                    // 重启绿线 rAF（cachedVocalSchedule 已缓存，直接复用）
+                    startRenderCursor();
+                }, 2000);
+            } else if (loopMode === 'auto-next') {
+                renderInfo.textContent = '自动生成下一首并渲染…';
+                playNextTrack();
+            } else {
+                // 不循环：绿线归零并隐藏
+                hidePlaybackCursor();
+            }
+        }
+
+        // 自动下一首：串行调 doGenerate → doRender，渲染完会自动播放并设新 onended 形成循环
+        async function playNextTrack() {
+            try {
+                await doGenerate();
+                if (!currentMelody || currentMelody.length === 0) return;
+                await doRender();
+            } catch (e) {
+                console.error('自动下一首失败:', e);
+                renderInfo.textContent = '自动下一首失败: ' + e.message;
+            }
+        }
+    </script>
+</body>
+</html>
