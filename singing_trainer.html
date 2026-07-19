@@ -2237,7 +2237,15 @@
             if (typeof Tone !== 'undefined') {
                 Tone.start();
             }
-            // 播放一个极短的静音来确保解锁
+            // ★ 关键：在用户手势内立即播放静音来解锁 Audio 元素
+            //   一旦 Audio 元素在手势内成功播放过一次，后续只改 src 再 play() 就不会被拒绝
+            //   使用预定义的 base64 静音 WAV（44字节，1个样本），确保同步播放
+            ensureRenderedAudioEl();
+            const silentWavBase64 = 'data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleQk=';
+            renderedAudioEl.src = silentWavBase64;
+            renderedAudioEl.play().catch(() => {});
+            
+            // 播放一个极短的静音来确保 Web Audio 上下文也被激活
             if (audioContext) {
                 const osc = audioContext.createOscillator();
                 const gain = audioContext.createGain();
