@@ -6,19 +6,18 @@
 
 ```
 singing-trainer/
-├── deploy/                  # 部署目录（可直接运行）
-│   ├── singing_trainer.html # 主页面 - 唱歌训练器
-│   ├── harmony_melody.js    # 和声与旋律生成逻辑
-│   ├── vexflow.js           # VexFlow 音乐记谱库
-│   └── 音源/                # 唱名音源文件（MP3）
-│       ├── do_4.mp3
-│       ├── re_4.mp3
-│       ├── mi_4.mp3
-│       ├── fa_4.mp3
-│       ├── sol_4.mp3
-│       ├── la_4.mp3
-│       └── si_4.mp3
-│       ... (含升降记号变体)
+├── singing_trainer.html     # 主页面 - 唱歌训练器（GitHub Pages 根目录）
+├── harmony_melody.js        # 和声与旋律生成逻辑
+├── vexflow.js               # VexFlow 音乐记谱库
+├── 音源/                    # 唱名音源文件（MP3）
+│   ├── do_4.mp3
+│   ├── re_4.mp3
+│   ├── mi_4.mp3
+│   ├── fa_4.mp3
+│   ├── sol_4.mp3
+│   ├── la_4.mp3
+│   └── si_4.mp3
+│   ... (含升降记号变体)
 └── README.md
 ```
 
@@ -31,7 +30,17 @@ singing-trainer/
 
 ## 使用方法
 
-直接在浏览器中打开 `deploy/singing_trainer.html` 即可使用：
+### 在线访问（推荐）
+
+直接在浏览器中打开 GitHub Pages 部署地址：
+
+**https://3094863155com-ctrl.github.io/singing-trainer/singing_trainer.html**
+
+手机端直接复制以上链接到浏览器即可使用（建议使用 Chrome 或 Safari）。
+
+### 本地运行
+
+克隆仓库后直接在浏览器中打开 `singing_trainer.html`：
 
 ```bash
 # 克隆仓库
@@ -41,8 +50,14 @@ git clone https://github.com/3094863155com-ctrl/singing-trainer.git
 cd singing-trainer
 
 # 用浏览器打开主页面
-open deploy/singing_trainer.html
+open singing_trainer.html
 ```
+
+> **注意**：本地 file:// 协议下可能无法加载人声采样（CORS 限制），建议使用 HTTP 服务器运行：
+> ```bash
+> python3 -m http.server 8000
+> # 然后访问 http://localhost:8000/singing_trainer.html
+> ```
 
 ## 技术栈
 
