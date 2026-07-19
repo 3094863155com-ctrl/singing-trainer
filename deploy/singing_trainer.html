@@ -398,9 +398,7 @@
             </div>
 
             <button class="btn btn-primary" id="generate-btn">🎲 生成旋律</button>
-            <button class="btn btn-secondary" id="play-btn" disabled>▶️ 播放</button>
-            <button class="btn btn-secondary" id="stop-btn" disabled>⏹️ 停止</button>
-            <button class="btn btn-secondary" id="render-btn" disabled>🎧 渲染播放</button>
+            <button class="btn btn-secondary" id="render-btn" disabled>🎧 播放</button>
             <button class="btn btn-secondary" id="loop-mode-btn" title="循环模式：点击切换">🔁 不循环</button>
         </div>
 
@@ -614,11 +612,7 @@
         let rangeStart = 'C4';
         let rangeEnd = 'E5';
         let currentMelody = [];
-        let isPlaying = false;
-        let playbackTimer = null;
-        let noteTimers = [];
-        let currentNoteIndex = 0;
-        let startTime = 0;
+        // （已删除实时播放状态：isPlaying/playbackTimer/noteTimers/currentNoteIndex/startTime）
 
         // === 播放位置绿线指示器（实时播放 + 渲染播放共用） ===
         // notePositions: 每个音符在 SVG 中的坐标信息，renderSheetMusic 渲染时收集
@@ -627,11 +621,9 @@
         let notePositions = [];            // [{ x, y, yBottom, line, noteIndex }]
         let playbackCursor = null;         // SVG <line> 元素
         let cachedVocalSchedule = null;    // 缓存 buildVocalSchedule 输出，渲染播放时按 currentTime 查找
-        let activeAudios = [];
-        // Web Audio API 相关：用于爆音修复（淡入淡出 + 重叠）
+        // Web Audio API 相关：audioContext 解码采样；bufferCache 缓存采样供 renderToAudio 离线混音使用
         let audioContext = null;
         const bufferCache = new Map();  // filename → AudioBuffer
-        let activeSources = [];          // { source, gainNode, stopTime }
 
         const keySelect = document.getElementById('key-select');
         const lengthSelect = document.getElementById('length-select');
@@ -640,8 +632,6 @@
         const rangeStartSelect = document.getElementById('range-start');
         const rangeEndSelect = document.getElementById('range-end');
         const generateBtn = document.getElementById('generate-btn');
-        const playBtn = document.getElementById('play-btn');
-        const stopBtn = document.getElementById('stop-btn');
         const renderBtn = document.getElementById('render-btn');
         const renderInfo = document.getElementById('render-info');
         const playbackInfo = document.getElementById('playback-info');
@@ -761,10 +751,8 @@
         vocalMuteBtn.addEventListener('click', () => {
             vocalMuted = !vocalMuted;
             vocalMuteBtn.textContent = vocalMuted ? '🔇' : '🔊';
-            // 静音时立即停掉当前正在播放的人声音频
-            if (vocalMuted) {
-                stopAllAudios();
-            }
+            // 静音只影响下一次渲染（renderToAudio 内部 if (!vocalMuted) 判断）；
+            // 当前已渲染的音频不受影响，需重新点"播放"才会静音
         });
 
         // === "唱出升降号" 开关 ===
@@ -954,34 +942,7 @@
             return Promise.resolve();
         }
 
-        function loadSamples() {
-            playBtn.disabled = false;
-            return Promise.resolve();
-        }
-
-        function stopAllAudios() {
-            // 停止旧 Audio 对象（兼容遗留）
-            activeAudios.forEach(audio => {
-                try {
-                    audio.pause();
-                    audio.src = '';
-                } catch(e) {}
-            });
-            activeAudios = [];
-            // 停止 Web Audio SourceNode：快速淡出避免点击声
-            if (audioContext) {
-                const now = audioContext.currentTime;
-                activeSources.forEach(item => {
-                    try {
-                        item.gainNode.gain.cancelScheduledValues(now);
-                        item.gainNode.gain.setValueAtTime(item.gainNode.gain.value, now);
-                        item.gainNode.gain.linearRampToValueAtTime(0, now + 0.01);
-                        item.source.stop(now + 0.02);
-                    } catch(e) {}
-                });
-            }
-            activeSources = [];
-        }
+        // （已删除 loadSamples + stopAllAudios：实时播放相关辅助函数，渲染播放不使用）
 
         function getSolfege(noteName, scale) {
             const index = scale.indexOf(noteName);
@@ -992,7 +953,7 @@
         }
 
         // 异步加载音频缓冲（带缓存）
-        // 失败情形（file:// 协议、CORS、404、解码失败）返回 null，由 playNote 回退到 new Audio()
+        // 失败情形（file:// 协议、CORS、404、解码失败）返回 null；渲染播放无回退，该采样会被跳过
         async function getAudioBuffer(filename, encodedPath) {
             if (bufferCache.has(filename)) return bufferCache.get(filename);
             try {
@@ -1010,7 +971,7 @@
             }
         }
 
-        // 构造人声采样文件名（playNote 和预加载共用，确保命名一致）
+        // 构造人声采样文件名（供预加载和渲染混音共用，确保命名一致）
         // 规则：singAccidentals=false 且带升降号 → 第二套采样（re 后缀）；否则原版
         function getSampleFilename(noteName, octave) {
             const solfege = noteToSolfege[noteName];
@@ -1026,7 +987,7 @@
         }
 
         // 预加载所有采样到 bufferCache（解决首次播放并发 fetch 导致的错乱/重叠）
-        // 仅 http:// 协议有效；file:// 下 fetch 被 CORS 阻止，跳过（playNote 回退到 new Audio）
+        // 仅 http:// 协议有效；file:// 下 fetch 被 CORS 阻止，跳过（渲染播放里该采样会被跳过）
         async function preloadSamples(melody) {
             const filenames = new Set();
             melody.forEach(item => {
@@ -1051,91 +1012,7 @@
             await Promise.all(promises);
         }
 
-        // 回退方案：用 new Audio() 播放（file:// 协议或 fetch 失败时使用）
-        function fallbackPlayAudio(encodedPath, durationSeconds) {
-            const audio = new Audio(encodedPath);
-            audio.volume = vocalVolume;
-            activeAudios.push(audio);
-            audio.play().catch(() => {});
-            setTimeout(() => {
-                const idx = activeAudios.indexOf(audio);
-                if (idx !== -1) activeAudios.splice(idx, 1);
-                try { audio.pause(); audio.src = ''; } catch(e) {}
-            }, durationSeconds * 1000);
-        }
-
-        // 播放一个音符：Web Audio API + 淡入淡出 + 重叠，消除连奏爆音
-        // 策略：前音末尾 25ms 淡出 + 后音开头 15ms 淡入 + 30ms 重叠
-        // 失败回退：fetch/decodeAudioData 失败时自动回退到 new Audio()（保证有声音）
-        function playNote(noteName, octave, durationSeconds) {
-            const solfege = noteToSolfege[noteName];
-            if (!solfege) {
-                console.warn('未找到音名映射:', noteName);
-                return;
-            }
-
-            // 人声被静音时直接跳过
-            if (vocalMuted) return;
-
-            // 文件名构造抽取到 getSampleFilename，与预加载共用，确保命名一致
-            const filename = getSampleFilename(noteName, octave);
-            const encodedPath = `音源/${encodeURIComponent(filename)}`;
-
-            // file:// 协议下 fetch 会被浏览器 CORS 阻止，直接走 new Audio() 回退
-            // （双击打开 / 手机端本地打开均走此路径；http:// 下走完整 Web Audio 路径）
-            if (!audioContext || location.protocol === 'file:') {
-                fallbackPlayAudio(encodedPath, durationSeconds);
-                return;
-            }
-
-            if (audioContext.state === 'suspended') {
-                audioContext.resume().catch(() => {});
-            }
-
-            getAudioBuffer(filename, encodedPath).then(audioBuffer => {
-                // 加载期间可能被静音
-                if (vocalMuted) return;
-
-                // Web Audio 加载失败 → 回退到 new Audio()（保证有声音）
-                if (!audioBuffer) {
-                    fallbackPlayAudio(encodedPath, durationSeconds);
-                    return;
-                }
-
-                const now = audioContext.currentTime;
-                // 实际播放时长延长 30ms，用于与下一音重叠
-                const playDuration = durationSeconds + 0.03;
-
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-
-                const gainNode = audioContext.createGain();
-                source.connect(gainNode);
-                gainNode.connect(audioContext.destination);
-
-                // 淡入：5ms 从 0 升到 vocalVolume（与钢琴 envelope attack 5ms 对齐，避免钢琴先响）
-                gainNode.gain.setValueAtTime(0, now);
-                gainNode.gain.linearRampToValueAtTime(vocalVolume, now + 0.005);
-
-                // 淡出：末尾 25ms 降到 0
-                const fadeOutStart = now + playDuration - 0.025;
-                gainNode.gain.setValueAtTime(vocalVolume, fadeOutStart);
-                gainNode.gain.linearRampToValueAtTime(0, now + playDuration);
-
-                source.start(now);
-                source.stop(now + playDuration);
-
-                // 加入活跃列表（用于 stopAllAudios）
-                const entry = { source, gainNode, stopTime: now + playDuration };
-                activeSources.push(entry);
-
-                // 播放结束后自动清理
-                source.onended = () => {
-                    const idx = activeSources.indexOf(entry);
-                    if (idx !== -1) activeSources.splice(idx, 1);
-                };
-            });
-        }
+        // （已删除 playNote + fallbackPlayAudio：实时播放人声采样相关，渲染播放走 renderToAudio 离线混音）
 
         function generateMelody() {
             const scale = scales[currentKey];
@@ -1719,13 +1596,14 @@
         // 返回: [{ time, item, index, duration, filename, solfege }] 按时间递增
         //   time: 触发时间（秒）；filename: 采样文件名；duration: 持续时间（秒）
         // 末尾渐慢：最后一小节（4 拍）开始，速度降至原速 60%（factor 1.0 → 1.667）
-        //   曲线为 ease-in 1.5 次方（progress^1.5），前 2 拍减速明显，后 2 拍仍末端加速；
+        //   曲线为 ease-in 1.5 次方（progress^1.5）：前 2 拍减速较少（约 19%），后 2 拍减速
+        //   明显（约 40%），末端加速感强（后/前变化比 ≈ 2.09，传统渐慢听感）；
         //   短旋律（<=4 拍）不触发。
         function buildVocalSchedule(melody) {
             const scale = scales[currentKey];
             const beatDuration = 60 / tempo;
             // 渐慢参数：最后一小节（4 拍）开始渐慢，速度降至原速 60%（factor 1.0 → 1.667）
-            // 曲线为 ease-in 二次方（progress²），开头几乎不慢，越到末尾越明显减速（"末端加速减速"）
+            // 曲线为 ease-in 1.5 次方（progress^1.5）：前 2 拍减速少，后 2 拍减速明显（末端加速感）
             const RIT_BEATS = 4;
             const RIT_FINAL_FACTOR = 1 / 0.6;  // 1.667，即速度降至 60%
             let totalBeats = 0;
@@ -1740,8 +1618,8 @@
                 // currentBeat 推进与钢琴（每拍+1）不同步，导致渐慢 factor 计算错位，
                 // 人声/钢琴 time 错开（"渐慢错开"根因，越到末尾越明显）
                 const currentBeat = Math.floor(currentBeatPosition + 1e-9);  // +1e-9 避免浮点误差
-                // 渐慢因子：progress^1.5（1.5 次 ease-in）实现末端加速减速
-                // 比 progress² 更平衡：前 2 拍减速更明显，后 2 拍仍保留末端加速感
+                // 渐慢因子：progress^1.5（1.5 次 ease-in）实现前少后多的传统渐慢
+                // 前 2 拍减速约 19%，后 2 拍减速约 40%（末端加速感强，后/前比 ≈ 2.09）
                 let factor = 1.0;
                 if (currentBeat >= ritStartBeat) {
                     const progress = Math.min(1, (currentBeat - ritStartBeat) / RIT_BEATS);
@@ -1760,59 +1638,6 @@
                 currentBeatPosition += noteBeats;
                 return event;
             });
-        }
-
-        async function playMelody() {
-            stopMelody();
-
-            isPlaying = true;
-            playBtn.disabled = true;
-            stopBtn.disabled = false;
-            generateBtn.disabled = true;
-            currentNoteIndex = 0;
-
-            const noteEvents = buildVocalSchedule(currentMelody);
-            const totalDuration = noteEvents.length > 0
-                ? noteEvents[noteEvents.length - 1].time + noteEvents[noteEvents.length - 1].duration
-                : 0;
-
-            startTime = Date.now();
-
-            noteTimers = [];
-
-            const scheduleNote = (event) => {
-                const timerId = setTimeout(() => {
-                    if (!isPlaying) return;
-
-                    playNote(event.item.note, event.item.octave, event.duration);
-
-                    playbackInfo.textContent = `正在播放: ${event.item.note}${event.item.octave} (${event.solfege})`;
-
-                    const progress = ((event.index + 1) / currentMelody.length) * 100;
-                    progressFill.style.width = `${progress}%`;
-                }, event.time * 1000);
-                noteTimers.push(timerId);
-                // 绿线延后 50ms 移动：实时播放链路有 ~50ms 运行时延迟（setTimeout + Web Audio
-                // 触发链路），绿线若同步触发会提前 50ms 显示（视觉与听觉不同步）。
-                // 渲染播放无此延迟，绿线查找不加偏移（见 tickRenderCursor）。
-                const cursorTimerId = setTimeout(() => {
-                    if (isPlaying) movePlaybackCursor(event.index);
-                }, event.time * 1000 + 50);
-                noteTimers.push(cursorTimerId);
-            };
-
-            noteEvents.forEach(scheduleNote);
-
-            // 和声模式下，若伴奏开关开启，同步启动钢琴伴奏
-            if (harmonyModeEnabled && accompanimentToggle.checked && currentHarmonyData && window.HarmonyMelody) {
-                HarmonyMelody.playAccompaniment(currentHarmonyData, tempo, pianoOffsetSec);
-            }
-
-            playbackTimer = setTimeout(() => {
-                if (isPlaying) {
-                    stopMelody();
-                }
-            }, totalDuration * 1000 + 500);
         }
 
         // === 播放位置绿线指示器控制 ===
@@ -1880,22 +1705,12 @@
             }
         }
 
+        // 停止所有播放（渲染播放 audio + 钢琴伴奏 + UI 绿线），用于 doGenerate/doRender 启动前清理
         function stopMelody() {
-            isPlaying = false;
-            playBtn.disabled = false;
-            stopBtn.disabled = true;
-            generateBtn.disabled = false;
-
-            // 清除所有待执行的音符定时器（防止旧定时器与新播放重叠）
-            noteTimers.forEach(clearTimeout);
-            noteTimers = [];
-
             // 停止钢琴伴奏（若启用）
             if (window.HarmonyMelody) {
                 HarmonyMelody.stopAccompaniment();
             }
-
-            stopAllAudios();
 
             // 停止渲染播放（若在播放）
             if (renderedAudioEl) {
@@ -1905,11 +1720,6 @@
             // 停止播放位置绿线
             stopRenderCursor();
             hidePlaybackCursor();
-
-            if (playbackTimer) {
-                clearTimeout(playbackTimer);
-                playbackTimer = null;
-            }
 
             playbackInfo.textContent = '已停止';
             progressFill.style.width = '0%';
@@ -1964,16 +1774,18 @@
         // 离线渲染整首旋律为 WAV Blob（人声采样 + 钢琴合成器混音）
         // 流程：buildVocalSchedule + buildPianoSchedule → Tone.Offline 渲染钢琴 →
         //       OfflineAudioContext 混音人声采样 → audioBufferToWav
+        // melody/harmonyData 通过参数传入（不依赖全局 currentMelody/currentHarmonyData），
+        //   让预渲染队列可并行渲染"下一首"而不污染当前播放状态
         // onProgress: 可选回调 (text) => void，用于报告渲染阶段
-        async function renderToAudio(onProgress) {
+        async function renderToAudio(melody, harmonyData, onProgress) {
             const report = (text) => { if (onProgress) onProgress(text); };
 
             // 1. 构建时间表（与实时播放共用，保证渲染结果一致）
             report('构建时间表…');
-            const vocalEvents = buildVocalSchedule(currentMelody);
+            const vocalEvents = buildVocalSchedule(melody);
             let pianoEvents = [];
-            if (harmonyModeEnabled && accompanimentToggle.checked && currentHarmonyData && window.HarmonyMelody) {
-                pianoEvents = HarmonyMelody.buildPianoSchedule(currentHarmonyData, tempo, pianoOffsetSec);
+            if (harmonyModeEnabled && accompanimentToggle.checked && harmonyData && window.HarmonyMelody) {
+                pianoEvents = HarmonyMelody.buildPianoSchedule(harmonyData, tempo, pianoOffsetSec);
             }
 
             // 2. 总时长 = 人声/钢琴末尾最大值 + 尾音释放余量
@@ -2051,9 +1863,30 @@
             return audioBufferToWav(mixedBuffer);
         }
 
+        // 生成新旋律数据（不更新 UI / 不替换全局 currentMelody），返回 { melody, harmonyData }
+        // 供 doGenerate（赋值给全局）和 prepareNextTrack（缓存到 nextTrackCache）共用
+        function generateNewMelodyData() {
+            if (harmonyModeEnabled && window.HarmonyMelody) {
+                // 和声旋律模式：调用隔离模块生成
+                const result = HarmonyMelody.generateMelody({
+                    currentKey: currentKey,
+                    melodyLength: melodyLength,
+                    rangeStart: rangeStart,
+                    rangeEnd: rangeEnd,
+                    density: density,
+                    leapProbability: leapProbability
+                });
+                return { melody: result.melody, harmonyData: result };
+            }
+            // 原随机生成路径（不受影响）
+            return { melody: generateMelody(), harmonyData: null };
+        }
+
         async function doGenerate() {
-            // 先停止实时播放与渲染播放（避免旧音频与新旋律重叠）
+            // 先停止当前播放（渲染播放 + 钢琴伴奏 + 绿线），避免旧音频与新旋律重叠
             stopMelody();
+            // 用户手动生成，作废预渲染缓存（auto-next 模式下，新缓存会在 doRender 完成后重建）
+            invalidateNextTrackCache();
 
             playbackInfo.textContent = '正在初始化音频...';
             await initAudio();
@@ -2066,44 +1899,25 @@
                 HarmonyMelody.setPianoMuted(pianoMuted);
             }
 
-            if (harmonyModeEnabled && window.HarmonyMelody) {
-                // 和声旋律模式：调用隔离模块生成
-                const result = HarmonyMelody.generateMelody({
-                    currentKey: currentKey,
-                    melodyLength: melodyLength,
-                    rangeStart: rangeStart,
-                    rangeEnd: rangeEnd,
-                    density: density,
-                    leapProbability: leapProbability
-                });
-                currentMelody = result.melody;
-                currentHarmonyData = result;  // 保存和声数据供伴奏使用
-            } else {
-                // 原随机生成路径（不受影响）
-                currentMelody = generateMelody();
-                currentHarmonyData = null;
-            }
+            const { melody, harmonyData } = generateNewMelodyData();
+            currentMelody = melody;
+            currentHarmonyData = harmonyData;  // 保存和声数据供伴奏使用
 
             renderSheetMusic(currentMelody);
             updateStats(currentMelody);
 
             // 预加载采样（解决首次播放并发 fetch 导致的错乱/重叠）
-            // http:// 下批量解码到缓存；file:// 下 fetch 被 CORS 阻止，跳过（playNote 回退到 new Audio）
+            // http:// 下批量解码到缓存；file:// 下 fetch 被 CORS 阻止，跳过（渲染播放里该采样会被跳过）
             if (audioContext && location.protocol !== 'file:') {
-                playBtn.disabled = true;
                 playbackInfo.textContent = '预加载采样中…';
                 await preloadSamples(currentMelody);
             }
 
-            playBtn.disabled = false;
             renderBtn.disabled = false;
             playbackInfo.textContent = '旋律已生成，点击播放';
         }
 
         generateBtn.addEventListener('click', () => doGenerate());
-
-        playBtn.addEventListener('click', playMelody);
-        stopBtn.addEventListener('click', stopMelody);
 
         // === 渲染按钮绿光圈动画（JS 驱动：按小节数自适应时长 + 90% 等待渲染完成信号）===
         // 状态机：phase1(0→90%) → waiting(90→92% 极慢爬行) → phase2(92→100% 线性收尾) → done
@@ -2238,7 +2052,6 @@
                 cancelAnimationFrame(renderAnim.rafId);
                 renderBtn.classList.remove('rendering');
                 renderBtn.disabled = false;
-                playBtn.disabled = false;
                 generateBtn.disabled = false;
                 setRingProgress(0);
                 renderAnim.state = 'idle';
@@ -2262,11 +2075,12 @@
         async function doRender() {
             if (!currentMelody || currentMelody.length === 0) return;
 
-            // 停止实时播放（避免和渲染播放重叠）
+            // 停止当前播放（避免和新的渲染重叠）
             stopMelody();
+            // 用户手动渲染，作废预渲染缓存（auto-next 模式下，新缓存会在本渲染完成后重建）
+            invalidateNextTrackCache();
 
             renderBtn.disabled = true;
-            playBtn.disabled = true;
             generateBtn.disabled = true;
             renderInfo.style.display = 'block';
             renderBtn.classList.add('rendering');  // 启动绿光圈动画
@@ -2284,7 +2098,9 @@
                 }
 
                 // 离线渲染（进度回调实时更新文字）
-                const wavBlob = await renderToAudio((text) => {
+                // 显式传 currentMelody/currentHarmonyData：renderToAudio 不再读全局，
+                // 让预渲染队列可并行渲染下一首而不污染当前播放状态
+                const wavBlob = await renderToAudio(currentMelody, currentHarmonyData, (text) => {
                     renderInfo.textContent = text;
                 });
 
@@ -2321,13 +2137,19 @@
                 renderWorkDone = true;
                 notifyRenderDone();
                 tryFinishRender();
+
+                // auto-next 模式：当前播放期间后台预渲染下一首（解决锁屏后下一首无法渲染的问题）
+                // prepareNextTrack 不阻塞当前播放，渲染完成后缓存到 nextTrackCache；
+                // 当前曲结束时 handlePlaybackEnded → playPrerenderedNextTrack 直接复用缓存
+                if (loopMode === 'auto-next') {
+                    prepareNextTrack();
+                }
             } catch (e) {
                 console.error('渲染失败:', e);
                 renderInfo.textContent = '渲染失败: ' + e.message;
                 abortRenderAnim();
                 renderBtn.classList.remove('rendering');
                 renderBtn.disabled = false;
-                playBtn.disabled = false;
                 generateBtn.disabled = false;
             }
         }
@@ -2417,8 +2239,8 @@
             if (loopMode === 'single') {
                 renderInfo.textContent = '2 秒后重播（单曲循环）…';
                 setTimeout(() => {
-                    // 2 秒内用户可能切换模式或开始实时播放，重播前检查
-                    if (loopMode !== 'single' || isPlaying || !renderedAudioEl) return;
+                    // 2 秒内用户可能切换模式，重播前检查
+                    if (loopMode !== 'single' || !renderedAudioEl) return;
                     renderedAudioEl.currentTime = 0;
                     renderedAudioEl.play().catch(() => {});
                     renderInfo.textContent = '重播中（单曲循环）…';
@@ -2427,15 +2249,123 @@
                     startRenderCursor();
                 }, 2000);
             } else if (loopMode === 'auto-next') {
-                renderInfo.textContent = '自动生成下一首并渲染…';
-                playNextTrack();
+                renderInfo.textContent = '切换下一首…';
+                playPrerenderedNextTrack();  // 优先用预渲染缓存，缓存无效时回退到 playNextTrack
             } else {
                 // 不循环：绿线归零并隐藏
                 hidePlaybackCursor();
             }
         }
 
-        // 自动下一首：串行调 doGenerate → doRender，渲染完会自动播放并设新 onended 形成循环
+        // === 预渲染队列：auto-next 模式下当前播放期间后台预渲染下一首 WAV ===
+        // 解决 iOS 锁屏后 audio.onended 触发 doRender 时 Tone.Offline / DOM 被挂起的问题：
+        //   1. 当前 doRender 完成（音频开始播放）后，kick off prepareNextTrack（不阻塞播放）
+        //   2. prepareNextTrack 在前台 JS 主线程上生成新旋律 + 离线渲染为 WAV Blob
+        //   3. 当前曲结束 → handlePlaybackEnded → playPrerenderedNextTrack 直接复用缓存 Blob URL
+        //   4. 若用户在播放期间改了设置，isCacheValid 比较 settingsSnapshot 会判定缓存失效，
+        //      自动回退到 playNextTrack（实时生成 + 渲染）
+        //   5. 用户手动 generate/render 时调 invalidateNextTrackCache 作废缓存（gen++），
+        //      进行中的 prep 在结束时检测 gen 变化会丢弃结果
+        let nextTrackCache = null;        // { melody, harmonyData, blobUrl, settingsSnapshot }
+        let nextTrackPrepPromise = null;  // 进行中的预渲染 Promise（防重入）
+        let nextTrackCacheGen = 0;        // 递增计数器：每次 invalidate 时 +1，prep 结束时检测是否过期
+
+        // 作废预渲染缓存（释放 blob URL）；用于用户手动 generate/render 时清理
+        function invalidateNextTrackCache() {
+            if (nextTrackCache && nextTrackCache.blobUrl) {
+                URL.revokeObjectURL(nextTrackCache.blobUrl);
+            }
+            nextTrackCache = null;
+            nextTrackCacheGen++;  // 让进行中的 prep 在结束时检测到过期、丢弃结果
+        }
+
+        // 判断缓存是否仍有效（当前设置与缓存时快照一致才有效）
+        // 比较 collectSettings 的全部字段（measuresPerLine 仅影响谱面排版，不影响音频，剔除）
+        function isCacheValid() {
+            if (!nextTrackCache) return false;
+            const cur = collectSettings();
+            const snap = { ...nextTrackCache.settingsSnapshot };
+            const curCpy = { ...cur };
+            delete snap.measuresPerLine;
+            delete curCpy.measuresPerLine;
+            return JSON.stringify(curCpy) === JSON.stringify(snap);
+        }
+
+        // 后台预渲染下一首：生成新旋律 + 离线渲染为 WAV Blob，缓存到 nextTrackCache
+        // 不更新 UI / 不替换全局 currentMelody（缓存到 playPrerenderedNextTrack 才应用）
+        async function prepareNextTrack() {
+            if (nextTrackPrepPromise) return nextTrackPrepPromise;  // 防重入
+            const settings = collectSettings();
+            const myGen = nextTrackCacheGen;  // 捕获起始 gen，结束时对比检测过期
+            nextTrackPrepPromise = (async () => {
+                try {
+                    const { melody, harmonyData } = generateNewMelodyData();
+                    // 预加载新旋律的采样（http:// 下），file:// 下跳过（与 doRender 一致行为）
+                    if (audioContext && location.protocol !== 'file:') {
+                        await preloadSamples(melody);
+                    }
+                    if (myGen !== nextTrackCacheGen) return;  // 期间被作废，丢弃
+                    const wavBlob = await renderToAudio(melody, harmonyData, () => {});
+                    if (myGen !== nextTrackCacheGen) return;  // 期间被作废，丢弃
+                    const blobUrl = URL.createObjectURL(wavBlob);
+                    nextTrackCache = { melody, harmonyData, blobUrl, settingsSnapshot: settings };
+                } catch (e) {
+                    console.warn('预渲染下一首失败:', e);
+                } finally {
+                    nextTrackPrepPromise = null;
+                }
+            })();
+            return nextTrackPrepPromise;
+        }
+
+        // 播放预渲染的下一首；若缓存无效或不存在则回退到 playNextTrack（实时渲染）
+        async function playPrerenderedNextTrack() {
+            // 若预渲染仍在进行中，等待完成
+            if (nextTrackPrepPromise) {
+                renderInfo.textContent = '等待预渲染完成…';
+                await nextTrackPrepPromise;
+            }
+            // 缓存失效或不存在：回退到实时渲染（playNextTrack 内部调 doGenerate + doRender）
+            if (!isCacheValid()) {
+                return playNextTrack();
+            }
+            const cache = nextTrackCache;
+            nextTrackCache = null;
+
+            // 应用缓存到全局状态
+            currentMelody = cache.melody;
+            currentHarmonyData = cache.harmonyData;
+            renderSheetMusic(currentMelody);
+            updateStats(currentMelody);
+
+            // 释放旧 blob URL，应用新 blob URL
+            if (renderedBlobUrl) URL.revokeObjectURL(renderedBlobUrl);
+            renderedBlobUrl = cache.blobUrl;
+            ensureRenderedAudioEl();
+            renderedAudioEl.pause();
+            renderedAudioEl.src = renderedBlobUrl;
+
+            // MediaSession 元数据更新
+            if ('mediaSession' in navigator) {
+                navigator.mediaSession.metadata = new MediaMetadata({
+                    title: `视唱旋律 (${currentKey} 调)`,
+                    artist: '视唱练耳',
+                    album: 'Singing Trainer'
+                });
+                navigator.mediaSession.playbackState = 'playing';
+            }
+
+            renderedAudioEl.onended = handlePlaybackEnded;
+            startRenderCursor();
+            renderInfo.textContent = '播放中（预渲染缓存）…';
+            renderedAudioEl.play().catch(() => {});
+
+            // 继续预渲染下一首，形成连续循环
+            prepareNextTrack();
+        }
+
+        // 自动下一首（实时回退路径）：串行调 doGenerate → doRender，渲染完会自动播放并设新 onended
+        // 仅当预渲染缓存无效时使用；正常情况下走 playPrerenderedNextTrack 复用缓存
         async function playNextTrack() {
             try {
                 await doGenerate();

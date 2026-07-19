@@ -608,7 +608,7 @@
     //   规则：经过和弦时值短(0.5拍)，强拍稍长(0.95拍)，弱拍(0.6拍)
     //   pianoOffsetSec: 钢琴整体时间偏移（秒），正值=延后，负值=提前；用于人声/钢琴对齐
     //   末尾渐慢：与 buildVocalSchedule 同步，最后一小节（4 拍）开始，
-    //     速度降至 60%（factor 1.0→1.667），曲线 progress^1.5（前 2 拍减速明显，后 2 拍末端加速）
+    //     速度降至 60%（factor 1.0→1.667），曲线 progress^1.5（前 2 拍减速少，后 2 拍末端加速明显）
     function buildPianoSchedule(generatedData, tempo, pianoOffsetSec) {
         if (!generatedData || !generatedData.progression) return [];
         const offset = (typeof pianoOffsetSec === 'number') ? pianoOffsetSec : 0;
