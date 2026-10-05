@@ -1888,6 +1888,13 @@
 
     let artCache = [];     // 小节索引 -> MediaMetadata.artwork 数组
     let artUrls = [];      // 已生成的全部 blob URL（换一段时统一回收）
+    let artImages = [];    // 已"读进内存并解码"的图。钉住引用，保证系统取图时命中暖缓存
+    let pendingArtPush = -1;   // 想推但封面还没画好的小节号，画好后补推（见 updateNowPlaying）
+
+    // 换一段时，旧封面不再立刻回收，而是延后这么久再 revoke。
+    //   原因：换段那一刻，锁屏上正显示的还是上一代的图；立刻 revoke 会让系统读到一个
+    //   已失效的 URL → 封面空白一闪。延后到新封面顶上之后再回收，任一时刻最多两代共存。
+    const ART_RELEASE_DELAY_MS = 2500;
 
     function artSupported() {
         return typeof document !== 'undefined'
@@ -1975,7 +1982,15 @@
     }
 
     // 一张 canvas → PNG blob URL（拿不到就返回 null，不抛）
+    //
+    //   ★ 关键：拿到 URL 之后必须**立刻把它当图片读一遍并解码**（img.decode()）。
+    //   只 createObjectURL 不读，等于把"取 blob + PNG 解码"那几十毫秒推迟到系统真正要
+    //   显示封面的那一刻 —— 那段时间锁屏上就是空白，也就是用户看到的"闪一下"。
+    //   先解码进图像缓存再交给 MediaSession，换图瞬间就能命中暖副本。
     function coverBlobUrl(size, info, compact) {
+        // 记下本次生成所属的那一批（与 releaseChordArtwork 的延后回收集合同一份引用）
+        const urlBucket = artUrls;
+        const imgBucket = artImages;
         return new Promise((resolve) => {
             try {
                 const cv = document.createElement('canvas');
@@ -1985,19 +2000,47 @@
                 cv.toBlob((blob) => {
                     if (!blob) { resolve(null); return; }
                     const url = URL.createObjectURL(blob);
-                    artUrls.push(url);
-                    resolve(url);
+                    urlBucket.push(url);
+
+                    const img = new Image();
+                    let settled = false;
+                    const done = () => {
+                        if (settled) return;
+                        settled = true;
+                        imgBucket.push(img);   // 钉住引用：位图在被系统取走之前不能被回收
+                        resolve(url);
+                    };
+                    img.src = url;
+                    if (typeof img.decode === 'function') {
+                        // decode() 真正解码一次；失败也照旧可用，不阻塞
+                        img.decode().then(done, done);
+                    } else {
+                        img.onload = done;     // 老浏览器兜底
+                        img.onerror = done;
+                    }
                 }, 'image/png');
             } catch (e) { resolve(null); }
         });
     }
 
+    // 回收上一代封面图。注意是**延后**回收（见 ART_RELEASE_DELAY_MS 的说明）：
+    //   立刻 revoke 会把锁屏上正在显示的那张图一起作废 → 换段时封面空白一闪。
+    //   这里只是把"这一批"交给定时器，后面新生成的那批写进全新数组，互不影响。
     function releaseChordArtwork() {
-        for (let i = 0; i < artUrls.length; i++) {
-            try { URL.revokeObjectURL(artUrls[i]); } catch (e) {}
-        }
+        const oldUrls = artUrls;
+        const oldImgs = artImages;
         artUrls = [];
+        artImages = [];
         artCache = [];
+        pendingArtPush = -1;           // 换了一批图，之前挂起的"补推"一并作废
+        if (!oldUrls.length && !oldImgs.length) return;
+        setTimeout(() => {
+            for (let i = 0; i < oldUrls.length; i++) {
+                try { URL.revokeObjectURL(oldUrls[i]); } catch (e) {}
+            }
+            oldUrls.length = 0;
+            oldImgs.length = 0;        // 松开引用，解码位图才允许被回收
+        }, ART_RELEASE_DELAY_MS);
     }
 
     // 为整段和声预生成封面。生成完一段就做，播放时直接查表 → 切小节零延迟。
@@ -2031,6 +2074,12 @@
                         }
                     }
                     if (art.length) artCache[idx] = art;
+                    // 之前想推这一小节、但当时封面还没画好（例如刚进页面就点小节）
+                    //   → 现在图就绪了，补推一次，免得锁屏一直停在上一张
+                    if (pendingArtPush === idx && artCache[idx]) {
+                        pendingArtPush = -1;
+                        updateNowPlaying(idx);
+                    }
                 })
                 .catch(() => {});
         }
@@ -2038,16 +2087,21 @@
 
     // 把"当前第 m 小节"推给系统（锁屏 / 控制中心 / 灵动岛）。
     //   title 里也带级数 —— 万一某些系统版本不刷新封面，文字照样能告诉他答案。
+    //
+    //   ★ 封面还没画好时**不推**：推一个 artwork: [] 会把锁屏上已有的封面清成灰块，
+    //   本身也是一次"闪"。这里记下来，等这一小节的图就绪后由 buildChordArtwork 补推。
     function updateNowPlaying(m) {
         if (!artSupported() || !data || m < 0 || m >= data.chords.length) return;
         const host = global.ChordHost;
         if (!host || typeof host.setNowPlaying !== 'function') return;
+        const art = artCache[m];
+        if (!art || !art.length) { pendingArtPush = m; return; }
         const c = data.chords[m];
         host.setNowPlaying({
             title: '第 ' + (m + 1) + ' 小节 · ' + c.roman,
             artist: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
             album: '和弦听辨',
-            artwork: artCache[m] || []
+            artwork: art
         });
     }
 
@@ -2433,6 +2487,10 @@
         _buildChordArtwork: buildChordArtwork,
         _getArtwork: () => artCache,
         _getArtUrls: () => artUrls.slice(),
+        _getArtImages: () => artImages.slice(),
+        _getPendingArtPush: () => pendingArtPush,
+        _artReleaseDelayMs: ART_RELEASE_DELAY_MS,
+        _releaseChordArtwork: releaseChordArtwork,
         _updateNowPlaying: updateNowPlaying,
         _skipMeasure: (dir) => chordMediaHooks.skip(dir),
         _drawCover: drawCover,
