@@ -1871,10 +1871,17 @@
         combos.forEach((c) => {
             if (!seq.length) {
                 if (c[0] !== 1) seq.push(1);
+                seq.push.apply(seq, c);
+            } else if (seq[seq.length - 1] === 1 && c[0] === 1) {
+                // 上段末尾已是 Ⅰ、本组合开头又带 Ⅰ：开头 Ⅰ 兼任胶水，跳过不重复
+                seq.push.apply(seq, c.slice(1));
             } else if (seq[seq.length - 1] !== 1 && c[0] !== 1) {
                 seq.push(1);
+                seq.push.apply(seq, c);
+            } else {
+                // 已有一端是 Ⅰ，直接接上即可
+                seq.push.apply(seq, c);
             }
-            seq.push.apply(seq, c);
         });
         if (seq[seq.length - 1] !== 1) seq.push(1);
         return seq;
@@ -3727,6 +3734,7 @@
         exitPractice,
         _isPracticeMode: () => practiceMode,
         _topPracticeCombos: (n) => topPracticeCombos(n || 5),
+        _buildPracticeSequence: buildPracticeSequence,
         _generateProgressionFromSequence: generateProgressionFromSequence,
         _buildScale: buildScale,
         _buildCandidates: buildCandidates,
