@@ -1922,12 +1922,17 @@
     const ART_COMPACT_MAX = 128;   // <= 这个尺寸只画级数大字，别的内容缩到 96px 就是一团糊
 
     // 按级数配色（浅底深字；换级数就换颜色，扫一眼就知道功能变了）
+    //
+    //   ★ 这是**全站唯一**的色板：锁屏封面、面板里的级数大图、报错浮窗的色块
+    //     全都从这里取色。改这一处，三处一起变 —— 别再在别处硬编码颜色。
+    //   ★ 当前是一轮"轮转"：Ⅴ 拿 Ⅰ 的黄、Ⅲ 拿 Ⅴ 的红、Ⅳ 拿 Ⅲ 的蓝、Ⅰ 拿 Ⅳ 的绿，
+    //     四个都换了色而且互不撞色；Ⅱ / Ⅵ / Ⅶ 不动。
     const ART_PALETTE = [
-        { top: '#fff8ef', bottom: '#ffe8cf', ink: '#8a4a10', sub: '#a9762f' },  // Ⅰ 主
+        { top: '#eefbf4', bottom: '#d2f6e2', ink: '#08724f', sub: '#208a66' },  // Ⅰ 主（原 Ⅳ 的绿）
         { top: '#f6f4ff', bottom: '#e6e1ff', ink: '#4633a5', sub: '#6b5cc0' },  // Ⅱ
-        { top: '#f0f6ff', bottom: '#dce9ff', ink: '#1c4fd0', sub: '#3d6ed2' },  // Ⅲ
-        { top: '#eefbf4', bottom: '#d2f6e2', ink: '#08724f', sub: '#208a66' },  // Ⅳ 下属
-        { top: '#fff3f2', bottom: '#ffe0dd', ink: '#b21f1f', sub: '#c85450' },  // Ⅴ 属
+        { top: '#fff3f2', bottom: '#ffe0dd', ink: '#b21f1f', sub: '#c85450' },  // Ⅲ（原 Ⅴ 的红）
+        { top: '#f0f6ff', bottom: '#dce9ff', ink: '#1c4fd0', sub: '#3d6ed2' },  // Ⅳ 下属（原 Ⅲ 的蓝）
+        { top: '#fff8ef', bottom: '#ffe8cf', ink: '#8a4a10', sub: '#a9762f' },  // Ⅴ 属（原 Ⅰ 的黄）
         { top: '#fdf4ff', bottom: '#f4e6ff', ink: '#83178f', sub: '#a144a6' },  // Ⅵ
         { top: '#f7f9fc', bottom: '#e3e9f1', ink: '#2f3d4f', sub: '#5a6b80' }   // Ⅶ
     ];
@@ -2569,7 +2574,7 @@
         // ★ 只报"第几小节"，**不报级数** —— 收起条上写级数等于剧透答案
         els.mpBarTitle.textContent = total
             ? ('第 ' + (mpMeasure + 1) + ' / ' + total + ' 小节')
-            : '还没有内容，点「换一段」';
+            : '还没有内容，点「下一首」';
     }
 
     // 把当前小节的级数画进面板里那张 canvas（与锁屏封面同一套画法、同一份数据）
@@ -2593,10 +2598,23 @@
         }
         els.mpCover.style.width = side + 'px';
         els.mpCover.style.height = side + 'px';
+        // 占位卡也钉成同一个正方形 —— 显隐切换时版式一点都不跳
+        if (els.mpCoverHidden) {
+            els.mpCoverHidden.style.width = side + 'px';
+            els.mpCoverHidden.style.height = side + 'px';
+        }
+        // 隐藏态：**连画都不画**。
+        //   以前是"照画 + 盖一层 blur/grayscale"，但底色色相会透过毛玻璃漏出来
+        //   （黄=Ⅴ、红=Ⅲ、蓝=Ⅳ…一眼就能猜），罗马数字的轮廓也没盖住。
+        //   现在隐藏时干脆不画，并把画布上的像素也清掉，只剩一张中性灰的占位卡，零线索。
         const px = Math.round(side * dpr);
         if (els.mpCover.width !== px || els.mpCover.height !== px) {
             els.mpCover.width = px;
             els.mpCover.height = px;
+        }
+        if (!mpCoverVisible) {
+            try { els.mpCover.getContext('2d').clearRect(0, 0, px, px); } catch (e) {}
+            return;
         }
         try {
             drawCover(els.mpCover.getContext('2d'), px, info, false);
@@ -2608,6 +2626,16 @@
         mpCoverVisible = !!on;
         if (els && els.mpStage) els.mpStage.classList.toggle('is-hidden', !mpCoverVisible);
         if (els && els.mpCoverHidden) els.mpCoverHidden.hidden = mpCoverVisible;
+        if (!mpCoverVisible) {
+            // 隐藏时把画布上的像素也抹掉 —— 只靠 CSS 藏，万一有渲染怪癖就漏了；
+            // 抹掉之后它是一张真正的空白画布，零线索。
+            if (els && els.mpCover) {
+                try { els.mpCover.getContext('2d').clearRect(0, 0, els.mpCover.width, els.mpCover.height); } catch (e) {}
+            }
+            return;
+        }
+        // 揭开时立刻画一张，别等到下一帧才有图（否则会看到空卡片闪一下）
+        if (mpExpanded) mpPaintCover();
     }
 
     function mpSetNote(text) {
@@ -2659,18 +2687,49 @@
         if (MP_AUTOPLAY_AFTER_GENERATE) await doPlay(lastPlayMode, 0);
     }
 
+    // 给一个级数色块上色（取全站唯一的 ART_PALETTE —— 与锁屏封面/面板大图同源，
+    //   这样"我听成了那个橙色的"这种记忆能直接对上）。
+    function paintDegreeChip(el, d) {
+        const pal = ART_PALETTE[(d - 1) % ART_PALETTE.length];
+        el.style.background = 'linear-gradient(135deg, ' + pal.top + ', ' + pal.bottom + ')';
+        el.style.color = pal.ink;
+        el.style.borderColor = 'rgba(16, 24, 40, 0.10)';
+    }
+
+    // 报错浮窗的槽位顺序。
+    //   浮窗是**两列**、行优先填格，所以这里不能按 1..7 顺排，要写成 [1,2,4,3,5,6]：
+    //     左列自上而下 = Ⅰ Ⅳ Ⅴ（大和弦）
+    //     右列自上而下 = Ⅱ Ⅲ Ⅵ（小和弦）
+    //   Ⅶ 单独一排、横跨两列（--wide）。以后要加不协和和弦，往数组末尾追加即可，
+    //   会自动落到 Ⅶ 下面新的一排，版式不用动。
+    const MP_ERROR_SLOTS = [1, 2, 4, 3, 5, 6, 7];
+
     // 报错浮窗的选项：设置里勾选的级数（Ⅰ 永远有 —— 它本来就强制参与）+「没听出来」。
     //   每次打开都重建，所以改了设置里的勾选，下次打开就跟着变。
+    //
+    //   ★ 没勾选的级数**保留一个隐形占位格**（visibility:hidden，不是 display:none）——
+    //     否则后面的格子会往前补位，用户肌肉记忆里的位置就漂了。
     function mpBuildErrorOptions() {
         if (!els || !els.mpErrorGrid) return;
         els.mpErrorGrid.innerHTML = '';
-        for (let d = 1; d <= 7; d++) {
-            if (d !== 1 && !settings.degrees[d]) continue;   // 没勾的级数不出现在报错界面
+        for (let i = 0; i < MP_ERROR_SLOTS.length; i++) {
+            const d = MP_ERROR_SLOTS[i];
+            const off = (d !== 1 && !settings.degrees[d]);   // Ⅰ 恒在
+            if (off) {
+                // Ⅶ 关掉时不留占位（否则末尾会多出一条看不见的空行）
+                if (d === 7) continue;
+                const hole = document.createElement('span');
+                hole.className = 'mp-error__hole';
+                hole.setAttribute('aria-hidden', 'true');
+                els.mpErrorGrid.appendChild(hole);
+                continue;
+            }
             const b = document.createElement('button');
             b.type = 'button';
-            b.className = 'mp-error__opt';
+            b.className = (d === 7) ? 'mp-error__opt mp-error__opt--wide' : 'mp-error__opt';
             b.dataset.degree = String(d);
             b.textContent = DEGREE_CHOICES[d - 1];
+            paintDegreeChip(b, d);
             els.mpErrorGrid.appendChild(b);
         }
     }
@@ -2848,7 +2907,25 @@
             });
             return out;
         },
-        _getCoverInfo: buildCoverInfo
+        _getCoverInfo: buildCoverInfo,
+        _getArtPalette: () => ART_PALETTE.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
+        // 报错浮窗的几何布局：每个色块的中心坐标 + 尺寸（用来客观验证"两列 + Ⅶ 横跨"）
+        _getMpErrorLayout: () => {
+            if (!els || !els.mpErrorGrid) return null;
+            const grid = els.mpErrorGrid.getBoundingClientRect();
+            const items = [];
+            els.mpErrorGrid.querySelectorAll('button[data-degree]').forEach((b) => {
+                const r = b.getBoundingClientRect();
+                items.push({
+                    degree: parseInt(b.dataset.degree, 10),
+                    x: Math.round(r.left), y: Math.round(r.top),
+                    w: Math.round(r.width), h: Math.round(r.height),
+                    color: getComputedStyle(b).color,
+                    bg: getComputedStyle(b).backgroundImage
+                });
+            });
+            return { gridW: Math.round(grid.width), items: items };
+        }
     };
 
 })(typeof window !== 'undefined' ? window : this);

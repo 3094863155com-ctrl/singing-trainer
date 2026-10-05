@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>视唱旋律生成器</title>
     <script src="vexflow.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
@@ -71,6 +71,39 @@
             min-height: 100vh;
             padding: 20px;
             color: var(--text-primary);
+        }
+
+        /* ------------------------------------------------------------
+           防"连按把页面放大"
+           ------------------------------------------------------------
+           在手机上连点同一个键、或快速点相邻的两个键，浏览器会把它当成
+           "双击 → 缩放页面"，界面一下子被推歪，手持练习时非常致命。
+           touch-action: manipulation = 允许拖动和双指缩放，但**禁用双击缩放**，
+           顺带消掉 300ms 的点击延迟（按键跟手）。
+           放在 html/body 上是让全页生效；按钮上再写一遍，防止别的规则覆盖。
+           ------------------------------------------------------------ */
+        html,
+        body {
+            touch-action: manipulation;
+        }
+
+        .btn,
+        .app-tab,
+        .degree-card,
+        .mp-bar__btn,
+        .mp-bar__open,
+        .mp-icon-btn,
+        .mp-action-btn,
+        .mp-generate,
+        .mp-error__opt,
+        .mp-error__none,
+        .mp-error__cancel,
+        .mp-cover,
+        .mp-cover-hidden {
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+            -webkit-user-select: none;
+            user-select: none;
         }
 
         .container {
@@ -751,27 +784,36 @@
             cursor: pointer;
         }
 
+        /* 隐藏态：直接藏掉那张图本身（不是盖一层模糊）。
+           模糊会漏两样东西：底色色相（黄=Ⅴ、红=Ⅲ…一眼能猜级数）和罗马数字的轮廓。
+           用 visibility 而不是 display:none —— 保住它占的正方形，版式不跳。 */
         .mp-sheet__stage.is-hidden .mp-cover {
-            filter: blur(18px) grayscale(0.35);
-            opacity: 0.55;
-            user-select: none;
+            visibility: hidden;
         }
 
+        /* 隐藏时代替它出现的中性灰卡片。尺寸由 JS 钉成和那张图一样的正方形。
+           刻意不带任何级数颜色，只写一句提示。 */
         .mp-cover-hidden {
             position: absolute;
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            padding: 12px 22px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             font-family: inherit;
-            font-size: 15px;
+            font-size: 16px;
             font-weight: 600;
             color: var(--text-secondary);
             background: var(--surface);
-            border: 1px solid var(--border-strong);
-            border-radius: var(--r-pill);
-            box-shadow: var(--shadow-md);
+            border: 1px dashed var(--border-strong);
+            border-radius: var(--r-lg);
             cursor: pointer;
+        }
+
+        /* ★ 上面写了 display:flex，会把 [hidden] 自带的 display:none 盖掉，必须显式补回来 */
+        .mp-cover-hidden[hidden] {
+            display: none;
         }
 
         /* 一行三键：上一个 / 报错（主） / 下一个 */
@@ -865,16 +907,19 @@
             text-align: center;
         }
 
+        /* 两列、行优先填格。槽位顺序写在 JS 的 MP_ERROR_SLOTS 里（[Ⅰ Ⅱ Ⅳ Ⅲ Ⅴ Ⅵ]），
+           于是左列自上而下 = Ⅰ Ⅳ Ⅴ、右列 = Ⅱ Ⅲ Ⅵ；Ⅶ 用 --wide 横跨整行。 */
         .mp-error__grid {
             display: grid;
-            grid-template-columns: repeat(4, 1fr);
+            grid-template-columns: repeat(2, 1fr);
             gap: var(--mp-gap);
         }
 
+        /* 每个色块的底色/文字色由 JS 按级数写行内样式（与锁屏封面同一份色板）。 */
         .mp-error__opt {
             min-height: var(--mp-btn);
-            font-family: inherit;
-            font-size: 22px;
+            font-family: "Songti SC", "STSong", "Times New Roman", Georgia, serif;
+            font-size: 26px;
             font-weight: 700;
             color: var(--text-primary);
             background: var(--surface-hover);
@@ -883,10 +928,19 @@
             cursor: pointer;
         }
 
+        /* Ⅶ 单独一排 */
+        .mp-error__opt--wide {
+            grid-column: 1 / -1;
+        }
+
+        .mp-error__hole {
+            visibility: hidden;      /* 占位但看不见：后面的格子因此不会往前补位 */
+            min-height: var(--mp-btn);
+        }
+
+        /* ★ 按下只能用 filter 压暗：这里改 background 的话，行内那份色块会被盖掉 */
         .mp-error__opt:active {
-            background: var(--accent-soft);
-            border-color: var(--accent);
-            color: var(--accent);
+            filter: brightness(0.94);
         }
 
         .mp-error__none,
@@ -1119,7 +1173,7 @@
                     </span>
                 </div>
 
-                <button class="btn btn-primary" id="chord-generate">🎲 换一段</button>
+                <button class="btn btn-primary" id="chord-generate">⏭ 下一首</button>
                 <button class="btn btn-secondary" id="chord-play" disabled>🎧 播放</button>
                 <button class="btn btn-secondary" id="chord-play-arpeggio" disabled>🎶 分解和弦</button>
                 <button class="btn btn-secondary" id="chord-play-bass" disabled>🎵 单音</button>
@@ -1161,7 +1215,7 @@
                 </div>
             </details>
 
-            <div class="playback-info" id="chord-info">点击“换一段”开始</div>
+            <div class="playback-info" id="chord-info">点击“下一首”开始</div>
             <div class="playback-info" id="chord-render-info" style="display: none; color: var(--accent); min-height: 20px;"></div>
 
             <div class="sheet-music-container">
@@ -1175,7 +1229,7 @@
                  底部迷你播放器（手持练习用）：收起是一颗胶囊，点开展成全屏
                  ------------------------------------------------------------
                  逻辑全在 chord_recognition.js 里（它要实时读模块内部状态）。
-                 收起态的按钮只有「换一段」；收起条上**故意不显示罗马数字**，
+                 收起态的按钮只有「下一首」；收起条上**故意不显示罗马数字**，
                  不然答案直接剧透了。
                  ============================================================ -->
             <div id="chord-mp" class="mp" data-state="collapsed">
@@ -1186,7 +1240,7 @@
                         <span class="mp-bar__title" id="chord-mp-bar-title">第 1 / 8 小节</span>
                         <span class="mp-bar__chevron" aria-hidden="true">▲</span>
                     </button>
-                    <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min">🎲 换一段</button>
+                    <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min">⏭ 下一首</button>
                 </div>
 
                 <!-- 展开态：全屏面板 -->
@@ -1210,7 +1264,7 @@
                     <div class="mp-sheet__note" id="chord-mp-report-note"></div>
 
                     <div class="mp-sheet__footer">
-                        <button class="btn btn-primary mp-generate" id="chord-mp-generate">🎲 换一段</button>
+                        <button class="btn btn-primary mp-generate" id="chord-mp-generate">⏭ 下一首</button>
                     </div>
                 </div>
             </div>
