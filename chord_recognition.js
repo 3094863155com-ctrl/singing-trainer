@@ -87,7 +87,11 @@
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
         // 各级出现七和弦的概率（%）
-        seventhProb: { 1: 0, 2: 40, 3: 0, 4: 10, 5: 70, 6: 0, 7: 30 }
+        seventhProb: { 1: 0, 2: 40, 3: 0, 4: 10, 5: 70, 6: 0, 7: 30 },
+        // 「使用用户数据优化题库」：按历史错误率给级数加权出题。
+        //   默认 false —— 关着的时候出题路径与以前**逐字节一致**（回归脚本靠这条）。
+        //   打开后错得多的级数出现概率更高，正确率回升就自动降回基线。见 degreeWeight()。
+        adaptiveFromStats: false
     };
 
     // ------------------------------------------------------------
@@ -889,11 +893,18 @@
         const seq = new Array(N).fill(1);
         seq[0] = 1;
         seq[N - 1] = 1;
+        // 「使用用户数据优化题库」（设置里那个开关）：
+        //   开了 → 按历史错误率给级数加权（错得多的多出一点）；
+        //   关着 → 原样均匀随机。★ 关着的时候连 Math.random() 的消耗次数都不能变，
+        //   否则和声回归快照（sha256）会漂。
+        const useAdaptive = !!settings.adaptiveFromStats;
         let prevDegree = 1;
         for (let i = 1; i <= N - 2; i++) {
             const pool = picked.filter((d) => d !== prevDegree);
             const list = pool.length ? pool : picked;
-            const d = list[Math.floor(Math.random() * list.length)];
+            const d = useAdaptive
+                ? weightedPick(list)
+                : list[Math.floor(Math.random() * list.length)];
             seq[i] = d;
             prevDegree = d;
         }
@@ -952,6 +963,60 @@
         // 做一次局部回溯修补（只换排列，不动转位与重复音）
         if (fourPart) repairFourPartOverlaps(scale, chords, settings.allowSecondInv);
 
+        return { key, scale, keySig, chords, voicingMode: fourPart ? 'fourpart' : 'triad' };
+    }
+
+    // 按给定级数序列配声（错题练习专用：错误组合 + Ⅰ 胶水）。
+    //   配声循环与 generateChordProgression 的 916-964 行同构 —— 但**绝对不动本体**，
+    //   否则和声回归基线（triad 快照 sha256）会漂。
+    //   返回结构与 generateChordProgression 完全一致，
+    //   所以谱面 / 封面 / 播放 / 长按 / 左滑 / 报错定位全部零改动复用。
+    //   配声函数对相邻重复级数无感（"不与上一个相同"只在本体的级数挑选循环里），
+    //   胶水构造也保证了不会出现相邻同度（见 buildPracticeSequence）。
+    function generateProgressionFromSequence(key, seq, settings) {
+        const scale = buildScale(key);
+        const keySig = keySignatureMap(scale);
+        const N = seq.length;
+        const chords = [];
+        let prevMidis = null;
+        const fourPart = (settings.voicingMode === 'fourpart');
+        // 四部专用上下文：导音 pc 用于"必须上行解决"的判定
+        const ctx = {
+            scale,
+            leadingPc: scale[6].pc,
+            tonicPc: scale[0].pc,
+            prevSeventhPc: null
+        };
+        for (let i = 0; i < N; i++) {
+            const degree = seq[i];
+            const isFirst = (i === 0);
+            const isLast = (i === N - 1);
+            // 首尾强制三和弦原位（错题段两端都是 Ⅰ 胶水 —— 正好当调性锚点）
+            const seventh = (isFirst || isLast)
+                ? false
+                : (Math.random() * 100 < (settings.seventhProb[degree] || 0));
+            const allowInv = settings.allowInversion && !isFirst && !isLast;
+            const v = fourPart
+                ? chooseFourPartVoicing(
+                    scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv, ctx
+                )
+                : chooseVoicing(
+                    scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv
+                );
+            prevMidis = v.midis;
+            ctx.prevSeventhPc = seventh ? chordToneSpelled(scale, degree, true)[3].pc : null;
+            chords.push({
+                degree,
+                seventh,
+                inversion: v.inv,
+                midis: v.midis,
+                notes: v.midis.map((m) => midiToSpelled(m, scale)),
+                roman: romanOf(degree, seventh, v.inv),
+                doubledRole: v.doubledRole || null,
+                voices4: fourPart
+            });
+        }
+        if (fourPart) repairFourPartOverlaps(scale, chords, settings.allowSecondInv);
         return { key, scale, keySig, chords, voicingMode: fourPart ? 'fourpart' : 'triad' };
     }
 
@@ -1521,6 +1586,7 @@
         if (typeof s.allowSecondInv === 'boolean') settings.allowSecondInv = s.allowSecondInv;
         if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
         if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
+        if (typeof s.adaptiveFromStats === 'boolean') settings.adaptiveFromStats = s.adaptiveFromStats;
         if (s.legato !== undefined) settings.legato = clampLegato(s.legato);
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
@@ -1541,11 +1607,297 @@
         catch (e) { console.warn('和弦设置保存失败:', e); }
     }
 
+    // ============================================================
+    // 听辨统计（数据库页的数据源 + 出题加权的依据）
+    //
+    //   两个 scope：
+    //     statsAll     = 历史总计（只有用户点「清空历史」才归零）
+    //     statsSession = 本轮（点「清空本轮」归零，重新计数）
+    //   每份结构相同：
+    //     confusion: { 实际级数: { 你听成的级数: 次数 } }  —— 键 "0" = "没听出来"
+    //     combos:    { "前2|前1|它": { seen, wrong } }     —— 上下文三和弦组合
+    //     seen:      { 级数: 听过次数 }                    —— 错误率的分母（出题加权要用）
+    //     wrong:     { 级数: 报错次数 }                    —— 错误率的分子
+    //     totals:    { heard, reports }
+    //
+    //   ★ 为什么必须统计 seen：只记报错的话连"错误率"的分母都没有，
+    //     "错的多出一点、正确了降回来"就无从谈起。
+    //   ★ 每条报错的明细不落盘，只在内存 mpReports 里留最近若干条。
+    //   ★ combos 以"级数三元组"为 key，天然最多 7^3 = 343 种，不会爆炸；
+    //     另设 MAX_COMBOS 兜底，将来加了转位/七和弦维度也不会失控。
+    // ============================================================
+
+    const STATS_KEY = 'chordTrainerStats';
+    const STATS_SESSION_KEY = 'chordTrainerStatsSession';
+    const STATS_VERSION = 1;
+    const MAX_COMBOS = 2000;
+
+    function emptyStats() {
+        return {
+            v: STATS_VERSION,
+            updatedAt: 0,
+            confusion: {},
+            combos: {},
+            seen: {},
+            wrong: {},
+            totals: { heard: 0, reports: 0 }
+        };
+    }
+
+    function normalizeStats(o) {
+        const out = emptyStats();
+        if (!o || typeof o !== 'object' || o.v !== STATS_VERSION) return out;
+        if (o.confusion && typeof o.confusion === 'object') out.confusion = o.confusion;
+        if (o.combos && typeof o.combos === 'object') out.combos = o.combos;
+        if (o.seen && typeof o.seen === 'object') out.seen = o.seen;
+        if (o.wrong && typeof o.wrong === 'object') out.wrong = o.wrong;
+        if (o.totals && typeof o.totals === 'object') {
+            out.totals.heard = Number(o.totals.heard) || 0;
+            out.totals.reports = Number(o.totals.reports) || 0;
+        }
+        out.updatedAt = Number(o.updatedAt) || 0;
+        return out;
+    }
+
+    function readStats(key) {
+        let raw;
+        try { raw = localStorage.getItem(key); } catch (e) { return emptyStats(); }
+        if (!raw) return emptyStats();
+        try { return normalizeStats(JSON.parse(raw)); } catch (e) { return emptyStats(); }
+    }
+
+    let statsAll = emptyStats();
+    let statsSession = emptyStats();
+
+    // 超过上限就把长尾丢掉。淘汰排序 **wrong 优先**（从没错过 → seen 升序）：
+    //   榜单和错题练习只看 wrong>0 的键，先淘汰"从未出错"的窗口，保护已积累的错误数据。
+    function trimCombos(scope) {
+        const keys = Object.keys(scope.combos);
+        if (keys.length <= MAX_COMBOS) return;
+        keys.sort((a, b) => ((scope.combos[a].wrong || 0) - (scope.combos[b].wrong || 0))
+            || ((scope.combos[a].seen || 0) - (scope.combos[b].seen || 0)));
+        const drop = keys.length - MAX_COMBOS;
+        for (let i = 0; i < drop; i++) delete scope.combos[keys[i]];
+    }
+
+    let statsFlushTimer = null;
+    let statsFlushAt = 0;
+
+    function flushStats() {
+        if (statsFlushTimer) { clearTimeout(statsFlushTimer); statsFlushTimer = null; }
+        trimCombos(statsAll);
+        trimCombos(statsSession);
+        statsAll.updatedAt = Date.now();
+        statsSession.updatedAt = statsAll.updatedAt;
+        try {
+            localStorage.setItem(STATS_KEY, JSON.stringify(statsAll));
+            localStorage.setItem(STATS_SESSION_KEY, JSON.stringify(statsSession));
+        } catch (e) { /* 隐私模式 / 配额满：不影响练习 */ }
+    }
+
+    // 写盘节流：报错排一次短的；仅仅"听过"排一次长的。
+    //   避免每小节都 setItem（卡顿 + 耗电）。
+    function markStatsDirty(delayMs) {
+        const d = delayMs || 800;
+        const at = Date.now() + d;
+        if (statsFlushTimer && statsFlushAt <= at) return;
+        if (statsFlushTimer) clearTimeout(statsFlushTimer);
+        statsFlushAt = at;
+        statsFlushTimer = setTimeout(() => { statsFlushTimer = null; flushStats(); }, d);
+    }
+
+    function loadStats() {
+        statsAll = readStats(STATS_KEY);
+        statsSession = readStats(STATS_SESSION_KEY);
+    }
+
+    // 某一小节"完整听完了" → 计入 seen 与错误组合榜的分母。
+    //   口径是**播完才算**：在 setMeasureHighlight 里，当高亮从 m 跳到 m+1 时记 m。
+    //   （"进入就算"在点小节跳转 / seek / 连播换段时会误计，而且会让"永远第一小节的 Ⅰ"被高估。）
+    function recordHeard(m) {
+        if (practiceMode) return;   // 错题练习的正确率不计入数据库
+        if (!data || m < 0 || m >= data.chords.length) return;
+        const d = data.chords[m].degree;
+        const scopes = [statsAll, statsSession];
+        for (let i = 0; i < scopes.length; i++) {
+            const s = scopes[i];
+            s.seen[d] = (s.seen[d] || 0) + 1;
+            s.totals.heard = (s.totals.heard || 0) + 1;
+            // 错误组合榜的分母：以当前小节结尾、长度 2/3/4 的窗口各 +1 次 seen。
+            //   （只记"出现过"，报错时才有资格谈"错了几次"。）
+            for (let L = 2; L <= 4; L++) {
+                if (m < L - 1) break;
+                const w = [];
+                for (let j = m - L + 1; j <= m; j++) w.push(data.chords[j].degree);
+                const k = w.join('|');
+                const c = s.combos[k] || (s.combos[k] = { seen: 0, wrong: 0 });
+                c.seen++;
+            }
+        }
+        markStatsDirty(3000);
+    }
+
+    // 一次报错 → 混淆矩阵 + 该级错误次数 + 错误组合榜（长度 2/3/4 的窗口各计一次错）
+    //   ★ 方向性：窗口按时间顺序拼 key（…前和弦 → 出错和弦），逆向 ≠ 正向。
+    function recordReport(rec) {
+        if (practiceMode) return;   // 错题练习不计入数据库
+        const guessedKey = (rec.guessed == null) ? '0' : String(rec.guessed);
+        const actualKey = String(rec.actual);
+        const scopes = [statsAll, statsSession];
+        for (let i = 0; i < scopes.length; i++) {
+            const s = scopes[i];
+            if (!s.confusion[actualKey]) s.confusion[actualKey] = {};
+            s.confusion[actualKey][guessedKey] = (s.confusion[actualKey][guessedKey] || 0) + 1;
+            s.wrong[actualKey] = (s.wrong[actualKey] || 0) + 1;
+            s.totals.reports = (s.totals.reports || 0) + 1;
+            const hist = [
+                (rec.prev3 && rec.prev3[0] != null) ? rec.prev3[0] : null,
+                (rec.prev3 && rec.prev3[1] != null) ? rec.prev3[1] : null,
+                (rec.prev3 && rec.prev3[2] != null) ? rec.prev3[2] : null,
+                rec.actual
+            ];
+            for (let L = 2; L <= 4; L++) {
+                const w = hist.slice(4 - L);
+                if (w.some((x) => x == null)) continue;   // 段首历史不足，该长度的窗口不成立
+                const k = w.join('|');
+                const c = s.combos[k] || (s.combos[k] = { seen: 0, wrong: 0 });
+                c.wrong++;
+            }
+        }
+        markStatsDirty(800);
+    }
+
+    // 切后台 / 关页面时补一次，免得 debounce 还没到就丢数据
+    if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden' && statsFlushTimer) flushStats();
+        });
+    }
+    if (typeof window !== 'undefined') {
+        window.addEventListener('pagehide', () => { if (statsFlushTimer) flushStats(); });
+    }
+
+    // ------------------------------------------------------------
+    // 出题加权（设置里的「使用用户数据优化题库」，默认关）
+    //   err = (错次数 + K*P0) / (听次数 + K)          —— Beta 平滑：只错过一两次不会猛加权
+    //   w   = clamp(1 + GAIN*(err - P0), WMIN, WMAX)  —— 有上下限，不会退化成只练一个级数
+    //   冷启动（没数据）→ err = P0 → w = 1，与均匀随机完全一致。
+    //   正确率回升 → err 回落 → w 自动降回基线（这就是"正确了就降回来"）。
+    // ------------------------------------------------------------
+    const ADAPT_P0 = 0.15;    // 基线错误率
+    const ADAPT_K = 8;        // 先验强度（伪计数）：越大越保守
+    const ADAPT_GAIN = 3;
+    const ADAPT_WMIN = 0.5;
+    const ADAPT_WMAX = 2.5;
+
+    function degreeWeight(d, counts) {
+        const n = counts.seen[d] || 0;
+        const e = counts.wrong[d] || 0;
+        const err = (e + ADAPT_K * ADAPT_P0) / (n + ADAPT_K);
+        let w = 1 + ADAPT_GAIN * (err - ADAPT_P0);
+        if (w < ADAPT_WMIN) w = ADAPT_WMIN;
+        if (w > ADAPT_WMAX) w = ADAPT_WMAX;
+        return w;
+    }
+
+    // 权重用"历史 + 本轮"的合并计数（历史样本更稳）
+    function mergedCounts() {
+        const seen = {}, wrong = {};
+        for (let d = 1; d <= 7; d++) {
+            seen[d] = (statsAll.seen[d] || 0) + (statsSession.seen[d] || 0);
+            wrong[d] = (statsAll.wrong[d] || 0) + (statsSession.wrong[d] || 0);
+        }
+        return { seen: seen, wrong: wrong };
+    }
+
+    // 按权重从 list 里抽一个级数（list 已过滤掉"与上一个相同"的那个）
+    function weightedPick(list) {
+        const c = mergedCounts();
+        const w = [];
+        let sum = 0;
+        for (let i = 0; i < list.length; i++) {
+            const x = degreeWeight(list[i], c);
+            w.push(x);
+            sum += x;
+        }
+        let r = Math.random() * sum;
+        for (let i = 0; i < list.length; i++) {
+            r -= w[i];
+            if (r <= 0) return list[i];
+        }
+        return list[list.length - 1];
+    }
+
+    // ============================================================
+    // 错题练习：从错误组合榜挑组合 → 用 Ⅰ 级和弦当胶水串起来连着播
+    // ============================================================
+
+    // 取错题候选（历史 + 本轮合并）：wrong ≥ MIN_PRACTICE_WRONG、按 wrong 降序。
+    //   ★ 只去"连续后缀"不去前缀 —— 方向性重要，Ⅴ→Ⅲ 和 Ⅲ→Ⅴ 是两回事；
+    //     已选了长组合 [1,5,3] 就不再单练 [5,3]（后缀语境已被长组合覆盖）。
+    const MIN_PRACTICE_WRONG = 2;
+
+    function topPracticeCombos(maxCount) {
+        const merged = {};
+        [statsAll, statsSession].forEach((s) => {
+            Object.keys(s.combos).forEach((k) => {
+                const v = s.combos[k];
+                if (!v || !v.wrong) return;
+                if (!merged[k]) merged[k] = { seen: 0, wrong: 0 };
+                merged[k].seen += (v.seen || 0);
+                merged[k].wrong += v.wrong;
+            });
+        });
+        const list = Object.keys(merged)
+            .map((k) => ({ d: k.split('|').map((x) => parseInt(x, 10)), wrong: merged[k].wrong }))
+            .filter((c) => c.wrong >= MIN_PRACTICE_WRONG && c.d.every((x) => x >= 1 && x <= 7))
+            .sort((a, b) => (b.wrong - a.wrong) || (b.d.length - a.d.length));
+        const picked = [];
+        for (let i = 0; i < list.length && picked.length < maxCount; i++) {
+            const c = list[i].d;
+            const isSuffix = picked.some((p) => {
+                if (p.length <= c.length) return false;
+                return p.slice(p.length - c.length).every((x, j) => x === c[j]);
+            });
+            if (!isSuffix) picked.push(c);
+        }
+        return picked;
+    }
+
+    // 组合序列 → 级数序列：Ⅰ 胶水。相邻同度在这里从构造上被杜绝
+    //   （前一个和弦是 Ⅰ 或组合自带 Ⅰ 开头时就不再额外插 Ⅰ）。
+    function buildPracticeSequence(combos) {
+        const seq = [];
+        combos.forEach((c) => {
+            if (!seq.length) {
+                if (c[0] !== 1) seq.push(1);
+            } else if (seq[seq.length - 1] !== 1 && c[0] !== 1) {
+                seq.push(1);
+            }
+            seq.push.apply(seq, c);
+        });
+        if (seq[seq.length - 1] !== 1) seq.push(1);
+        return seq;
+    }
+
+    // 错题练习的一段：随机调 + 随机顺序（Fisher-Yates）混合前几个错误组合。
+    function practiceProgression() {
+        const combos = topPracticeCombos(5);
+        if (!combos.length) return null;
+        for (let i = combos.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const t = combos[i]; combos[i] = combos[j]; combos[j] = t;
+        }
+        return generateProgressionFromSequence(pickRandomMajorKey(), buildPracticeSequence(combos), settings);
+    }
+
     // ------------------------------------------------------------
     // UI 与状态
     // ------------------------------------------------------------
 
     let data = null;              // { key, scale, keySig, chords }
+    // 错题练习模式：出题换成"错误组合 + Ⅰ 胶水"，正确率不计入数据库，不设报错。
+    let practiceMode = false;
     let chordAudioEl = null;
     let blobUrl = null;
     let isRendering = false;
@@ -1580,14 +1932,25 @@
     //   收起 = 一颗胶囊（只有「换一段」）；展开 = 铺满一屏的练习界面。
     //   它和音频是**解耦**的：mpMeasure 是"面板上正在看的小节"，
     //   暂停后依然保留（页面上那条高亮会被清掉，但面板还停在原处，方便作答）。
-    let mpMeasure = 0;            // 面板/胶囊当前显示的小节
+    let mpMeasure = 0;            // 面板当前**显示**的小节（冻结时停在冻结点）
+    let mpLiveMeasure = 0;        // 实时小节：永远跟随播放（冻结期间照常更新）
     let mpExpanded = false;       // 展开中？
-    let mpCoverVisible = true;    // 级数图的显隐开关：**持久**，不随小节切换重置
-    let mpReports = [];           // 报错记录（只存内存；怎么用下一步再规划）
-    let mpErrorCtx = null;        // 点开报错浮窗那一刻的快照，防作答时小节已漂移
+    let mpRevealing = false;      // 是否处于"按住揭示"（默认遮住，按住才显示）
+    let mpFreeze = null;          // 长按那一刻的冻结快照（null = 未冻结）
+    let mpSeg = 0;                // 段落代数：doGenerate 时 +1（防止冻结跨段串号）
+    let mpGesture = null;         // 长按手势记录（null = 无手势）
+    let mpReports = [];           // 报错明细（内存，上限 MP_REPORTS_MAX；聚合统计另有持久化）
+    let mpErrorCtx = null;        // 报错浮窗那一刻的快照，防作答时小节已漂移
     // 「换一段」之后要不要顺手接着播？迷你播放器的定位是连续刷题 → 默认接着播。
     // 想让它跟页面上那颗「🎲 换一段」一样"只生成不播"，把这个常量改成 false 即可。
     const MP_AUTOPLAY_AFTER_GENERATE = true;
+
+    // ---- 长按手势的旋钮（手感全靠这几个数）----
+    const MP_HOLD_MS = 160;       // 按住多久算"长按"（到点才揭示答案，防误触剧透）
+    const MP_SLOP_PX = 12;        // 长按阈值到达前的容差：超过就当成滑动/误触，取消本次
+    const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要报错"
+    const MP_LEFT_PX = 48;        // 按住之后往左滑多少算"回上一个和弦"（可连滑多次）
+    const MP_REPORTS_MAX = 500;   // 内存里留存的明细上限
 
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
     let progressRaf = 0;          // requestAnimationFrame 句柄
@@ -1613,6 +1976,7 @@
             grid: document.getElementById('degree-grid'),
             inversion: document.getElementById('chord-inversion'),
             secondInv: document.getElementById('chord-second-inv'),
+            adaptive: document.getElementById('chord-adaptive'),
             info: document.getElementById('chord-info'),
             renderInfo: document.getElementById('chord-render-info'),
             hint: document.getElementById('chord-key-hint'),
@@ -1634,10 +1998,25 @@
             mpNext: document.getElementById('chord-mp-next'),
             mpNote: document.getElementById('chord-mp-report-note'),
             mpGenerate: document.getElementById('chord-mp-generate'),
+            mpExitPractice: document.getElementById('chord-mp-exit-practice'),
+            mpHint: document.getElementById('chord-mp-hint'),
             mpError: document.getElementById('chord-mp-error'),
             mpErrorGrid: document.getElementById('chord-mp-error-grid'),
             mpErrorNone: document.getElementById('chord-mp-error-none'),
-            mpErrorCancel: document.getElementById('chord-mp-error-cancel')
+            mpErrorCancel: document.getElementById('chord-mp-error-cancel'),
+            // ---- 数据库页（听辨统计）----
+            dbMatrix: document.getElementById('db-matrix'),
+            dbTop: document.getElementById('db-top'),
+            dbCombos: document.getElementById('db-combos'),
+            dbTotalWrong: document.getElementById('db-total-wrong'),
+            dbTotalHeard: document.getElementById('db-total-heard'),
+            dbWrongRate: document.getElementById('db-wrong-rate'),
+            dbScopeAll: document.getElementById('db-scope-all'),
+            dbScopeRound: document.getElementById('db-scope-round'),
+            dbClearRound: document.getElementById('db-clear-round'),
+            dbClearAll: document.getElementById('db-clear-all'),
+            dbPractice: document.getElementById('db-practice'),
+            dbPracticeStatus: document.getElementById('db-practice-status')
         };
     }
 
@@ -1711,12 +2090,20 @@
     //   可以带提前量），两者故意拆开 —— 见 ART_LEAD_MS 的说明。
     function setMeasureHighlight(m) {
         if (m === highlightedMeasure) return;
-        if (highlightedMeasure >= 0 && measureRects[highlightedMeasure]) {
-            measureRects[highlightedMeasure].setAttribute('fill-opacity', '0');
+        const prev = highlightedMeasure;
+        if (prev >= 0 && measureRects[prev]) {
+            measureRects[prev].setAttribute('fill-opacity', '0');
         }
         highlightedMeasure = m;
         if (m >= 0 && measureRects[m]) {
             measureRects[m].setAttribute('fill-opacity', '0.14');
+        }
+        // 统计口径：**上一小节"完整播完"才算听过**。
+        //   条件是"连续前进一格 + 没在 seek + 真的在播"—— 点小节跳转 / 拖进度条 /
+        //   暂停续播都会破坏连续性，所以不会被误计（详见 recordHeard 的注释）。
+        if (prev >= 0 && m === prev + 1 && !seeking
+            && chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended) {
+            recordHeard(prev);
         }
         // 迷你播放器（展开着的那张级数大图）跟着走
         if (m >= 0) mpOnMeasure(m);
@@ -1794,6 +2181,7 @@
     // 一段播完时调用。注意退出条件：用户可能在这段时间里动手（取消勾选 / 按停止 /
     // 手动播放 / 点小节 / 切视图），那些动作都会把 autoBreak +1 → 这里就放弃接力。
     function scheduleAutoNext() {
+        if (practiceMode) return;    // 错题练习播完即停：自动连播会生成普通题混入统计口径
         if (!settings.autoContinue) return;
         cancelAutoNext();                        // 清掉可能残留的上一次接力（同时抬高代数）
         const brk = autoBreak;
@@ -1854,16 +2242,19 @@
 
         chordAudioEl.addEventListener('ended', () => {
             stopProgressLoop();
+            // ★ 只有"整段真实音频"播完才算一段结束。
+            //   渲染期间用来解锁 <audio> 的静音占位 WAV 也会触发 ended —— 那种不算，
+            //   否则每次播放都会顺手多生成一段。
+            const isRealAudio = !!(blobUrl && chordAudioEl.getAttribute('src') === blobUrl);
+            const realEnd = isRealAudio && !isRendering;
+            // 统计：整段的最后一小节等不到"下一格"来触发 recordHeard，这里补记一次
+            if (realEnd && highlightedMeasure >= 0) recordHeard(highlightedMeasure);
             setMeasureHighlight(-1);
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'none';
             }
             mpSyncPlayIcon();
-            // ★ 只有"整段真实音频"播完才算一段结束。
-            //   渲染期间用来解锁 <audio> 的静音占位 WAV 也会触发 ended —— 那种不算，
-            //   否则每次播放都会顺手多生成一段。
-            const isRealAudio = !!(blobUrl && chordAudioEl.getAttribute('src') === blobUrl);
-            if (isRealAudio && !isRendering) {
+            if (realEnd) {
                 autoStats.lastEndedAt = Date.now();
                 scheduleAutoNext();
             }
@@ -2201,6 +2592,7 @@
     const chordMediaHooks = {
         skip: (dir) => {
             if (!data || !chordAudioEl) return false;
+            mpCancelGesture();              // 显式导航 = 手势结束（含解冻）
             const cur = Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()));
             const next = Math.min(data.chords.length - 1, Math.max(0, cur + dir));
             if (next === cur) return true;      // 已在头/尾，照样吃掉这次点击
@@ -2218,6 +2610,11 @@
 
     function updateHint() {
         if (!els.hint || !data) return;
+        if (practiceMode) {
+            els.hint.textContent =
+                `错题练习：${data.key} 大调 · ${data.chords.length} 小节 · ${settings.tempo} BPM · 正确率不计入统计`;
+            return;
+        }
         const invText = settings.allowInversion ? '开启转位（和弦间平稳连接）' : '全部原位';
         const modeText = (data.voicingMode === 'fourpart')
             ? '四部和声 · 大谱表'
@@ -2228,7 +2625,8 @@
 
     async function doGenerate(auto) {
         stopChordPlayback();
-        data = generateChordProgression(settings);
+        // 错题练习：出题换成"错误组合 + Ⅰ 胶水"的固定序列（每次进入重洗一次顺序）
+        data = practiceMode ? practiceProgression() : generateChordProgression(settings);
         renderChordSheet(data);
         updateHint();
         setPlayButtonsEnabled(true);
@@ -2237,7 +2635,10 @@
         blobMode = null;
         highlightedMeasure = -1;
         coverMeasure = -1;              // 锁屏封面的"当前小节"也要复位（否则下一段第一小节会被判成"没变"）
-        mpMeasure = 0;                  // 迷你播放器回到第 1 小节
+        mpSeg++;                        // 段落代数 +1：冻结快照靠它判断"是不是已经跨到新一段了"
+        // ★ 不要在这里直接改 mpMeasure —— 统一走 mpOnMeasure 这一个入口。
+        //   它会在"用户正长按看答案"时只更新 mpLiveMeasure、不动显示，
+        //   于是自动连播换段也不会把用户按住的那个答案换掉。
         mpOnMeasure(0);
         mpSetNote('');                  // 上一段的报错提示也清掉
         // 顺便把整段的锁屏封面画好（异步）。等用户点播放时早就绪了，切小节零延迟。
@@ -2437,6 +2838,17 @@
         }
         syncSecondInvState();
 
+        // 「使用用户数据优化题库」：按历史错误率给级数加权（默认关）。
+        //   只影响"下一次生成"，所以改完直接 doGenerate 让新设置立刻见效。
+        if (els.adaptive) {
+            els.adaptive.checked = !!settings.adaptiveFromStats;
+            els.adaptive.addEventListener('change', (e) => {
+                settings.adaptiveFromStats = e.target.checked;
+                saveSettings();
+                doGenerate(true);
+            });
+        }
+
         if (els.grid) {
             els.grid.addEventListener('change', (e) => {
                 const t = e.target;
@@ -2500,15 +2912,13 @@
         // ---------------- 底部迷你播放器 ----------------
         if (els.mpExpand) els.mpExpand.addEventListener('click', () => mpSetExpanded(true));
         if (els.mpClose) els.mpClose.addEventListener('click', () => mpSetExpanded(false));
-        // 级数大图：点它切换显隐（持久开关，不随小节重置）
-        if (els.mpCover) els.mpCover.addEventListener('click', () => mpSetCoverVisible(!mpCoverVisible));
-        if (els.mpCoverHidden) els.mpCoverHidden.addEventListener('click', () => mpSetCoverVisible(true));
+        // ★ 级数图不再有"点一下切换显隐" —— 改成整个舞台长按揭示（见 bindStageGesture）。
         if (els.mpPrev) els.mpPrev.addEventListener('click', () => mpJump(-1));
         if (els.mpNext) els.mpNext.addEventListener('click', () => mpJump(1));
         if (els.mpPlayPause) els.mpPlayPause.addEventListener('click', () => { mpTogglePlay(); });
         if (els.mpGenerate) els.mpGenerate.addEventListener('click', () => { mpRegenerate(); });
         if (els.mpGenerateMin) els.mpGenerateMin.addEventListener('click', () => { mpRegenerate(); });
-        if (els.mpReport) els.mpReport.addEventListener('click', () => mpOpenError());
+        if (els.mpReport) els.mpReport.addEventListener('click', () => { mpCancelGesture(); mpOpenError(null); });
         if (els.mpErrorNone) els.mpErrorNone.addEventListener('click', () => mpSubmitReport(null));
         if (els.mpErrorCancel) els.mpErrorCancel.addEventListener('click', () => mpCloseError());
         if (els.mpError) {
@@ -2523,11 +2933,36 @@
                 mpSubmitReport(parseInt(b.dataset.degree, 10));
             });
         }
+
+        // 错题练习：进入（数据库页的按钮）/ 退出（面板顶部的按钮）
+        if (els.dbPractice) els.dbPractice.addEventListener('click', () => { startPractice(); });
+        if (els.mpExitPractice) els.mpExitPractice.addEventListener('click', () => { exitPractice(); });
+
+        // 长按看的答案：按住揭示、按住下滑报错、按住左滑上一个和弦
+        bindStageGesture();
+
+        // ---------------- 数据库页（听辨统计） ----------------
+        if (els.dbScopeAll) els.dbScopeAll.addEventListener('click', () => setStatsScope('all'));
+        if (els.dbScopeRound) els.dbScopeRound.addEventListener('click', () => setStatsScope('session'));
+        if (els.dbClearRound) els.dbClearRound.addEventListener('click', () => {
+            if (typeof confirm === 'function' && !confirm('清空「本轮」的统计，重新计数？\n（历史总计会保留）')) return;
+            statsSession = emptyStats();
+            setStatsScope('session');
+            flushStats();
+        });
+        if (els.dbClearAll) els.dbClearAll.addEventListener('click', () => {
+            if (typeof confirm === 'function' && !confirm('清空全部听辨统计（历史总计 + 本轮）？\n这一步不可撤销。')) return;
+            statsAll = emptyStats();
+            statsSession = emptyStats();
+            setStatsScope('all');
+            flushStats();
+        });
+
         // 转屏 / 缩放后重画（canvas 尺寸跟着变）
         if (typeof window !== 'undefined') {
             window.addEventListener('resize', () => { if (mpExpanded) mpPaintCover(); });
         }
-        mpSetCoverVisible(mpCoverVisible);
+        mpSetRevealed(false);
         mpSyncPlayIcon();
         mpOnMeasure(mpMeasure);
     }
@@ -2547,6 +2982,7 @@
 
     // 展开 / 收起。展开时锁住背景滚动（否则面板后面还能橡皮筋滚）。
     function mpSetExpanded(on) {
+        mpCancelGesture();               // 面板状态一变，在途的手势（含冻结）作废
         mpExpanded = !!on;
         if (els && els.mp) els.mp.dataset.state = mpExpanded ? 'expanded' : 'collapsed';
         if (typeof document !== 'undefined' && document.body) {
@@ -2561,8 +2997,14 @@
     }
 
     // 小节变了 → 收起条上的进度文字 + （展开时）重画大图
+    //
+    //   ★ 这是"显示"的唯一入口，所以冻结闸门也放在这里：
+    //     mpLiveMeasure 永远跟着播放走（真实进度不丢），
+    //     但只要手指还按着在看答案（mpFreeze 非空），显示就停在冻结点不动。
     function mpOnMeasure(m) {
         if (m < 0) return;
+        mpLiveMeasure = m;
+        if (mpFreeze) return;
         mpMeasure = m;
         mpPaintBarTitle();
         if (mpExpanded) mpPaintCover();
@@ -2572,9 +3014,10 @@
         if (!els || !els.mpBarTitle) return;
         const total = (data && data.chords.length) ? data.chords.length : 0;
         // ★ 只报"第几小节"，**不报级数** —— 收起条上写级数等于剧透答案
-        els.mpBarTitle.textContent = total
+        const base = total
             ? ('第 ' + (mpMeasure + 1) + ' / ' + total + ' 小节')
             : '还没有内容，点「下一首」';
+        els.mpBarTitle.textContent = practiceMode ? ('错题 · ' + base) : base;
     }
 
     // 把当前小节的级数画进面板里那张 canvas（与锁屏封面同一套画法、同一份数据）
@@ -2583,7 +3026,9 @@
     //   改成量"装它的那个舞台"，取能放下的最大正方形，再用行内样式把它钉死。
     function mpPaintCover() {
         if (!els || !els.mpCover) return;
-        const info = buildCoverInfo(mpMeasure);
+        // ★ 冻结期间画的是"按住那一刻的快照"，不是当前小节 —— 这就是"报错对象锁定"的一半。
+        //   （另一半在 mpOpenError：它也只认这份快照。）
+        const info = mpFreeze ? mpFreeze.info : buildCoverInfo(mpMeasure);
         if (!info) return;
         const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
         let side = 0;
@@ -2598,21 +3043,20 @@
         }
         els.mpCover.style.width = side + 'px';
         els.mpCover.style.height = side + 'px';
-        // 占位卡也钉成同一个正方形 —— 显隐切换时版式一点都不跳
+        // 占位卡也钉成同一个正方形 —— 揭示/回遮时版式一点都不跳
         if (els.mpCoverHidden) {
             els.mpCoverHidden.style.width = side + 'px';
             els.mpCoverHidden.style.height = side + 'px';
         }
-        // 隐藏态：**连画都不画**。
+        // 遮住时：**连画都不画**，还把画布像素抹掉。
         //   以前是"照画 + 盖一层 blur/grayscale"，但底色色相会透过毛玻璃漏出来
         //   （黄=Ⅴ、红=Ⅲ、蓝=Ⅳ…一眼就能猜），罗马数字的轮廓也没盖住。
-        //   现在隐藏时干脆不画，并把画布上的像素也清掉，只剩一张中性灰的占位卡，零线索。
         const px = Math.round(side * dpr);
         if (els.mpCover.width !== px || els.mpCover.height !== px) {
             els.mpCover.width = px;
             els.mpCover.height = px;
         }
-        if (!mpCoverVisible) {
+        if (!mpRevealing) {
             try { els.mpCover.getContext('2d').clearRect(0, 0, px, px); } catch (e) {}
             return;
         }
@@ -2621,21 +3065,199 @@
         } catch (e) {}
     }
 
-    // 级数图的显隐开关。**持久**：不随小节切换重置（用户按一下就一直隐藏）。
-    function mpSetCoverVisible(on) {
-        mpCoverVisible = !!on;
-        if (els && els.mpStage) els.mpStage.classList.toggle('is-hidden', !mpCoverVisible);
-        if (els && els.mpCoverHidden) els.mpCoverHidden.hidden = mpCoverVisible;
-        if (!mpCoverVisible) {
-            // 隐藏时把画布上的像素也抹掉 —— 只靠 CSS 藏，万一有渲染怪癖就漏了；
+    // 揭示开关（瞬时）：按住 = true，松手 = false。
+    //   ★ 与旧版的区别：以前是"点一下持久切换"，现在**默认永远遮住**，
+    //     只有手指按住的那段时间才看得见。
+    function mpSetRevealed(on) {
+        mpRevealing = !!on;
+        if (els && els.mpStage) {
+            els.mpStage.classList.toggle('is-hidden', !mpRevealing);
+            els.mpStage.classList.toggle('is-revealed', mpRevealing);
+        }
+        if (els && els.mpCoverHidden) els.mpCoverHidden.hidden = mpRevealing;
+        if (!mpRevealing) {
+            // 遮住时把画布上的像素也抹掉 —— 只靠 CSS 藏，万一有渲染怪癖就漏了；
             // 抹掉之后它是一张真正的空白画布，零线索。
             if (els && els.mpCover) {
                 try { els.mpCover.getContext('2d').clearRect(0, 0, els.mpCover.width, els.mpCover.height); } catch (e) {}
             }
             return;
         }
-        // 揭开时立刻画一张，别等到下一帧才有图（否则会看到空卡片闪一下）
+        // 揭示时立刻画一张，别等到下一帧才有图（否则会看到空卡片闪一下）
         if (mpExpanded) mpPaintCover();
+    }
+
+    // ------------------------------------------------------------
+    // 长按看答案：手势状态机
+    //
+    //   按下 →（MP_HOLD_MS）→ 揭示 + **冻结**当前小节
+    //     按住往下滑 → 打开报错浮窗（对象 = 冻结点那个和弦，不随音乐前进而变）
+    //     按住往左滑 → 回退到上一个和弦（可连滑，每滑一格退一格）
+    //   松手 / 系统打断 → 回到遮住 + 解冻
+    //
+    //   ★ 音乐不停：用户明确要的是"按住期间照常播，只有封面和报错对象冻住"。
+    //   ★ 冻结为什么不是只记一个"小节索引"：
+    //     自动连播的 doGenerate 会**整体换掉 data**，索引会指到新一段上去。
+    //     而 buildCoverInfo() 返回的是纯数据快照（degree/roman/base/parts/…），
+    //     所以这里直接把它整个存下来 —— 就算整段被换掉，按住时看到的答案也不变。
+    // ------------------------------------------------------------
+
+    // 往前取 n 个级数（不足处补 null）：[m-n, …, m-1]。
+    //   错误组合榜要"以出错和弦结尾、长度 2/3/4 的窗口"，所以从 prev2 泛化成任意长度。
+    function mpPrevDegrees(m, n) {
+        const out = [];
+        if (!data) { for (let i = 0; i < n; i++) out.push(null); return out; }
+        for (let i = m - n; i < m; i++) {
+            out.push((i >= 0 && i < data.chords.length) ? data.chords[i].degree : null);
+        }
+        return out;
+    }
+
+    function mpPrevTwo(m) { return mpPrevDegrees(m, 2); }
+
+    function mpFreezeAt(m) {
+        const info = buildCoverInfo(m);
+        if (!info) return false;
+        mpFreeze = {
+            seg: mpSeg,
+            measure: m,
+            info: info,
+            degree: info.degree,
+            roman: info.roman,
+            prev2: mpPrevTwo(m),
+            prev3: mpPrevDegrees(m, 3)
+        };
+        mpMeasure = m;            // 面板（含收起条上的进度）都停在冻结点
+        mpPaintBarTitle();
+        return true;
+    }
+
+    function mpUnfreeze() {
+        if (!mpFreeze) return;
+        mpFreeze = null;
+        mpMeasure = mpLiveMeasure;    // 恢复跟随实时进度
+        mpPaintBarTitle();
+        if (mpExpanded) mpPaintCover();
+    }
+
+    // 手势的统一收尾。任何"显式动作"（点按钮 / 换段 / 收起面板 / 切视图）都先调它。
+    function mpCancelGesture() {
+        if (mpGesture) {
+            if (mpGesture.timer) clearTimeout(mpGesture.timer);
+            if (els && els.mpStage && mpGesture.captured) {
+                try { els.mpStage.releasePointerCapture(mpGesture.pointerId); } catch (e) {}
+            }
+            mpGesture = null;
+        }
+        if (els && els.mpStage) {
+            els.mpStage.classList.remove('is-pressing', 'is-revealed');
+        }
+        mpSetRevealed(false);
+        mpUnfreeze();
+    }
+
+    // 长按阈值到点：冻结 + 揭示
+    function mpArmGesture(g) {
+        if (!mpFreezeAt(mpLiveMeasure)) return false;
+        g.phase = 'armed';
+        if (els && els.mpStage) {
+            els.mpStage.classList.remove('is-pressing');
+            els.mpStage.classList.add('is-revealed');
+        }
+        mpSetRevealed(true);
+        return true;
+    }
+
+    // 按住左滑：退到上一个和弦（冻结目标与小节一起退，音乐也跟着 seek 过去）
+    function mpStepBackWhileHolding() {
+        if (!data || !data.chords.length) return;
+        const cur = mpFreeze ? mpFreeze.measure : mpMeasure;
+        const next = Math.max(0, cur - 1);
+        if (next === cur) return;          // 已经在第一小节
+        mpFreezeAt(next);
+        mpSetRevealed(true);
+        doPlay(lastPlayMode, next);
+    }
+
+    function bindStageGesture() {
+        const stage = els && els.mpStage;
+        if (!stage) return;
+
+        // iOS 长按会弹拷贝菜单/放大镜，直接压掉
+        stage.addEventListener('contextmenu', (e) => { e.preventDefault(); });
+
+        stage.addEventListener('pointerdown', (e) => {
+            if (!mpExpanded || !data || !data.chords.length) return;
+            if (e.isPrimary === false) return;      // 只认主指针，防双指误触
+            if (mpGesture) return;
+            const g = {
+                pointerId: e.pointerId,
+                x0: e.clientX,
+                y0: e.clientY,
+                anchorX: e.clientX,
+                phase: 'pending',
+                axis: null,
+                captured: false,
+                timer: 0
+            };
+            mpGesture = g;
+            try { stage.setPointerCapture(e.pointerId); g.captured = true; } catch (err) {}
+            stage.classList.add('is-pressing');
+            g.timer = setTimeout(() => { g.timer = 0; mpArmGesture(g); }, MP_HOLD_MS);
+        });
+
+        stage.addEventListener('pointermove', (e) => {
+            const g = mpGesture;
+            if (!g || e.pointerId !== g.pointerId) return;
+            const dx = e.clientX - g.x0;
+            const dy = e.clientY - g.y0;
+
+            if (g.phase === 'pending') {
+                // 还没到长按阈值就动了 → 当成滑动/误触，取消（既不揭示也不触发方向）
+                if (Math.abs(dx) > MP_SLOP_PX || Math.abs(dy) > MP_SLOP_PX) {
+                    if (g.timer) { clearTimeout(g.timer); g.timer = 0; }
+                    stage.classList.remove('is-pressing');
+                    if (g.captured) { try { stage.releasePointerCapture(g.pointerId); } catch (err) {} g.captured = false; }
+                    mpGesture = null;
+                }
+                return;
+            }
+            if (g.phase !== 'armed') return;
+
+            // 先定轴：斜滑按主导轴，绝不双触发。
+            //   错题练习不设报错 → 不认"下滑"这个轴（只认左滑回退）。
+            if (!g.axis) {
+                if (!practiceMode && dy > MP_DOWN_PX && dy > Math.abs(dx) * 1.2) g.axis = 'down';
+                else if (dx < -MP_LEFT_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'left';
+            }
+
+            if (g.axis === 'down') {
+                if (dy > MP_DOWN_PX) {
+                    g.phase = 'done';                 // 一次性动作，之后忽略 move
+                    mpOpenError(mpFreeze);            // 目标 = 冻结快照；音乐不停
+                }
+                return;
+            }
+
+            if (g.axis === 'left') {
+                // 每再左滑一格就退一个小节（re-arm）；已经在第一小节就只重置锚点、不动作
+                let guard = 0;
+                while (g.anchorX - e.clientX >= MP_LEFT_PX && guard < 20) {
+                    g.anchorX -= MP_LEFT_PX;
+                    mpStepBackWhileHolding();
+                    guard++;
+                }
+            }
+        });
+
+        const finish = (e) => {
+            const g = mpGesture;
+            if (!g || (e && e.pointerId !== undefined && e.pointerId !== g.pointerId)) return;
+            mpCancelGesture();
+        };
+        stage.addEventListener('pointerup', finish);
+        stage.addEventListener('pointercancel', finish);
+        stage.addEventListener('lostpointercapture', finish);
     }
 
     function mpSetNote(text) {
@@ -2674,6 +3296,7 @@
     //   暂停作答时 currentTime 停在暂停点甚至 0，拿它做基准会跳错小节。
     function mpJump(dir) {
         if (!data || !data.chords.length) return;
+        mpCancelGesture();                   // 显式导航 = 手势结束（含解冻）
         const next = Math.max(0, Math.min(data.chords.length - 1, mpMeasure + dir));
         if (next === mpMeasure) return;      // 已在头 / 尾
         doPlay(lastPlayMode, next);
@@ -2682,6 +3305,7 @@
     // 换一段。默认顺手接着播（MP_AUTOPLAY_AFTER_GENERATE）。
     async function mpRegenerate() {
         if (isRendering) return;
+        mpCancelGesture();
         mpSetNote('');
         await doGenerate(false);
         if (MP_AUTOPLAY_AFTER_GENERATE) await doPlay(lastPlayMode, 0);
@@ -2734,14 +3358,33 @@
         }
     }
 
-    function mpOpenError() {
+    // 打开报错浮窗。
+    //   frozen = 长按那一刻的冻结快照（"按住下滑"进来时传它）；
+    //   传 null = 直接点「报错」按钮进来，用面板当前小节。
+    //   ★ 目标一旦定下就再也不变 —— 这就是"报错对象锁定在按住那一刻的和弦"。
+    function mpOpenError(frozen) {
+        if (practiceMode) return;            // 错题练习不设报错
         if (!data || !data.chords.length) return;
-        // 快照：作答期间音频可能还在走，小节会前进 —— 别记错小节
-        const m = Math.max(0, Math.min(data.chords.length - 1, mpMeasure));
+        let m, deg, rom, prev2, prev3;
+        if (frozen) {
+            m = frozen.measure;
+            deg = frozen.degree;
+            rom = frozen.roman;
+            prev2 = frozen.prev2;
+            prev3 = frozen.prev3;
+        } else {
+            m = Math.max(0, Math.min(data.chords.length - 1, mpMeasure));
+            deg = data.chords[m].degree;
+            rom = data.chords[m].roman;
+            prev2 = mpPrevTwo(m);
+            prev3 = mpPrevDegrees(m, 3);
+        }
         mpErrorCtx = {
             measure: m,
-            actual: data.chords[m].degree,
-            actualRoman: data.chords[m].roman
+            actual: deg,
+            actualRoman: rom,
+            prev2: prev2 || [null, null],
+            prev3: prev3 || [null, null, null]
         };
         mpBuildErrorOptions();
         if (els.mpError) els.mpError.hidden = false;
@@ -2758,17 +3401,279 @@
             measure: mpErrorCtx.measure,
             actual: mpErrorCtx.actual,
             actualRoman: mpErrorCtx.actualRoman,
+            // 前几个和弦（错误组合榜要用）—— 冻结进来时记的就是冻结点前面那几个
+            prev2: mpErrorCtx.prev2 || [null, null],
+            prev3: mpErrorCtx.prev3 || [null, null, null],
             guessed: (guessed == null ? null : guessed),
             guessedRoman: (guessed == null ? null : (DEGREE_CHOICES[guessed - 1] || null)),
             ts: Date.now()
         };
         mpReports.push(rec);
+        if (mpReports.length > MP_REPORTS_MAX) mpReports.shift();
+        recordReport(rec);            // 聚合统计（数据库页的数据源 + 出题加权的依据）
         mpCloseError();
         mpSetNote('已记录：你听成 ' + (rec.guessedRoman || '没听出来') +
             ' ｜ 实际 ' + rec.actualRoman + '（第 ' + (rec.measure + 1) + ' 小节）');
         mpErrorCtx = null;
-        // 数据怎么用、存哪儿，下一步再规划；现在先在控制台留一份
         try { console.log('[和弦听辨·报错]', rec); } catch (e) {}
+        // ★ 报错提交后回到报错和弦的小节开头**重播一小节**，播完自然继续往后。
+        //   （本轮明确推翻上一轮"报错提交后播放不停不跳转"的决定。）
+        //   doPlay 快路只是 seek，seeking 期间不会误计 heard；重播的那一小节会再计
+        //   一次 —— 它确实又被完整听了一遍，属可接受的双计。
+        //   isRendering 中提交时 doPlay 会静默跳过本次重播（概率极低）。
+        mpCancelGesture();            // 长按冻结/揭示态先解冻，再 seek
+        if (!practiceMode) doPlay(lastPlayMode, rec.measure);
+    }
+
+    // ============================================================
+    // 错题练习模式（复用迷你播放器，正确率不计入数据库，不设报错）
+    // ============================================================
+
+    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住左滑上一个';
+    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住左滑上一个（不计统计 · 无报错）';
+
+    // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 提示文案 / 收起条前缀 / 退出按钮
+    function applyPracticeUi(on) {
+        if (els && els.mpReport) els.mpReport.hidden = !!on;
+        if (els && els.mpExitPractice) els.mpExitPractice.hidden = !on;
+        if (els && els.mpHint) els.mpHint.textContent = on ? MP_HINT_PRACTICE : MP_HINT_NORMAL;
+        mpPaintBarTitle();
+        updateHint();
+    }
+
+    // 进入错题练习：取错误组合榜前 5 → Ⅰ 胶水连播。
+    //   统计闸门在 recordHeard / recordReport / mpOpenError / scheduleAutoNext 里。
+    async function startPractice() {
+        if (!topPracticeCombos(5).length) return false;
+        mpCancelGesture();
+        mpCloseError();
+        mpSetExpanded(false);
+        practiceMode = true;
+        applyPracticeUi(true);
+        await doGenerate(true);
+        // 从数据库页切回主页（路由由 index.html 暴露；拿不到就留在原页，不影响练习）
+        try {
+            if (global.appRouter && global.appRouter.goHome) global.appRouter.goHome();
+        } catch (e) {}
+        mpSetExpanded(true);
+        await doPlay(lastPlayMode, 0);
+        return true;
+    }
+
+    // 退出错题练习：恢复正常出题（不自动播，和日常「下一首」的落点一致）
+    async function exitPractice() {
+        if (!practiceMode) return;
+        practiceMode = false;
+        applyPracticeUi(false);
+        await doGenerate(false);
+    }
+
+    // ============================================================
+    // 数据库页：把统计渲染成 DOM
+    //   两个范围：「历史总计」/「本轮」；混淆矩阵用单色暖色深浅表示次数。
+    // ============================================================
+
+    let statsScope = 'all';       // 'all' = 历史总计 | 'session' = 本轮
+
+    function currentStats() {
+        return (statsScope === 'session') ? statsSession : statsAll;
+    }
+
+    function setStatsScope(scope) {
+        statsScope = (scope === 'session') ? 'session' : 'all';
+        if (els && els.dbScopeAll) els.dbScopeAll.classList.toggle('active', statsScope === 'all');
+        if (els && els.dbScopeRound) els.dbScopeRound.classList.toggle('active', statsScope === 'session');
+        renderStats();
+    }
+
+    // 混淆矩阵的深浅：1 / 2~4 / 5+ 三档暖色（不是纯红 —— 小面积数字上用纯红对比度差）
+    const DB_HEAT = [
+        { min: 0, bg: '#f4f5f8', fg: 'transparent' },
+        { min: 1, bg: '#faece7', fg: '#4a1b0c' },
+        { min: 2, bg: '#f5c4b3', fg: '#4a1b0c' },
+        { min: 5, bg: '#f0997b', fg: '#4a1b0c' }
+    ];
+
+    function heatFor(n) {
+        let pick = DB_HEAT[0];
+        for (let i = 0; i < DB_HEAT.length; i++) {
+            if (n >= DB_HEAT[i].min) pick = DB_HEAT[i];
+        }
+        return pick;
+    }
+
+    // 级数色块（用全站唯一色板，和锁屏封面 / 面板大图 / 报错浮窗同源）
+    function makeChip(d) {
+        const el = document.createElement('span');
+        el.className = 'db-chip';
+        if (d == null || d === 0) {
+            el.textContent = (d === 0) ? '？' : '—';
+            el.style.background = '#f4f5f8';
+            el.style.color = 'var(--text-tertiary)';
+            return el;
+        }
+        el.textContent = DEGREE_CHOICES[d - 1] || String(d);
+        paintDegreeChip(el, d);
+        return el;
+    }
+
+    function makeMatrixCell(rowDeg, colDeg, n) {
+        const el = document.createElement('div');
+        el.className = 'db-matrix__cell';
+        const h = heatFor(n);
+        el.style.background = h.bg;
+        if (n > 0) {
+            el.textContent = String(n);
+            el.style.color = h.fg;
+        } else if (rowDeg === colDeg) {
+            // 对角线（听成自己）理论上永远是 0 —— 给个淡淡的点方便定位
+            el.textContent = '·';
+            el.style.color = '#d3d7e2';
+        } else {
+            el.textContent = '';
+        }
+        el.title = DEGREE_CHOICES[rowDeg - 1] + ' → ' +
+            (colDeg === 0 ? '没听出来' : DEGREE_CHOICES[colDeg - 1]) + '：' + n + ' 次';
+        return el;
+    }
+
+    function emptyLine(text) {
+        const el = document.createElement('div');
+        el.className = 'db-empty';
+        el.textContent = text;
+        return el;
+    }
+
+    function renderStats() {
+        init();      // 保证 els / 统计都已就绪（理论上首屏已经进过和弦页，这里只是兜底）
+        if (!els || !els.dbMatrix) return;
+        const s = currentStats();
+
+        // ---- 三张汇总卡 ----
+        const reports = s.totals.reports || 0;
+        const heard = s.totals.heard || 0;
+        if (els.dbTotalWrong) els.dbTotalWrong.textContent = String(reports);
+        if (els.dbTotalHeard) els.dbTotalHeard.textContent = String(heard);
+        if (els.dbWrongRate) {
+            els.dbWrongRate.textContent = (heard > 0)
+                ? (Math.round(reports / heard * 1000) / 10) + '%'
+                : '—';
+        }
+        if (els.dbScopeAll) els.dbScopeAll.classList.toggle('active', statsScope === 'all');
+        if (els.dbScopeRound) els.dbScopeRound.classList.toggle('active', statsScope === 'session');
+
+        // ---- 混淆矩阵：7 行（实际）× (7 列 + 1 列"没听出来") ----
+        els.dbMatrix.innerHTML = '';
+        const corner = document.createElement('div');
+        corner.className = 'db-matrix__head';
+        els.dbMatrix.appendChild(corner);
+        for (let c = 1; c <= 7; c++) {
+            const h = document.createElement('div');
+            h.className = 'db-matrix__head';
+            h.textContent = DEGREE_CHOICES[c - 1];
+            els.dbMatrix.appendChild(h);
+        }
+        const hNone = document.createElement('div');
+        hNone.className = 'db-matrix__head';
+        hNone.textContent = '没听出';
+        els.dbMatrix.appendChild(hNone);
+
+        for (let r = 1; r <= 7; r++) {
+            const lab = document.createElement('div');
+            lab.className = 'db-matrix__rowlabel';
+            lab.textContent = DEGREE_CHOICES[r - 1];
+            els.dbMatrix.appendChild(lab);
+            const row = s.confusion[String(r)] || {};
+            for (let c = 1; c <= 7; c++) {
+                els.dbMatrix.appendChild(makeMatrixCell(r, c, row[String(c)] || 0));
+            }
+            els.dbMatrix.appendChild(makeMatrixCell(r, 0, row['0'] || 0));
+        }
+
+        // ---- 最常混淆 Top 8 ----
+        const pairs = [];
+        Object.keys(s.confusion).forEach((a) => {
+            const row = s.confusion[a] || {};
+            Object.keys(row).forEach((g) => {
+                const n = row[g] || 0;
+                if (n > 0) pairs.push({ a: parseInt(a, 10), g: parseInt(g, 10), n: n });
+            });
+        });
+        pairs.sort((x, y) => y.n - x.n);
+        if (els.dbTop) {
+            els.dbTop.innerHTML = '';
+            if (!pairs.length) {
+                els.dbTop.appendChild(emptyLine('还没有报错记录 —— 练习时按住级数图、往下滑即可报错'));
+            } else {
+                pairs.slice(0, 8).forEach((p) => {
+                    const row = document.createElement('div');
+                    row.className = 'db-row';
+                    row.appendChild(makeChip(p.a));
+                    const ar = document.createElement('span');
+                    ar.className = 'db-arrow';
+                    ar.textContent = '→';
+                    row.appendChild(ar);
+                    row.appendChild(makeChip(p.g));
+                    const meta = document.createElement('span');
+                    meta.className = 'db-row__meta';
+                    meta.textContent = p.n + ' 次';
+                    row.appendChild(meta);
+                    els.dbTop.appendChild(row);
+                });
+            }
+        }
+
+        // ---- 错误组合榜 Top 10（长度 2~4 混排，方向性：逆向 ≠ 正向）----
+        const combos = [];
+        Object.keys(s.combos).forEach((k) => {
+            const v = s.combos[k];
+            if (v && v.wrong > 0) {
+                combos.push({
+                    d: k.split('|').map((x) => parseInt(x, 10)),
+                    seen: v.seen || 0,
+                    wrong: v.wrong
+                });
+            }
+        });
+        combos.sort((x, y) => (y.wrong - x.wrong) || (y.seen - x.seen));
+        if (els.dbCombos) {
+            els.dbCombos.innerHTML = '';
+            if (!combos.length) {
+                els.dbCombos.appendChild(emptyLine('还没有数据 —— 报错时会把它前面的和弦一起记进组合（按时间顺序，逆向 ≠ 正向）'));
+            } else {
+                combos.slice(0, 10).forEach((c) => {
+                    const row = document.createElement('div');
+                    row.className = 'db-row';
+                    c.d.forEach((d, i) => {
+                        if (i > 0) {
+                            const ar = document.createElement('span');
+                            ar.className = 'db-arrow';
+                            ar.textContent = '→';
+                            row.appendChild(ar);
+                        }
+                        row.appendChild(makeChip(d));
+                    });
+                    const meta = document.createElement('span');
+                    meta.className = 'db-row__meta';
+                    const rate = (c.seen > 0) ? Math.round(c.wrong / c.seen * 100) : null;
+                    meta.textContent = '错 ' + c.wrong + ' 次 · 出现 ' + c.seen + ' 次' +
+                        (rate == null ? '' : ' · ' + rate + '%');
+                    row.appendChild(meta);
+                    els.dbCombos.appendChild(row);
+                });
+            }
+        }
+
+        // ---- 错题练习入口：有没有可练的组合决定按钮态 ----
+        if (els.dbPractice) {
+            const list = topPracticeCombos(5);
+            els.dbPractice.disabled = (list.length === 0);
+            if (els.dbPracticeStatus) {
+                els.dbPracticeStatus.textContent = list.length
+                    ? '已攒到 ' + list.length + ' 组常错的组合（错 ≥2 次）—— 用 Ⅰ 级和弦串起来连着练，不计入统计'
+                    : '还没有可练的错题 —— 同一个组合错够 2 次就会出现在这里';
+            }
+        }
     }
 
     // ------------------------------------------------------------
@@ -2781,6 +3686,7 @@
         if (inited) return;
         cacheEls();
         loadSettings();
+        loadStats();
         buildDegreeGrid();
         bindUI();
         updateHint();
@@ -2799,7 +3705,9 @@
         stopChordPlayback();
         // 离开和弦页：把迷你播放器复位成收起态（否则切回来面板还开着），浮窗也关掉
         mpSetExpanded(false);
+        mpCancelGesture();
         mpCloseError();
+        if (statsFlushTimer) flushStats();   // 离开时把统计补一次盘（debounce 可能还没到）
         // 离开和弦页就把媒体会话交还（不然人在视唱页、锁屏按播放会去动和弦那段音频）
         const host = global.ChordHost;
         if (host && host.reclaimMedia) host.reclaimMedia(null, null);
@@ -2813,6 +3721,13 @@
         play: doPlay,
         // 便于调试 / 自测
         _generateChordProgression: generateChordProgression,
+        _getSettings: () => settings,
+        // 错题练习（调试 / 自测 / 数据库页入口）
+        startPractice,
+        exitPractice,
+        _isPracticeMode: () => practiceMode,
+        _topPracticeCombos: (n) => topPracticeCombos(n || 5),
+        _generateProgressionFromSequence: generateProgressionFromSequence,
         _buildScale: buildScale,
         _buildCandidates: buildCandidates,
         _chordToneSpelled: chordToneSpelled,
@@ -2888,17 +3803,51 @@
         _clearReports: () => { mpReports = []; },
         _getMpState: () => ({
             measure: mpMeasure,
+            liveMeasure: mpLiveMeasure,
             expanded: mpExpanded,
-            coverVisible: mpCoverVisible,
+            revealing: mpRevealing,
+            frozen: !!mpFreeze,
+            freezeMeasure: mpFreeze ? mpFreeze.measure : -1,
+            freezeDegree: mpFreeze ? mpFreeze.degree : null,
+            gesturePhase: mpGesture ? mpGesture.phase : null,
+            gestureAxis: mpGesture ? mpGesture.axis : null,
             playing: !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended),
             errorOpen: !!(els && els.mpError && !els.mpError.hidden),
             reportCount: mpReports.length
         }),
         _setMpExpanded: mpSetExpanded,
         _setMpMeasure: (m) => { mpMeasure = m; mpOnMeasure(m); },
-        _setMpCoverVisible: mpSetCoverVisible,
+        _setMpRevealed: mpSetRevealed,
         _openMpError: mpOpenError,
         _closeMpError: mpCloseError,
+        // ---- 听辨统计 / 数据库页（调试 / 自测用）----
+        renderStats: renderStats,
+        _getStats: () => ({ all: statsAll, session: statsSession, scope: statsScope }),
+        _setStats: (which, obj) => {
+            const v = normalizeStats(obj);
+            if (which === 'session') statsSession = v; else statsAll = v;
+            renderStats();
+        },
+        _clearStats: (which) => {
+            if (which === 'session' || which === 'all') {
+                if (which === 'session') statsSession = emptyStats(); else statsAll = emptyStats();
+            } else {
+                statsAll = emptyStats();
+                statsSession = emptyStats();
+            }
+            renderStats();
+            flushStats();
+        },
+        _flushStats: flushStats,
+        _setStatsScope: setStatsScope,
+        _recordHeard: recordHeard,
+        _computeReport: (rec) => { recordReport(rec); flushStats(); },
+        // 出题加权（调试 / 自测用）
+        _degreeWeight: (d) => degreeWeight(d, mergedCounts()),
+        _mergedCounts: () => mergedCounts(),
+        _ADAPT: () => ({
+            p0: ADAPT_P0, k: ADAPT_K, gain: ADAPT_GAIN, wmin: ADAPT_WMIN, wmax: ADAPT_WMAX
+        }),
         _getMpErrorOptions: () => {
             if (!els || !els.mpErrorGrid) return [];
             const out = [];

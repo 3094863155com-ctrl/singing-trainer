@@ -483,7 +483,7 @@
         }
 
         /* ============================================================
-           顶部导航：在两个视图之间切换（视唱旋律生成 / 和弦听辨）
+           顶部导航：页面级路由（主页 = 和弦听辨 / 数据库 = 听辨统计）
            ============================================================ */
         .app-nav {
             display: flex;
@@ -603,18 +603,23 @@
         }
 
         /* ============================================================
-           底部迷你播放器（只在「和弦听辨」视图内）
+           底部迷你播放器（只在「和弦听辨」页面内）
            ------------------------------------------------------------
-           ★ 它整块 DOM 放在 #view-chord 内部。切到视唱页时 #view-chord 是
+           ★ 它整块 DOM 放在 #view-chord 内部。切到数据库页时 #view-chord 是
              display:none，而 display:none 子树里的 position:fixed 同样不渲染
-             —— 「切页自动隐藏」白拿，不用在 switchView 里写分支。
+             —— 「切页自动隐藏」白拿，不用在 switchRoot 里写分支。
            ★ 因此约束：body / .container / #view-chord 这条祖先链上不能出现
              transform / filter / will-change，否则 fixed 的包含块会被劫持。
            ============================================================ */
 
-        /* 给和弦页底部留出收起胶囊的高度，免得挡住谱面 */
+        /* 给和弦页底部留出「收起胶囊」的高度，免得挡住谱面 */
         #view-chord {
             padding-bottom: calc(var(--mp-bar-h) + var(--mp-gap) * 2 + var(--mp-safe));
+        }
+
+        /* 数据库页没有迷你播放器，正常留白即可 */
+        #view-db {
+            padding-bottom: calc(var(--mp-safe) + 8px);
         }
 
         .mp {
@@ -771,6 +776,19 @@
             padding: 4px;
         }
 
+        /* ★ 长按手势热区 = 整个舞台（户外手持好按）。
+           touch-action 必须**静态**写死：等 pointerdown 再设就晚了，
+           第一段手势会被浏览器当成滚动/缩放吃掉。
+           顺便压掉 iOS 长按弹出的选择/放大镜与点击高亮。 */
+        .mp-sheet__stage,
+        .mp-sheet__stage * {
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+            -webkit-tap-highlight-color: transparent;
+        }
+
         .mp-cover {
             display: block;
             /* ▲ canvas 是"替换元素"：只给 max-* + auto，浏览器才会按它自身的
@@ -781,17 +799,28 @@
             max-height: 100%;
             border-radius: var(--r-lg);
             box-shadow: var(--shadow-md);
-            cursor: pointer;
+            /* 揭示 / 回遮只动 opacity + transform（合成层，不掉帧）。
+               千万别在这里过渡 filter / box-shadow / 宽高。 */
+            opacity: 0;
+            transform: scale(0.96);
+            transition: opacity 0.12s ease, transform 0.14s cubic-bezier(0.34, 1.4, 0.5, 1);
+            pointer-events: none;      /* 手势统一由舞台收，canvas 不单独吃事件 */
         }
 
-        /* 隐藏态：直接藏掉那张图本身（不是盖一层模糊）。
-           模糊会漏两样东西：底色色相（黄=Ⅴ、红=Ⅲ…一眼能猜级数）和罗马数字的轮廓。
+        /* 遮住态：像素已被 clearRect 抹掉，再叠一层 visibility 双保险。
            用 visibility 而不是 display:none —— 保住它占的正方形，版式不跳。 */
         .mp-sheet__stage.is-hidden .mp-cover {
             visibility: hidden;
         }
 
-        /* 隐藏时代替它出现的中性灰卡片。尺寸由 JS 钉成和那张图一样的正方形。
+        /* 揭示态：封面淡入 + 轻微回弹 */
+        .mp-sheet__stage.is-revealed .mp-cover {
+            visibility: visible;
+            opacity: 1;
+            transform: scale(1);
+        }
+
+        /* 遮住时代替它出现的中性灰卡片。尺寸由 JS 钉成和那张图一样的正方形。
            刻意不带任何级数颜色，只写一句提示。 */
         .mp-cover-hidden {
             position: absolute;
@@ -799,8 +828,10 @@
             top: 50%;
             transform: translate(-50%, -50%);
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
+            gap: 10px;
             font-family: inherit;
             font-size: 16px;
             font-weight: 600;
@@ -809,11 +840,55 @@
             border: 1px dashed var(--border-strong);
             border-radius: var(--r-lg);
             cursor: pointer;
+            transition: transform 0.14s ease, opacity 0.12s ease;
+        }
+
+        /* 阶段一：按下（还没到长按阈值）—— 卡片缩一下 + 舞台底部进度条从左往右长，
+           让手指明确感到"按住了"。进度条用 scaleX 而非 width，避免每帧布局。 */
+        .mp-sheet__stage.is-pressing .mp-cover-hidden {
+            transform: translate(-50%, -50%) scale(0.97);
+        }
+
+        .mp-sheet__stage::after {
+            content: '';
+            position: absolute;
+            left: 50%;
+            bottom: 1px;
+            width: 110px;
+            height: 3px;
+            margin-left: -55px;
+            border-radius: 2px;
+            background: var(--accent);
+            transform: scaleX(0);
+            transform-origin: left center;
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .mp-sheet__stage.is-pressing::after {
+            opacity: 1;
+            transform: scaleX(1);
+            transition: transform 0.16s linear, opacity 0.08s linear;
+        }
+
+        /* 阶段二：揭示 —— 占位卡淡出并微微放大，封面接棒 */
+        .mp-sheet__stage.is-revealed .mp-cover-hidden {
+            opacity: 0;
+            transform: translate(-50%, -50%) scale(1.02);
+            pointer-events: none;
         }
 
         /* ★ 上面写了 display:flex，会把 [hidden] 自带的 display:none 盖掉，必须显式补回来 */
         .mp-cover-hidden[hidden] {
             display: none;
+        }
+
+        /* 手势提示行（发现性：不然没人知道能下滑/左滑） */
+        .mp-sheet__hint {
+            flex: 0 0 auto;
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-tertiary);
         }
 
         /* 一行三键：上一个 / 报错（主） / 下一个 */
@@ -960,14 +1035,151 @@
         .mp-error__cancel:active {
             background: var(--surface);
         }
+
+        /* ============================================================
+           数据库页（听辨统计）
+           ============================================================ */
+        .db-scope {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+
+        .db-scope .app-tab {
+            padding: 8px 22px;
+            font-size: 14px;
+        }
+
+        .db-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-lg);
+            box-shadow: var(--shadow-md);
+            padding: 18px;
+            margin-bottom: 18px;
+        }
+
+        .db-card__title {
+            margin: 0 0 12px;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .db-card__sub {
+            font-size: 12px;
+            font-weight: 400;
+            color: var(--text-tertiary);
+            margin-left: 6px;
+        }
+
+        /* 混淆矩阵：1 列行头 + 8 列（Ⅰ..Ⅶ + 没听出来），窄屏也放得下 */
+        .db-matrix {
+            display: grid;
+            grid-template-columns: 26px repeat(8, minmax(0, 1fr));
+            gap: 4px;
+        }
+
+        .db-matrix__head {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            text-align: center;
+            align-self: center;
+        }
+
+        .db-matrix__rowlabel {
+            font-size: 14px;
+            color: var(--text-secondary);
+            text-align: center;
+            align-self: center;
+        }
+
+        .db-matrix__cell {
+            height: 34px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--r-sm);
+            font-size: 13px;
+            font-weight: 600;
+            color: #4a1b0c;
+            background: #f4f5f8;
+        }
+
+        .db-matrix__cell.is-zero {
+            color: transparent;
+        }
+
+        /* 最常混淆 / 上下文组合的列表行 */
+        .db-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 9px 0;
+            border-bottom: 1px dashed var(--border);
+            font-size: 14px;
+            color: var(--text-primary);
+        }
+
+        .db-row:last-child {
+            border-bottom: none;
+        }
+
+        .db-row__meta {
+            margin-left: auto;
+            font-size: 12px;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .db-arrow {
+            color: var(--text-tertiary);
+            font-size: 13px;
+        }
+
+        .db-chip {
+            flex: 0 0 auto;
+            width: 30px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: var(--r-sm);
+            font-size: 15px;
+            font-weight: 700;
+            border: 1px solid rgba(16, 24, 40, 0.10);
+        }
+
+        .db-empty {
+            font-size: 13px;
+            color: var(--text-tertiary);
+            line-height: 1.8;
+        }
+
+        .db-foot {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin-bottom: 24px;
+        }
+
+        .db-foot .btn {
+            padding: 9px 20px;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
+        <!-- 顶部页面级路由：主页（和弦听辨）/ 数据库（听辨统计）。
+             视唱旋律生成已拆到独立站点，不再出现在这个应用里。 -->
         <nav class="app-nav">
-            <!-- 默认落在「和弦听辨」：active 挂在 chord 上（静态标记 + 脚本末尾的 switchView('chord') 双保险） -->
-            <button class="app-tab" data-view="singing">🎤 视唱旋律生成</button>
-            <button class="app-tab active" data-view="chord">🎹 和弦听辨</button>
+            <button class="app-tab active" data-root="home">🏠 主页</button>
+            <button class="app-tab" data-root="db">📊 数据库</button>
         </nav>
 
         <!-- ============ 视图一：视唱旋律生成（原有全部功能） ============ -->
@@ -1212,6 +1424,14 @@
                             不勾选＝所有级数都不出现 6₄；勾选＝允许 6₄（需先开启转位）
                         </span>
                     </div>
+
+                    <div class="control-group" style="width: 100%; justify-content: center;">
+                        <label>📈 使用用户数据优化题库：</label>
+                        <input type="checkbox" id="chord-adaptive" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
+                        <span style="color: var(--text-tertiary); font-size: 12px;">
+                            关闭＝每个级数等概率；开启＝按你的历史错误率调整出题概率（错得多的多出一点，正确率回升就自动降回来）。数据在底部「数据库」页里看
+                        </span>
+                    </div>
                 </div>
             </details>
 
@@ -1248,12 +1468,18 @@
                     <div class="mp-sheet__top">
                         <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器">▼ 收起</button>
                         <button class="mp-icon-btn" id="chord-mp-playpause" aria-label="播放或暂停">▶ 播放</button>
+                        <!-- 错题练习模式才出现：点了回正常出题 -->
+                        <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="退出错题练习" hidden>✕ 退出错题</button>
                     </div>
 
+                    <!-- 长按热区：整个舞台。按住=揭示答案；按住下滑=报错；按住左滑=上一个和弦。
+                         手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
                     <div class="mp-sheet__stage" id="chord-mp-stage">
                         <canvas class="mp-cover" id="chord-mp-cover"></canvas>
-                        <button class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>点一下看答案</button>
+                        <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>按住看答案</div>
                     </div>
+
+                    <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住左滑上一个</div>
 
                     <div class="mp-sheet__actions">
                         <button class="mp-action-btn" id="chord-mp-prev">◀ 上一个</button>
@@ -1279,7 +1505,58 @@
                 </div>
             </div>
         </div><!-- /#view-chord -->
-    </div>
+
+        <!-- ============ 视图三：数据库（听辨统计） ============
+             内容全部由 chord_recognition.js 的 renderStats() 填（数据也归它管）。
+             这里只放骨架：三张汇总卡 + 范围切换 + 混淆矩阵 + 最常混淆 + 错误组合榜 + 错题练习 + 清空。 -->
+        <div id="view-db" style="display: none">
+            <div class="stats">
+                <div class="stat-item">
+                    <div class="stat-label">累计报错</div>
+                    <div class="stat-value" id="db-total-wrong">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">听过和弦</div>
+                    <div class="stat-value" id="db-total-heard">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">整体错误率</div>
+                    <div class="stat-value" id="db-wrong-rate">—</div>
+                </div>
+            </div>
+
+            <div class="db-scope" style="margin-top:16px;">
+                <button class="app-tab active" id="db-scope-all">历史总计</button>
+                <button class="app-tab" id="db-scope-round">本轮</button>
+            </div>
+
+            <div class="db-card">
+                <div class="db-card__title">混淆矩阵<span class="db-card__sub">左＝实际级数 · 上＝你听成的级数</span></div>
+                <div class="db-matrix" id="db-matrix"></div>
+            </div>
+
+            <div class="db-card">
+                <div class="db-card__title">最常混淆<span class="db-card__sub">按次数降序</span></div>
+                <div id="db-top"></div>
+            </div>
+
+            <div class="db-card">
+                <div class="db-card__title">错误组合榜<span class="db-card__sub">以出错和弦结尾的 2~4 和弦窗口 · 逆向≠正向 · 按出错次数降序</span></div>
+                <div id="db-combos"></div>
+            </div>
+
+            <div class="db-card">
+                <div class="db-card__title">错题练习<span class="db-card__sub">把常错的组合用 Ⅰ 级和弦串起来连着练 · 不计入统计 · 无报错键</span></div>
+                <div id="db-practice-status" class="db-empty"></div>
+                <button class="btn btn-primary" id="db-practice" style="width:100%;margin-top:10px;" disabled>🎯 开始错题练习</button>
+            </div>
+
+            <div class="db-foot">
+                <button class="btn btn-secondary" id="db-clear-round">清空本轮</button>
+                <button class="btn btn-secondary" id="db-clear-all">清空历史</button>
+            </div>
+        </div>
+    </div><!-- /.container -->
 
     <script>
         const scales = {
@@ -3373,38 +3650,49 @@
         ensureMediaSession();
 
         // ============================================================
-        // 视图切换：视唱旋律生成 ←→ 和弦听辨
-        // 两个视图在同一页面内显隐切换；切页时互相停止播放，避免同时出声。
+        // 页面级路由（顶部按钮）：主页（和弦听辨）←→ 数据库（听辨统计）
+        //   视唱旋律生成已拆到独立站点，这里只剩两个顶层页面。
         // ============================================================
-        const viewSinging = document.getElementById('view-singing');
         const viewChord = document.getElementById('view-chord');
+        const viewDb = document.getElementById('view-db');
+        const appNav = document.querySelector('.app-nav');
 
-        function switchView(view) {
-            document.querySelectorAll('.app-tab').forEach((b) => {
-                b.classList.toggle('active', b.dataset.view === view);
-            });
-            const toChord = (view === 'chord');
-            viewSinging.style.display = toChord ? 'none' : '';
-            viewChord.style.display = toChord ? '' : 'none';
+        function switchRoot(root) {
+            const toDb = (root === 'db');
+            // ★ 只认 .app-nav 里的按钮 —— 数据库页的范围切换复用了 .app-tab 样式，
+            //   不限定作用域会顺手把它们的 active 也抹掉。
+            if (appNav) {
+                appNav.querySelectorAll('.app-tab').forEach((b) => {
+                    b.classList.toggle('active', b.dataset.root === root);
+                });
+            }
+            if (viewDb) viewDb.style.display = toDb ? '' : 'none';
+            if (viewChord) viewChord.style.display = toDb ? 'none' : '';
 
-            if (toChord) {
-                stopMelody();   // 停掉视唱页的播放（渲染播放 + 钢琴伴奏 + 绿线）
-                if (window.ChordRecognition) ChordRecognition.activate();
-            } else {
-                if (window.ChordRecognition) ChordRecognition.deactivate();
+            if (toDb) {
+                // 离开主页：停掉和弦页播放 + 交还媒体会话
+                if (window.ChordRecognition) {
+                    ChordRecognition.deactivate();
+                    ChordRecognition.renderStats();
+                }
+            } else if (window.ChordRecognition) {
+                ChordRecognition.activate();
             }
         }
 
-        document.querySelectorAll('.app-tab').forEach((b) => {
-            b.addEventListener('click', () => switchView(b.dataset.view));
-        });
+        if (appNav) {
+            appNav.querySelectorAll('.app-tab').forEach((b) => {
+                b.addEventListener('click', () => switchRoot(b.dataset.root));
+            });
+        }
 
-        // ★ 默认视图 =「和弦听辨」。
-        //   静态 HTML 已经把 tab 的 active 与两个 view 的 display 设成和弦页，
-        //   这行是补「另一半」——switchView 会顺带调 ChordRecognition.activate()，
+        // 供 chord_recognition.js 的「错题练习」从数据库页切回主页
+        window.appRouter = { goHome: () => switchRoot('home') };
+
+        // ★ 默认页面 =「主页（和弦听辨）」。
+        //   switchRoot 会顺带调 ChordRecognition.activate()，
         //   由它去建级数网格并先生成一段（否则和弦页是空的）。
-        //   注意：viewSinging 是 const（本作用域上方声明），这一行必须留在它之后。
-        switchView('chord');
+        switchRoot('home');
     </script>
 </body>
 </html>
