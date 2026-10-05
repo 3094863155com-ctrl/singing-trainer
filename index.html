@@ -2512,6 +2512,16 @@
                     renderInfo.textContent = text;
                 });
 
+                // ★ 渲染期间用户可能已经切到「和弦听辨」页 —— 那就不要开播。
+                //   否则两个视图会同时出声，还会把锁屏媒体会话从和弦页抢回来。
+                if (viewSinging.style.display === 'none') {
+                    renderInfo.textContent = '已切换到和弦听辨页，本次结果不播放';
+                    renderWorkDone = true;
+                    notifyRenderDone();
+                    tryFinishRender();
+                    return;
+                }
+
                 // 释放上一次的 blob URL，避免内存泄漏
                 if (renderedBlobUrl) {
                     URL.revokeObjectURL(renderedBlobUrl);
@@ -2569,67 +2579,112 @@
             }
         }
 
-        // 首次创建渲染 Audio 元素并配置 MediaSession（只执行一次，后续 doRender 复用元素）
+        // ============================================================
+        // 共享 MediaSession（锁屏 / 控制中心 / 灵动岛）
+        //   整页只有一个媒体会话，而视唱页与和弦页都要往上面写东西。
+        //   setActionHandler 是"每个动作全局唯一"的 —— 两边各注册一次会互相覆盖，
+        //   切页以后锁屏按钮就会控制错的 <audio>（按暂停没反应 / 按了播别的）。
+        //   所以这里统一注册一次，回调按"当前活跃元素"转发。
+        //   规则：谁在播，谁就是活跃元素（各 Audio 的 play 事件自动认领）。
+        // ============================================================
+        let activeMediaEl = null;      // 当前在播的 <audio>
+        let activeMediaHooks = null;   // 可选：{ skip(dir) -> true 表示已自己处理 }
+        let mediaSessionReady = false;
+
+        function mediaReclaim(el, hooks) {
+            activeMediaEl = el || null;
+            activeMediaHooks = hooks || null;
+        }
+
+        function mediaUpdatePosition(el) {
+            if (!('mediaSession' in navigator)) return;
+            const a = el || activeMediaEl;
+            if (!a) return;
+            const dur = a.duration;
+            if (!isFinite(dur) || dur <= 0) return;  // 元数据未加载时不更新
+            try {
+                navigator.mediaSession.setPositionState({
+                    duration: dur,
+                    playbackRate: a.playbackRate || 1,
+                    position: Math.min(Math.max(a.currentTime, 0), dur)
+                });
+            } catch (e) { /* 部分浏览器对非法值会抛错，忽略 */ }
+        }
+
+        // 写"正在播放"信息（标题 / 艺术家 / 封面）。artwork 走数组，可给多个尺寸。
+        function mediaSetNowPlaying(meta) {
+            if (!('mediaSession' in navigator)) return false;
+            if (typeof window.MediaMetadata !== 'function') return false;
+            try {
+                navigator.mediaSession.metadata = new window.MediaMetadata(meta || {});
+                return true;
+            } catch (e) { return false; }
+        }
+
+        // 只注册一次。必须在任何播放之前调用 —— 和弦页可能比视唱页先播。
+        function ensureMediaSession() {
+            if (mediaSessionReady) return;
+            if (!('mediaSession' in navigator)) return;
+            mediaSessionReady = true;
+
+            // Media Session API：iOS 锁屏显示播放控件
+            // 增强：1) 可拖动进度条（seekto + positionState 实时更新）
+            //       2) 上一首/下一首键默认「倒退5秒/前进5秒」（兼容 AirPods 双击耳机）；
+            //          当前页若给了 skip 钩子（和弦页 = 上一小节/下一小节），优先用它
+            //       3) 不注册 seekbackward/seekforward → 锁屏显示上一首/下一首图标（非倒退/快进）
+            navigator.mediaSession.setActionHandler('play', () => {
+                if (activeMediaEl) activeMediaEl.play().catch(() => {});
+                navigator.mediaSession.playbackState = 'playing';
+            });
+            navigator.mediaSession.setActionHandler('pause', () => {
+                if (activeMediaEl) activeMediaEl.pause();
+                navigator.mediaSession.playbackState = 'paused';
+                mediaUpdatePosition(activeMediaEl);
+            });
+            navigator.mediaSession.setActionHandler('previoustrack', () => {
+                if (activeMediaHooks && activeMediaHooks.skip && activeMediaHooks.skip(-1)) return;
+                if (activeMediaEl) {
+                    activeMediaEl.currentTime = Math.max(0, activeMediaEl.currentTime - 5);
+                }
+                mediaUpdatePosition(activeMediaEl);
+            });
+            navigator.mediaSession.setActionHandler('nexttrack', () => {
+                if (activeMediaHooks && activeMediaHooks.skip && activeMediaHooks.skip(1)) return;
+                if (activeMediaEl) {
+                    const dur = activeMediaEl.duration || 0;
+                    activeMediaEl.currentTime = Math.min(dur, activeMediaEl.currentTime + 5);
+                }
+                mediaUpdatePosition(activeMediaEl);
+            });
+            navigator.mediaSession.setActionHandler('seekto', (details) => {
+                if (!activeMediaEl) return;
+                if (details.fastSeek && 'fastSeek' in activeMediaEl) {
+                    activeMediaEl.fastSeek(details.seekTime);
+                } else {
+                    activeMediaEl.currentTime = details.seekTime;
+                }
+                mediaUpdatePosition(activeMediaEl);
+            });
+        }
+
+        // 首次创建渲染 Audio 元素（只执行一次，后续 doRender 复用元素）
         // 关键：必须在用户手势内首次创建并 play() 过，元素才算"解锁"，
         // 后续无手势场景（自动下一首）只改 src 再 play() 才不会抛 NotAllowedError。
         function ensureRenderedAudioEl() {
             if (renderedAudioEl) return;
             renderedAudioEl = new Audio();
+            ensureMediaSession();
 
-            if (!('mediaSession' in navigator)) return;
-
-            // Media Session API：iOS 锁屏显示播放控件
-            // 增强：1) 可拖动进度条（seekto + positionState 实时更新）
-            //       2) 上一首/下一首键实际为「倒退5秒/前进5秒」（previoustrack/nexttrack，兼容 AirPods 双击耳机）
-            //       3) 不注册 seekbackward/seekforward → 锁屏显示上一首/下一首图标（非倒退/快进）
-            const updatePositionState = () => {
-                if (!renderedAudioEl) return;
-                const dur = renderedAudioEl.duration;
-                if (!isFinite(dur) || dur <= 0) return;  // 元数据未加载时不更新
-                try {
-                    navigator.mediaSession.setPositionState({
-                        duration: dur,
-                        playbackRate: renderedAudioEl.playbackRate || 1,
-                        position: Math.min(renderedAudioEl.currentTime, dur)
-                    });
-                } catch (e) { /* 部分浏览器对非法值会抛错，忽略 */ }
-            };
-
-            navigator.mediaSession.setActionHandler('play', () => {
-                if (renderedAudioEl) renderedAudioEl.play();
-                navigator.mediaSession.playbackState = 'playing';
-            });
-            navigator.mediaSession.setActionHandler('pause', () => {
-                if (renderedAudioEl) renderedAudioEl.pause();
-                navigator.mediaSession.playbackState = 'paused';
-                updatePositionState();
-            });
-            navigator.mediaSession.setActionHandler('previoustrack', () => {
-                if (renderedAudioEl) {
-                    renderedAudioEl.currentTime = Math.max(0, renderedAudioEl.currentTime - 5);
-                }
-                updatePositionState();
-            });
-            navigator.mediaSession.setActionHandler('nexttrack', () => {
-                if (renderedAudioEl) {
-                    const dur = renderedAudioEl.duration || 0;
-                    renderedAudioEl.currentTime = Math.min(dur, renderedAudioEl.currentTime + 5);
-                }
-                updatePositionState();
-            });
-            navigator.mediaSession.setActionHandler('seekto', (details) => {
-                if (!renderedAudioEl) return;
-                if (details.fastSeek && 'fastSeek' in renderedAudioEl) {
-                    renderedAudioEl.fastSeek(details.seekTime);
-                } else {
-                    renderedAudioEl.currentTime = details.seekTime;
-                }
-                updatePositionState();
-            });
+            // 谁在播谁就是活跃元素：视唱页一开播，锁屏按钮自动切回它
+            renderedAudioEl.addEventListener('play', () => mediaReclaim(renderedAudioEl, null));
 
             // 用 onXXX 赋值（覆盖式），避免每次 doRender addEventListener 累积监听器
-            renderedAudioEl.onloadedmetadata = updatePositionState;
-            renderedAudioEl.ontimeupdate = updatePositionState;
+            // 进度只在"自己还是活跃元素"时报，免得和弦页播放时被这边的旧时长覆盖
+            renderedAudioEl.onloadedmetadata = () => mediaUpdatePosition(renderedAudioEl);
+            renderedAudioEl.ontimeupdate = () => {
+                if (activeMediaEl && activeMediaEl !== renderedAudioEl) return;
+                mediaUpdatePosition(renderedAudioEl);
+            };
         }
 
         renderBtn.addEventListener('click', () => {
@@ -2832,8 +2887,19 @@
             audioBufferToWav: audioBufferToWav,
             initAudio: initAudio,
             bufferCache: bufferCache,
-            get audioContext() { return audioContext; }
+            get audioContext() { return audioContext; },
+            // ---- 共享 MediaSession（锁屏封面 / 锁屏按钮）----
+            //   和弦页不自己注册 actionHandler，而是通过这三个接口跟宿主共用同一个媒体会话。
+            reclaimMedia: mediaReclaim,
+            updateMediaPosition: (el) => mediaUpdatePosition(el),
+            setNowPlaying: (meta) => mediaSetNowPlaying(meta),
+            // 调试：看媒体会话现在归谁（自测用）
+            getActiveMediaEl: () => activeMediaEl,
+            hasMediaHooks: () => !!activeMediaHooks
         };
+
+        // 媒体会话的 actionHandler 只注册一次，且必须早于任何播放（用户可能先点和弦页）
+        ensureMediaSession();
 
         // ============================================================
         // 视图切换：视唱旋律生成 ←→ 和弦听辨

@@ -1657,6 +1657,8 @@
         if (m >= 0 && measureRects[m]) {
             measureRects[m].setAttribute('fill-opacity', '0.14');
         }
+        // 锁屏封面跟着走 —— "当前小节"只有一个来源，就是这里
+        if (m >= 0) updateNowPlaying(m);
     }
 
     // 每小节的时长（秒）：一小节 4 拍
@@ -1670,15 +1672,44 @@
     function bindAudioProgress() {
         if (!chordAudioEl || chordAudioEl.__crBound) return;
         chordAudioEl.__crBound = true;
+
+        // 谁在播谁就是活跃元素：和弦页一开播，锁屏按钮（含上一首/下一首=上/下一小节）
+        // 就切到它身上；视唱页一开播又会切回去。这样两边永远不打架。
+        chordAudioEl.addEventListener('play', () => {
+            const host = global.ChordHost;
+            if (host && host.reclaimMedia) host.reclaimMedia(chordAudioEl, chordMediaHooks);
+            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'playing';
+            }
+        });
+
         chordAudioEl.addEventListener('timeupdate', () => {
             if (!data) return;
             const m = Math.min(data.chords.length - 1,
                 Math.floor(chordAudioEl.currentTime / measureDuration()));
             setMeasureHighlight(m);
+            // 锁屏进度条（可拖动）也要跟着走
+            const host = global.ChordHost;
+            if (host && host.updateMediaPosition) host.updateMediaPosition(chordAudioEl);
         });
-        chordAudioEl.addEventListener('ended', () => setMeasureHighlight(-1));
+
+        chordAudioEl.addEventListener('loadedmetadata', () => {
+            const host = global.ChordHost;
+            if (host && host.updateMediaPosition) host.updateMediaPosition(chordAudioEl);
+        });
+
+        chordAudioEl.addEventListener('ended', () => {
+            setMeasureHighlight(-1);
+            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'none';
+            }
+        });
+
         chordAudioEl.addEventListener('pause', () => {
             if (!seeking) setMeasureHighlight(-1);   // seek 过程中会短暂 pause，别清高亮
+            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'paused';
+            }
         });
     }
 
@@ -1704,6 +1735,213 @@
 
     // 三种播放方式：柱式（一拍一下）/ 分解（一拍四音，低→高滚动）/ 单音（每小节只弹最低音，长音）
     const PLAY_MODES = { block: '柱式', arpeggio: '分解和弦', bass: '单音' };
+
+    // ------------------------------------------------------------
+    // 锁屏 / 控制中心封面：把"当前这一小节的和弦级数"画成图，随播放实时更换
+    //
+    //   iOS 锁屏、macOS 控制中心读的都是 MediaSession 的 metadata（标题 + 封面）。
+    //   整页只有一个媒体会话，由 index.html 里的中枢统一管（走 ChordHost），
+    //   这里只负责"画封面"和"把当前小节推过去"。
+    //
+    //   两个尺寸都要给：
+    //     96×96   —— 锁屏上那张小卡片（只给大图的话，Safari 在小卡片里会显示灰块）
+    //     512×512 —— 点开后的全屏播放器
+    //   图用 canvas 现画 → toBlob → blob URL。每小节一张**独立的** URL，
+    //   系统因此一定能判定"封面变了"，不会因为 URL 相同而拿缓存不刷新。
+    // ------------------------------------------------------------
+    const ART_SIZES = [512, 96];
+    const ART_COMPACT_MAX = 128;   // <= 这个尺寸只画级数大字，别的内容缩到 96px 就是一团糊
+
+    // 按级数配色（浅底深字；换级数就换颜色，扫一眼就知道功能变了）
+    const ART_PALETTE = [
+        { top: '#fff8ef', bottom: '#ffe8cf', ink: '#8a4a10', sub: '#a9762f' },  // Ⅰ 主
+        { top: '#f6f4ff', bottom: '#e6e1ff', ink: '#4633a5', sub: '#6b5cc0' },  // Ⅱ
+        { top: '#f0f6ff', bottom: '#dce9ff', ink: '#1c4fd0', sub: '#3d6ed2' },  // Ⅲ
+        { top: '#eefbf4', bottom: '#d2f6e2', ink: '#08724f', sub: '#208a66' },  // Ⅳ 下属
+        { top: '#fff3f2', bottom: '#ffe0dd', ink: '#b21f1f', sub: '#c85450' },  // Ⅴ 属
+        { top: '#fdf4ff', bottom: '#f4e6ff', ink: '#83178f', sub: '#a144a6' },  // Ⅵ
+        { top: '#f7f9fc', bottom: '#e3e9f1', ink: '#2f3d4f', sub: '#5a6b80' }   // Ⅶ
+    ];
+
+    const ART_SERIF = '"Songti SC", "STSong", "Times New Roman", Georgia, serif';
+    const ART_SANS = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif';
+
+    let artCache = [];     // 小节索引 -> MediaMetadata.artwork 数组
+    let artUrls = [];      // 已生成的全部 blob URL（换一段时统一回收）
+
+    function artSupported() {
+        return typeof document !== 'undefined'
+            && typeof navigator !== 'undefined'
+            && 'mediaSession' in navigator
+            && typeof global.MediaMetadata === 'function';
+    }
+
+    // 罗马数字拆成「基号 + 上标 + 下标」三段，方便在封面上按教科书的样子排。
+    //   直接把 Unicode 的 ⁿ / ₙ 当正文画，字号跟着基号走就会小得看不清，
+    //   所以拆开、自己控字号与位置（见 drawCover）。
+    function romanParts(degree, seventh, inversion) {
+        const base = ROMAN_MAJOR[degree - 1] || '';
+        if (!seventh) {
+            if (inversion === 1) return { base, sup: '6', sub: '' };
+            if (inversion === 2) return { base, sup: '6', sub: '4' };
+            return { base, sup: '', sub: '' };
+        }
+        if (inversion === 1) return { base, sup: '6', sub: '5' };
+        if (inversion === 2) return { base, sup: '4', sub: '3' };
+        if (inversion === 3) return { base, sup: '4', sub: '2' };
+        return { base, sup: '7', sub: '' };
+    }
+
+    // 画一张方形封面。compact = true 时只留级数基号（96px 的缩略图上别的都是糊的）。
+    function drawCover(g, size, info, compact) {
+        const pal = ART_PALETTE[(info.degree - 1) % ART_PALETTE.length];
+        const grad = g.createLinearGradient(0, 0, 0, size);
+        grad.addColorStop(0, pal.top);
+        grad.addColorStop(1, pal.bottom);
+        g.fillStyle = grad;
+        g.fillRect(0, 0, size, size);
+
+        // 中央罗马数字：基号大字，转位数字排在基号右侧的右上 / 右下角
+        const parts = compact ? { base: info.base, sup: '', sub: '' } : info.parts;
+        const figRatio = 0.42;                 // 转位数字相对基号的字号比
+        const widthAt = (px) => {
+            g.font = '700 ' + px + 'px ' + ART_SERIF;
+            let w = g.measureText(parts.base).width;
+            if (parts.sup || parts.sub) {
+                g.font = '700 ' + (px * figRatio) + 'px ' + ART_SERIF;
+                w += Math.max(
+                    parts.sup ? g.measureText(parts.sup).width : 0,
+                    parts.sub ? g.measureText(parts.sub).width : 0
+                );
+            }
+            return w;
+        };
+        const maxW = size * 0.86;
+        let fs = size * (compact ? 0.68 : 0.5);
+        while (fs > size * 0.16 && widthAt(fs) > maxW) fs -= size * 0.02;
+
+        const cy = compact ? size * 0.5 : size * 0.435;
+        const x0 = (size - widthAt(fs)) / 2;
+        g.textAlign = 'left';
+        g.textBaseline = 'middle';
+        g.fillStyle = pal.ink;
+        g.font = '700 ' + fs + 'px ' + ART_SERIF;
+        g.fillText(parts.base, x0, cy);
+        if (parts.sup || parts.sub) {
+            const wb = g.measureText(parts.base).width;
+            g.font = '700 ' + (fs * figRatio) + 'px ' + ART_SERIF;
+            if (parts.sup) g.fillText(parts.sup, x0 + wb, cy - fs * 0.30);
+            if (parts.sub) g.fillText(parts.sub, x0 + wb, cy + fs * 0.28);
+        }
+
+        if (compact) return;
+
+        // 和弦音名
+        g.textAlign = 'center';
+        g.font = '500 ' + (size * 0.082) + 'px ' + ART_SANS;
+        g.fillStyle = pal.sub;
+        g.fillText(info.tones, size / 2, size * 0.715);
+
+        // 底行：调性 · 配声
+        g.font = '400 ' + (size * 0.056) + 'px ' + ART_SANS;
+        g.fillText(info.footer, size / 2, size * 0.842);
+
+        // 左上角：听到第几小节了
+        g.textAlign = 'left';
+        g.globalAlpha = 0.85;
+        g.font = '600 ' + (size * 0.06) + 'px ' + ART_SANS;
+        g.fillText(info.pos, size * 0.065, size * 0.088);
+        g.globalAlpha = 1;
+    }
+
+    // 一张 canvas → PNG blob URL（拿不到就返回 null，不抛）
+    function coverBlobUrl(size, info, compact) {
+        return new Promise((resolve) => {
+            try {
+                const cv = document.createElement('canvas');
+                cv.width = size;
+                cv.height = size;
+                drawCover(cv.getContext('2d'), size, info, compact);
+                cv.toBlob((blob) => {
+                    if (!blob) { resolve(null); return; }
+                    const url = URL.createObjectURL(blob);
+                    artUrls.push(url);
+                    resolve(url);
+                }, 'image/png');
+            } catch (e) { resolve(null); }
+        });
+    }
+
+    function releaseChordArtwork() {
+        for (let i = 0; i < artUrls.length; i++) {
+            try { URL.revokeObjectURL(artUrls[i]); } catch (e) {}
+        }
+        artUrls = [];
+        artCache = [];
+    }
+
+    // 为整段和声预生成封面。生成完一段就做，播放时直接查表 → 切小节零延迟。
+    function buildChordArtwork() {
+        releaseChordArtwork();
+        if (!artSupported() || !data || !data.chords.length) return;
+        const voicingText = (data.voicingMode === 'fourpart') ? '四部和声' : '三和弦';
+        for (let m = 0; m < data.chords.length; m++) {
+            const c = data.chords[m];
+            const parts = romanParts(c.degree, c.seventh, c.inversion);
+            const info = {
+                degree: c.degree,
+                roman: c.roman,
+                base: parts.base,
+                parts: parts,
+                tones: c.notes.map((n) => pitchName(n.letter, n.acc)).join('  '),
+                footer: data.key + ' 大调 · ' + voicingText,
+                pos: (m + 1) + ' / ' + data.chords.length
+            };
+            const idx = m;
+            Promise.all(ART_SIZES.map((s) => coverBlobUrl(s, info, s <= ART_COMPACT_MAX)))
+                .then((urls) => {
+                    const art = [];
+                    for (let i = 0; i < ART_SIZES.length; i++) {
+                        if (urls[i]) {
+                            art.push({
+                                src: urls[i],
+                                sizes: ART_SIZES[i] + 'x' + ART_SIZES[i],
+                                type: 'image/png'
+                            });
+                        }
+                    }
+                    if (art.length) artCache[idx] = art;
+                })
+                .catch(() => {});
+        }
+    }
+
+    // 把"当前第 m 小节"推给系统（锁屏 / 控制中心 / 灵动岛）。
+    //   title 里也带级数 —— 万一某些系统版本不刷新封面，文字照样能告诉他答案。
+    function updateNowPlaying(m) {
+        if (!artSupported() || !data || m < 0 || m >= data.chords.length) return;
+        const host = global.ChordHost;
+        if (!host || typeof host.setNowPlaying !== 'function') return;
+        const c = data.chords[m];
+        host.setNowPlaying({
+            title: '第 ' + (m + 1) + ' 小节 · ' + c.roman,
+            artist: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
+            album: '和弦听辨',
+            artwork: artCache[m] || []
+        });
+    }
+
+    // 锁屏的「上一首 / 下一首」对和弦页 = 上一小节 / 下一小节（点小节跳转的自然延伸）
+    const chordMediaHooks = {
+        skip: (dir) => {
+            if (!data || !chordAudioEl) return false;
+            const cur = Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()));
+            const next = Math.min(data.chords.length - 1, Math.max(0, cur + dir));
+            if (next === cur) return true;      // 已在头/尾，照样吃掉这次点击
+            doPlay(lastPlayMode, next);
+            return true;
+        }
+    };
 
     function setPlayButtonsEnabled(on) {
         const btns = [els.play, els.playArp, els.playBass];
@@ -1732,6 +1970,8 @@
         blobData = null;
         blobMode = null;
         highlightedMeasure = -1;
+        // 顺便把整段的锁屏封面画好（异步）。等用户点播放时早就绪了，切小节零延迟。
+        buildChordArtwork();
         if (!auto) renderInfoText('已生成新的一段，点击“播放”');
         // 采样预加载（首次或缓存未命中时才会真正 fetch）
         try {
@@ -1995,6 +2235,9 @@
 
     function deactivate() {
         stopChordPlayback();
+        // 离开和弦页就把媒体会话交还（不然人在视唱页、锁屏按播放会去动和弦那段音频）
+        const host = global.ChordHost;
+        if (host && host.reclaimMedia) host.reclaimMedia(null, null);
     }
 
     global.ChordRecognition = {
@@ -2035,6 +2278,19 @@
         _measureDuration: measureDuration,
         _getAudioEl: () => chordAudioEl,
         _getBlobUrl: () => blobUrl,
+        // 锁屏封面（调试 / 自测用）
+        _artSupported: artSupported,
+        _buildChordArtwork: buildChordArtwork,
+        _getArtwork: () => artCache,
+        _getArtUrls: () => artUrls.slice(),
+        _updateNowPlaying: updateNowPlaying,
+        _skipMeasure: (dir) => chordMediaHooks.skip(dir),
+        _drawCover: drawCover,
+        _romanParts: romanParts,
+        _getNowPlayingTitle: (m) => {
+            if (!data || m < 0 || m >= data.chords.length) return null;
+            return '第 ' + (m + 1) + ' 小节 · ' + data.chords[m].roman;
+        },
         _buildChordSchedule: buildChordSchedule,
         _renderChordAudio: renderChordAudio,
         _resolveSample: resolveSample,
