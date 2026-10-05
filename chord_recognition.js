@@ -1576,6 +1576,19 @@
     const AUTO_CONTINUE_GAP_MS = 1050;
     const autoStats = { chains: 0, lastEndedAt: 0 };   // 自测用：接力了几次
 
+    // ---- 底部迷你播放器（手持练习用）----
+    //   收起 = 一颗胶囊（只有「换一段」）；展开 = 铺满一屏的练习界面。
+    //   它和音频是**解耦**的：mpMeasure 是"面板上正在看的小节"，
+    //   暂停后依然保留（页面上那条高亮会被清掉，但面板还停在原处，方便作答）。
+    let mpMeasure = 0;            // 面板/胶囊当前显示的小节
+    let mpExpanded = false;       // 展开中？
+    let mpCoverVisible = true;    // 级数图的显隐开关：**持久**，不随小节切换重置
+    let mpReports = [];           // 报错记录（只存内存；怎么用下一步再规划）
+    let mpErrorCtx = null;        // 点开报错浮窗那一刻的快照，防作答时小节已漂移
+    // 「换一段」之后要不要顺手接着播？迷你播放器的定位是连续刷题 → 默认接着播。
+    // 想让它跟页面上那颗「🎲 换一段」一样"只生成不播"，把这个常量改成 false 即可。
+    const MP_AUTOPLAY_AFTER_GENERATE = true;
+
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
     let progressRaf = 0;          // requestAnimationFrame 句柄
     let lastPosPush = 0;          // 上次推锁屏进度的时刻（setPositionState 限流用）
@@ -1603,7 +1616,28 @@
             info: document.getElementById('chord-info'),
             renderInfo: document.getElementById('chord-render-info'),
             hint: document.getElementById('chord-key-hint'),
-            sheetMusic: document.getElementById('chord-sheet-music')
+            sheetMusic: document.getElementById('chord-sheet-music'),
+            // ---- 底部迷你播放器 ----
+            mp: document.getElementById('chord-mp'),
+            mpBar: document.getElementById('chord-mp-bar'),
+            mpExpand: document.getElementById('chord-mp-expand'),
+            mpBarTitle: document.getElementById('chord-mp-bar-title'),
+            mpGenerateMin: document.getElementById('chord-mp-generate-min'),
+            mpSheet: document.getElementById('chord-mp-sheet'),
+            mpClose: document.getElementById('chord-mp-close'),
+            mpPlayPause: document.getElementById('chord-mp-playpause'),
+            mpStage: document.getElementById('chord-mp-stage'),
+            mpCover: document.getElementById('chord-mp-cover'),
+            mpCoverHidden: document.getElementById('chord-mp-cover-hidden'),
+            mpPrev: document.getElementById('chord-mp-prev'),
+            mpReport: document.getElementById('chord-mp-report'),
+            mpNext: document.getElementById('chord-mp-next'),
+            mpNote: document.getElementById('chord-mp-report-note'),
+            mpGenerate: document.getElementById('chord-mp-generate'),
+            mpError: document.getElementById('chord-mp-error'),
+            mpErrorGrid: document.getElementById('chord-mp-error-grid'),
+            mpErrorNone: document.getElementById('chord-mp-error-none'),
+            mpErrorCancel: document.getElementById('chord-mp-error-cancel')
         };
     }
 
@@ -1672,6 +1706,9 @@
     }
 
     // 高亮某一小节（-1 = 清除）。矩形是 SVG 逻辑坐标，直接改 fill-opacity 即可。
+    //
+    //   ★ 这里只管**页面上的高亮**。锁屏封面走的是另一条线（setCoverMeasure，
+    //   可以带提前量），两者故意拆开 —— 见 ART_LEAD_MS 的说明。
     function setMeasureHighlight(m) {
         if (m === highlightedMeasure) return;
         if (highlightedMeasure >= 0 && measureRects[highlightedMeasure]) {
@@ -1681,8 +1718,8 @@
         if (m >= 0 && measureRects[m]) {
             measureRects[m].setAttribute('fill-opacity', '0.14');
         }
-        // 锁屏封面跟着走 —— "当前小节"只有一个来源，就是这里
-        if (m >= 0) updateNowPlaying(m);
+        // 迷你播放器（展开着的那张级数大图）跟着走
+        if (m >= 0) mpOnMeasure(m);
     }
 
     // 每小节的时长（秒）：一小节 4 拍
@@ -1699,12 +1736,21 @@
     //   最坏 ~250ms 才换封面 —— 用户实测到的"慢 200ms 左右"就是它。
     //
     //   timeupdate 保留作兜底：后台标签页里 rAF 会被浏览器停掉，那时靠它继续推。
+    //
+    //   两条线的分工（注意别把哪个改回去了）：
+    //     页面高亮  = 精确 currentTime
+    //     锁屏封面  = currentTime + ART_LEAD_MS（提前一点推，补系统的换图开销）
     // ------------------------------------------------------------
     function updateProgress(force) {
         if (!data || !chordAudioEl) return;
-        const m = Math.min(data.chords.length - 1,
-            Math.floor(chordAudioEl.currentTime / measureDuration()));
+        const dur = measureDuration();
+        const last = data.chords.length - 1;
+        // 页面高亮：精确跟随（不提前）
+        const m = Math.min(last, Math.floor(chordAudioEl.currentTime / dur));
         setMeasureHighlight(m);
+        // 锁屏封面：带一点提前量（见 ART_LEAD_MS），把系统侧那几十毫秒的滞后补回来
+        const mc = Math.min(last, Math.floor((chordAudioEl.currentTime + coverLeadSeconds()) / dur));
+        setCoverMeasure(mc);
         // 锁屏进度条（可拖动）也要跟着走。但没必要每秒推 60 次，限流到 4 次/秒。
         const now = Date.now();
         if (force || now - lastPosPush >= 250) {
@@ -1795,6 +1841,7 @@
                 navigator.mediaSession.playbackState = 'playing';
             }
             startProgressLoop();     // 每帧跟随（timeupdate 太粗，封面会慢半拍）
+            mpSyncPlayIcon();
         });
 
         // 兜底：后台标签页 rAF 被停掉时，靠 timeupdate 继续推（粗一点但不断）
@@ -1811,6 +1858,7 @@
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'none';
             }
+            mpSyncPlayIcon();
             // ★ 只有"整段真实音频"播完才算一段结束。
             //   渲染期间用来解锁 <audio> 的静音占位 WAV 也会触发 ended —— 那种不算，
             //   否则每次播放都会顺手多生成一段。
@@ -1827,6 +1875,7 @@
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'paused';
             }
+            mpSyncPlayIcon();
         });
     }
 
@@ -1895,6 +1944,37 @@
     //   原因：换段那一刻，锁屏上正显示的还是上一代的图；立刻 revoke 会让系统读到一个
     //   已失效的 URL → 封面空白一闪。延后到新封面顶上之后再回收，任一时刻最多两代共存。
     const ART_RELEASE_DELAY_MS = 2500;
+
+    // ------------------------------------------------------------
+    // 封面「提前量」
+    //
+    //   封面推送的**时机**已经是逐帧精确的（rAF，见 updateProgress），页面高亮与声音
+    //   基本踩在同一个点上。但"推给系统"到"锁屏上真的看见换了"之间还有一段系统开销
+    //   （另一个进程取图 + 解码 + 系统自己的换图过渡），体感上封面仍比声音慢半拍。
+    //   这段开销在页面侧消不掉，只能反过来：**把封面提前一点推**。
+    //
+    //   做法是把"页面高亮用的小节号"和"锁屏封面用的小节号"拆成两个：
+    //     页面高亮：按 currentTime 精确算（不提前）
+    //     锁屏封面：按 currentTime + ART_LEAD_MS 算（提前）
+    //   调 0 = 关掉提前量（回到"和声音同时换"）。
+    //   听着觉得封面比声音早/晚，就改这一个数。
+    // ------------------------------------------------------------
+    let ART_LEAD_MS = 70;
+    let coverMeasure = -1;        // 锁屏封面当前是第几小节（与页面高亮 highlightedMeasure 解耦）
+
+    // 提前量护栏：绝不提前超过半小节（否则会早跳一整小节，明显抢拍）。
+    function coverLeadSeconds() {
+        const half = measureDuration() * 0.5;
+        const lead = ART_LEAD_MS / 1000;
+        return Math.max(0, Math.min(lead, half));
+    }
+
+    // 换封面（-1 不动手：保持锁屏上最后一张，避免把封面清成空）
+    function setCoverMeasure(m) {
+        if (m === coverMeasure) return;
+        coverMeasure = m;
+        if (m >= 0) updateNowPlaying(m);
+    }
 
     function artSupported() {
         return typeof document !== 'undefined'
@@ -2043,23 +2123,30 @@
         }, ART_RELEASE_DELAY_MS);
     }
 
+    // 第 m 小节"画封面要用到的全部信息"。抽出来是为了让**锁屏封面**和
+    //   **页面迷你播放器里那张大图**用同一份数据、同一种画法，两边永远长一样。
+    function buildCoverInfo(m) {
+        if (!data || m < 0 || m >= data.chords.length) return null;
+        const c = data.chords[m];
+        const parts = romanParts(c.degree, c.seventh, c.inversion);
+        return {
+            degree: c.degree,
+            roman: c.roman,
+            base: parts.base,
+            parts: parts,
+            tones: c.notes.map((n) => pitchName(n.letter, n.acc)).join('  '),
+            footer: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
+            pos: (m + 1) + ' / ' + data.chords.length
+        };
+    }
+
     // 为整段和声预生成封面。生成完一段就做，播放时直接查表 → 切小节零延迟。
     function buildChordArtwork() {
         releaseChordArtwork();
         if (!artSupported() || !data || !data.chords.length) return;
-        const voicingText = (data.voicingMode === 'fourpart') ? '四部和声' : '三和弦';
         for (let m = 0; m < data.chords.length; m++) {
-            const c = data.chords[m];
-            const parts = romanParts(c.degree, c.seventh, c.inversion);
-            const info = {
-                degree: c.degree,
-                roman: c.roman,
-                base: parts.base,
-                parts: parts,
-                tones: c.notes.map((n) => pitchName(n.letter, n.acc)).join('  '),
-                footer: data.key + ' 大调 · ' + voicingText,
-                pos: (m + 1) + ' / ' + data.chords.length
-            };
+            const info = buildCoverInfo(m);
+            if (!info) continue;
             const idx = m;
             Promise.all(ART_SIZES.map((s) => coverBlobUrl(s, info, s <= ART_COMPACT_MAX)))
                 .then((urls) => {
@@ -2144,6 +2231,10 @@
         blobData = null;
         blobMode = null;
         highlightedMeasure = -1;
+        coverMeasure = -1;              // 锁屏封面的"当前小节"也要复位（否则下一段第一小节会被判成"没变"）
+        mpMeasure = 0;                  // 迷你播放器回到第 1 小节
+        mpOnMeasure(0);
+        mpSetNote('');                  // 上一段的报错提示也清掉
         // 顺便把整段的锁屏封面画好（异步）。等用户点播放时早就绪了，切小节零延迟。
         buildChordArtwork();
         if (!auto) renderInfoText('已生成新的一段，点击“播放”');
@@ -2209,6 +2300,7 @@
                 }
                 await chordAudioEl.play();
                 setMeasureHighlight(fromMeasure);
+                setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
             } catch (err) {
                 renderInfoText('播放失败: ' + (err && err.message), true);
             } finally {
@@ -2244,6 +2336,7 @@
             try {
                 await chordAudioEl.play();
                 setMeasureHighlight(fromMeasure);
+                setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
             } catch (err) {
                 // 离线渲染耗时可能超出浏览器的自动播放时限 → NotAllowedError。
                 // 这不是功能故障：用户再点一次刚才那个播放键即可（那一下是明确手势）。
@@ -2398,6 +2491,225 @@
                 doPlay(lastPlayMode, m);
             });
         }
+
+        // ---------------- 底部迷你播放器 ----------------
+        if (els.mpExpand) els.mpExpand.addEventListener('click', () => mpSetExpanded(true));
+        if (els.mpClose) els.mpClose.addEventListener('click', () => mpSetExpanded(false));
+        // 级数大图：点它切换显隐（持久开关，不随小节重置）
+        if (els.mpCover) els.mpCover.addEventListener('click', () => mpSetCoverVisible(!mpCoverVisible));
+        if (els.mpCoverHidden) els.mpCoverHidden.addEventListener('click', () => mpSetCoverVisible(true));
+        if (els.mpPrev) els.mpPrev.addEventListener('click', () => mpJump(-1));
+        if (els.mpNext) els.mpNext.addEventListener('click', () => mpJump(1));
+        if (els.mpPlayPause) els.mpPlayPause.addEventListener('click', () => { mpTogglePlay(); });
+        if (els.mpGenerate) els.mpGenerate.addEventListener('click', () => { mpRegenerate(); });
+        if (els.mpGenerateMin) els.mpGenerateMin.addEventListener('click', () => { mpRegenerate(); });
+        if (els.mpReport) els.mpReport.addEventListener('click', () => mpOpenError());
+        if (els.mpErrorNone) els.mpErrorNone.addEventListener('click', () => mpSubmitReport(null));
+        if (els.mpErrorCancel) els.mpErrorCancel.addEventListener('click', () => mpCloseError());
+        if (els.mpError) {
+            els.mpError.addEventListener('click', (e) => {
+                if (e.target === els.mpError) mpCloseError();   // 点遮罩关闭
+            });
+        }
+        if (els.mpErrorGrid) {
+            els.mpErrorGrid.addEventListener('click', (e) => {
+                const b = e.target.closest ? e.target.closest('[data-degree]') : null;
+                if (!b) return;
+                mpSubmitReport(parseInt(b.dataset.degree, 10));
+            });
+        }
+        // 转屏 / 缩放后重画（canvas 尺寸跟着变）
+        if (typeof window !== 'undefined') {
+            window.addEventListener('resize', () => { if (mpExpanded) mpPaintCover(); });
+        }
+        mpSetCoverVisible(mpCoverVisible);
+        mpSyncPlayIcon();
+        mpOnMeasure(mpMeasure);
+    }
+
+    // ============================================================
+    // 底部迷你播放器（手持练习用）
+    //
+    //   收起：一颗胶囊，只有「换一段」（收起条上不写级数，免得剧透答案）。
+    //   展开：铺满一屏 —— 顶行（收起 / 播放暂停）、中间级数大图（可点着切换显隐）、
+    //         一行三键（上一个 / 报错 / 下一个）、底部「换一段」。
+    //
+    //   它整块 DOM 放在 #view-chord 里面：切到视唱页时 #view-chord 是 display:none，
+    //   display:none 子树里的 position:fixed 同样不渲染 → 切页自动隐藏。
+    //   代价：body / .container / #view-chord 这条链上不能加 transform / filter，
+    //   否则 fixed 的包含块会被劫持。
+    // ============================================================
+
+    // 展开 / 收起。展开时锁住背景滚动（否则面板后面还能橡皮筋滚）。
+    function mpSetExpanded(on) {
+        mpExpanded = !!on;
+        if (els && els.mp) els.mp.dataset.state = mpExpanded ? 'expanded' : 'collapsed';
+        if (typeof document !== 'undefined' && document.body) {
+            document.body.style.overflow = mpExpanded ? 'hidden' : '';
+        }
+        if (mpExpanded) {
+            mpPaintCover();
+            mpSyncPlayIcon();
+        } else {
+            mpCloseError();
+        }
+    }
+
+    // 小节变了 → 收起条上的进度文字 + （展开时）重画大图
+    function mpOnMeasure(m) {
+        if (m < 0) return;
+        mpMeasure = m;
+        mpPaintBarTitle();
+        if (mpExpanded) mpPaintCover();
+    }
+
+    function mpPaintBarTitle() {
+        if (!els || !els.mpBarTitle) return;
+        const total = (data && data.chords.length) ? data.chords.length : 0;
+        // ★ 只报"第几小节"，**不报级数** —— 收起条上写级数等于剧透答案
+        els.mpBarTitle.textContent = total
+            ? ('第 ' + (mpMeasure + 1) + ' / ' + total + ' 小节')
+            : '还没有内容，点「换一段」';
+    }
+
+    // 把当前小节的级数画进面板里那张 canvas（与锁屏封面同一套画法、同一份数据）
+    //
+    //   尺寸不用 canvas 自己的 clientWidth 推 —— 那会成环（设了属性→尺寸变→下次读到的又不一样）。
+    //   改成量"装它的那个舞台"，取能放下的最大正方形，再用行内样式把它钉死。
+    function mpPaintCover() {
+        if (!els || !els.mpCover) return;
+        const info = buildCoverInfo(mpMeasure);
+        if (!info) return;
+        const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+        let side = 0;
+        if (els.mpStage) {
+            const r = els.mpStage.getBoundingClientRect();
+            side = Math.floor(Math.min(r.width, r.height)) - 8;   // 减掉舞台自己的 4px 内边距 ×2
+        }
+        if (!(side > 0)) {
+            const vw = (typeof window !== 'undefined') ? window.innerWidth : 390;
+            const vh = (typeof window !== 'undefined') ? window.innerHeight : 700;
+            side = Math.max(200, Math.min(vw - 40, vh - 300));
+        }
+        els.mpCover.style.width = side + 'px';
+        els.mpCover.style.height = side + 'px';
+        const px = Math.round(side * dpr);
+        if (els.mpCover.width !== px || els.mpCover.height !== px) {
+            els.mpCover.width = px;
+            els.mpCover.height = px;
+        }
+        try {
+            drawCover(els.mpCover.getContext('2d'), px, info, false);
+        } catch (e) {}
+    }
+
+    // 级数图的显隐开关。**持久**：不随小节切换重置（用户按一下就一直隐藏）。
+    function mpSetCoverVisible(on) {
+        mpCoverVisible = !!on;
+        if (els && els.mpStage) els.mpStage.classList.toggle('is-hidden', !mpCoverVisible);
+        if (els && els.mpCoverHidden) els.mpCoverHidden.hidden = mpCoverVisible;
+    }
+
+    function mpSetNote(text) {
+        if (els && els.mpNote) els.mpNote.textContent = text || '';
+    }
+
+    function mpSyncPlayIcon() {
+        if (!els || !els.mpPlayPause) return;
+        const playing = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
+        els.mpPlayPause.textContent = playing ? '⏸ 暂停' : '▶ 播放';
+        els.mpPlayPause.classList.toggle('is-playing', playing);
+    }
+
+    // 播放 / 暂停。
+    //   暂停用 pause()，**不用 stopChordPlayback** —— 那个是"停止"语义，
+    //   会 cancelAutoNext() 并且清掉高亮，把自动连播打断。
+    //   继续播放优先"原地续播"（保留小节内的位置）；还没渲染过才回落 doPlay。
+    async function mpTogglePlay() {
+        if (!data || !data.chords.length) return;
+        const playing = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
+        if (playing) {
+            try { chordAudioEl.pause(); } catch (e) {}
+            return;
+        }
+        if (chordAudioEl && blobData === data && blobUrl) {
+            try {
+                await chordAudioEl.play();
+                return;
+            } catch (e) { /* 被拦或被换过 → 往下重渲染 */ }
+        }
+        await doPlay(lastPlayMode, mpMeasure);
+    }
+
+    // 上一个 / 下一个和弦。
+    //   基准用 mpMeasure（面板上正在看的这一小节），**不用 currentTime** ——
+    //   暂停作答时 currentTime 停在暂停点甚至 0，拿它做基准会跳错小节。
+    function mpJump(dir) {
+        if (!data || !data.chords.length) return;
+        const next = Math.max(0, Math.min(data.chords.length - 1, mpMeasure + dir));
+        if (next === mpMeasure) return;      // 已在头 / 尾
+        doPlay(lastPlayMode, next);
+    }
+
+    // 换一段。默认顺手接着播（MP_AUTOPLAY_AFTER_GENERATE）。
+    async function mpRegenerate() {
+        if (isRendering) return;
+        mpSetNote('');
+        await doGenerate(false);
+        if (MP_AUTOPLAY_AFTER_GENERATE) await doPlay(lastPlayMode, 0);
+    }
+
+    // 报错浮窗的选项：设置里勾选的级数（Ⅰ 永远有 —— 它本来就强制参与）+「没听出来」。
+    //   每次打开都重建，所以改了设置里的勾选，下次打开就跟着变。
+    function mpBuildErrorOptions() {
+        if (!els || !els.mpErrorGrid) return;
+        els.mpErrorGrid.innerHTML = '';
+        for (let d = 1; d <= 7; d++) {
+            if (d !== 1 && !settings.degrees[d]) continue;   // 没勾的级数不出现在报错界面
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'mp-error__opt';
+            b.dataset.degree = String(d);
+            b.textContent = DEGREE_CHOICES[d - 1];
+            els.mpErrorGrid.appendChild(b);
+        }
+    }
+
+    function mpOpenError() {
+        if (!data || !data.chords.length) return;
+        // 快照：作答期间音频可能还在走，小节会前进 —— 别记错小节
+        const m = Math.max(0, Math.min(data.chords.length - 1, mpMeasure));
+        mpErrorCtx = {
+            measure: m,
+            actual: data.chords[m].degree,
+            actualRoman: data.chords[m].roman
+        };
+        mpBuildErrorOptions();
+        if (els.mpError) els.mpError.hidden = false;
+    }
+
+    function mpCloseError() {
+        if (els && els.mpError) els.mpError.hidden = true;
+    }
+
+    // 上报「我听成了哪个级数」。guessed = null 表示"没听出来"。
+    function mpSubmitReport(guessed) {
+        if (!mpErrorCtx) { mpCloseError(); return; }
+        const rec = {
+            measure: mpErrorCtx.measure,
+            actual: mpErrorCtx.actual,
+            actualRoman: mpErrorCtx.actualRoman,
+            guessed: (guessed == null ? null : guessed),
+            guessedRoman: (guessed == null ? null : (DEGREE_CHOICES[guessed - 1] || null)),
+            ts: Date.now()
+        };
+        mpReports.push(rec);
+        mpCloseError();
+        mpSetNote('已记录：你听成 ' + (rec.guessedRoman || '没听出来') +
+            ' ｜ 实际 ' + rec.actualRoman + '（第 ' + (rec.measure + 1) + ' 小节）');
+        mpErrorCtx = null;
+        // 数据怎么用、存哪儿，下一步再规划；现在先在控制台留一份
+        try { console.log('[和弦听辨·报错]', rec); } catch (e) {}
     }
 
     // ------------------------------------------------------------
@@ -2426,6 +2738,9 @@
 
     function deactivate() {
         stopChordPlayback();
+        // 离开和弦页：把迷你播放器复位成收起态（否则切回来面板还开着），浮窗也关掉
+        mpSetExpanded(false);
+        mpCloseError();
         // 离开和弦页就把媒体会话交还（不然人在视唱页、锁屏按播放会去动和弦那段音频）
         const host = global.ChordHost;
         if (host && host.reclaimMedia) host.reclaimMedia(null, null);
@@ -2503,7 +2818,37 @@
         _renderChordAudio: renderChordAudio,
         _resolveSample: resolveSample,
         _getSettings: () => settings,
-        _getLastData: () => data
+        _getLastData: () => data,
+        // ---- 封面提前量（调试 / 自测用）----
+        _getCoverMeasure: () => coverMeasure,
+        _getArtLeadMs: () => ART_LEAD_MS,
+        _setArtLeadMs: (v) => { ART_LEAD_MS = Math.max(0, Number(v) || 0); coverMeasure = -1; },
+        _setCoverMeasure: setCoverMeasure,
+        // ---- 底部迷你播放器（调试 / 自测用）----
+        _getReports: () => mpReports,
+        _clearReports: () => { mpReports = []; },
+        _getMpState: () => ({
+            measure: mpMeasure,
+            expanded: mpExpanded,
+            coverVisible: mpCoverVisible,
+            playing: !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended),
+            errorOpen: !!(els && els.mpError && !els.mpError.hidden),
+            reportCount: mpReports.length
+        }),
+        _setMpExpanded: mpSetExpanded,
+        _setMpMeasure: (m) => { mpMeasure = m; mpOnMeasure(m); },
+        _setMpCoverVisible: mpSetCoverVisible,
+        _openMpError: mpOpenError,
+        _closeMpError: mpCloseError,
+        _getMpErrorOptions: () => {
+            if (!els || !els.mpErrorGrid) return [];
+            const out = [];
+            els.mpErrorGrid.querySelectorAll('[data-degree]').forEach((b) => {
+                out.push(parseInt(b.dataset.degree, 10));
+            });
+            return out;
+        },
+        _getCoverInfo: buildCoverInfo
     };
 
 })(typeof window !== 'undefined' ? window : this);

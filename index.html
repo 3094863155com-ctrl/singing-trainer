@@ -48,6 +48,21 @@
             --r-md: 12px;
             --r-lg: 16px;
             --r-pill: 999px;
+
+            /* ============================================================
+               底部迷你播放器（和弦听辨页）—— 三个尺寸旋钮
+               想整体调大/调小，只改 --mp-btn 与 --mp-gap 两处即可。
+                 --mp-btn：主交互按钮边长（下限 48px ≈ 高于 Apple HIG 的 44pt 最小点按目标，
+                           上限 64px 保证不夸张；15vw 保证 320px 窄屏不溢出）
+                 --mp-gap：键与键之间的间距（防误触）
+                 --mp-bar-h：收起态那条胶囊的高度
+                 --mp-safe：底部安全边距（iPhone 的小白条）。view 没加 viewport-fit=cover，
+                            所以 env() 在 Safari 上通常是 0，用 max(12px, …) 兜底。
+               ============================================================ */
+            --mp-btn: clamp(48px, 15vw, 64px);
+            --mp-gap: 12px;
+            --mp-bar-h: 56px;
+            --mp-safe: max(12px, env(safe-area-inset-bottom, 0px));
         }
 
         body {
@@ -553,17 +568,357 @@
                 height: auto;
             }
         }
+
+        /* ============================================================
+           底部迷你播放器（只在「和弦听辨」视图内）
+           ------------------------------------------------------------
+           ★ 它整块 DOM 放在 #view-chord 内部。切到视唱页时 #view-chord 是
+             display:none，而 display:none 子树里的 position:fixed 同样不渲染
+             —— 「切页自动隐藏」白拿，不用在 switchView 里写分支。
+           ★ 因此约束：body / .container / #view-chord 这条祖先链上不能出现
+             transform / filter / will-change，否则 fixed 的包含块会被劫持。
+           ============================================================ */
+
+        /* 给和弦页底部留出收起胶囊的高度，免得挡住谱面 */
+        #view-chord {
+            padding-bottom: calc(var(--mp-bar-h) + var(--mp-gap) * 2 + var(--mp-safe));
+        }
+
+        .mp {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 50;
+            padding: 0 12px var(--mp-safe);
+            pointer-events: none;      /* 空白区不挡页面点击 */
+        }
+
+        .mp > * {
+            pointer-events: auto;
+        }
+
+        /* ---------- 收起态：一条胶囊 ---------- */
+        .mp-bar {
+            height: var(--mp-bar-h);
+            max-width: 640px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: var(--mp-gap);
+            padding: 0 8px 0 10px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-pill);
+            box-shadow: var(--shadow-lg);
+            transition: opacity 0.2s ease, transform 0.2s ease;
+        }
+
+        .mp[data-state="expanded"] .mp-bar {
+            opacity: 0;
+            transform: translateY(24px);
+            pointer-events: none;
+        }
+
+        .mp-bar__open {
+            flex: 1 1 auto;
+            min-width: 0;
+            height: calc(var(--mp-bar-h) - 12px);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 0 12px;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: transparent;
+            border: none;
+            border-radius: var(--r-pill);
+            cursor: pointer;
+            text-align: left;
+        }
+
+        .mp-bar__open:active {
+            background: var(--surface-hover);
+        }
+
+        /* 上滑小横条：暗示「这里能往上展开」 */
+        .mp-bar__grip {
+            flex: 0 0 auto;
+            width: 34px;
+            height: 4px;
+            border-radius: 2px;
+            background: var(--border-strong);
+        }
+
+        .mp-bar__title {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+
+        .mp-bar__chevron {
+            flex: 0 0 auto;
+            font-size: 12px;
+            color: var(--accent);
+        }
+
+        .mp-bar__btn {
+            flex: 0 0 auto;
+            padding: 10px 18px;
+            font-size: 15px;
+        }
+
+        /* ---------- 展开态：铺满一屏（bottom sheet） ---------- */
+        .mp-sheet {
+            position: fixed;
+            inset: 0;                 /* 用 inset 而非 height:100vh —— 绕开 iOS 地址栏引起的视口抖动 */
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: var(--mp-gap);
+            padding: 12px 16px var(--mp-safe);
+            background: var(--bg-page);
+            transform: translateY(100%);
+            transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+            will-change: transform;
+            overflow: hidden;
+        }
+
+        .mp[data-state="expanded"] .mp-sheet {
+            transform: translateY(0);
+        }
+
+        .mp-sheet__top {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: var(--mp-gap);
+        }
+
+        .mp-icon-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 48px;
+            height: 44px;
+            padding: 0 14px;
+            font-family: inherit;
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-pill);
+            box-shadow: var(--shadow-sm);
+            cursor: pointer;
+        }
+
+        .mp-icon-btn:active {
+            background: var(--surface-hover);
+        }
+
+        .mp-icon-btn.is-playing {
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        /* 级数大图（页面内的 canvas，与锁屏封面同款画法） */
+        .mp-sheet__stage {
+            position: relative;
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 4px;
+        }
+
+        .mp-cover {
+            display: block;
+            /* ▲ canvas 是"替换元素"：只给 max-* + auto，浏览器才会按它自身的
+               正方形比例等比缩放（写成 height:100% 会被 max-width 夹变形）。 */
+            width: auto;
+            height: auto;
+            max-width: 100%;
+            max-height: 100%;
+            border-radius: var(--r-lg);
+            box-shadow: var(--shadow-md);
+            cursor: pointer;
+        }
+
+        .mp-sheet__stage.is-hidden .mp-cover {
+            filter: blur(18px) grayscale(0.35);
+            opacity: 0.55;
+            user-select: none;
+        }
+
+        .mp-cover-hidden {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            padding: 12px 22px;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-pill);
+            box-shadow: var(--shadow-md);
+            cursor: pointer;
+        }
+
+        /* 一行三键：上一个 / 报错（主） / 下一个 */
+        .mp-sheet__actions {
+            flex: 0 0 auto;
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            gap: var(--mp-gap);
+        }
+
+        .mp-action-btn {
+            min-height: var(--mp-btn);
+            padding: 0 12px;
+            font-family: inherit;
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--text-primary);
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-lg);
+            box-shadow: var(--shadow-sm);
+            cursor: pointer;
+        }
+
+        .mp-action-btn:active {
+            background: var(--surface-hover);
+        }
+
+        .mp-action-btn--main {
+            min-width: calc(var(--mp-btn) * 1.4);
+            font-size: 19px;
+            color: #ffffff;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            border-color: transparent;
+            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+        }
+
+        .mp-sheet__note {
+            flex: 0 0 auto;
+            min-height: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-align: center;
+        }
+
+        .mp-sheet__footer {
+            flex: 0 0 auto;
+            display: flex;
+            justify-content: center;
+        }
+
+        .mp-generate {
+            width: 100%;
+            max-width: 320px;
+            justify-content: center;
+        }
+
+        /* ---------- 报错浮窗 ---------- */
+        .mp-error {
+            position: fixed;
+            inset: 0;
+            z-index: 200;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 16px;
+            background: rgba(16, 24, 40, 0.42);
+        }
+
+        .mp-error[hidden] {
+            display: none;
+        }
+
+        .mp-error__panel {
+            width: 100%;
+            max-width: 420px;
+            display: flex;
+            flex-direction: column;
+            gap: var(--mp-gap);
+            padding: 18px;
+            background: var(--surface);
+            border-radius: var(--r-lg);
+            box-shadow: var(--shadow-lg);
+        }
+
+        .mp-error__title {
+            font-size: 16px;
+            font-weight: 700;
+            color: var(--text-primary);
+            text-align: center;
+        }
+
+        .mp-error__grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: var(--mp-gap);
+        }
+
+        .mp-error__opt {
+            min-height: var(--mp-btn);
+            font-family: inherit;
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-primary);
+            background: var(--surface-hover);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-md);
+            cursor: pointer;
+        }
+
+        .mp-error__opt:active {
+            background: var(--accent-soft);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .mp-error__none,
+        .mp-error__cancel {
+            min-height: calc(var(--mp-btn) - 4px);
+            font-family: inherit;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--surface-hover);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--r-md);
+            cursor: pointer;
+        }
+
+        .mp-error__none:active,
+        .mp-error__cancel:active {
+            background: var(--surface);
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <nav class="app-nav">
-            <button class="app-tab active" data-view="singing">🎤 视唱旋律生成</button>
-            <button class="app-tab" data-view="chord">🎹 和弦听辨</button>
+            <!-- 默认落在「和弦听辨」：active 挂在 chord 上（静态标记 + 脚本末尾的 switchView('chord') 双保险） -->
+            <button class="app-tab" data-view="singing">🎤 视唱旋律生成</button>
+            <button class="app-tab active" data-view="chord">🎹 和弦听辨</button>
         </nav>
 
         <!-- ============ 视图一：视唱旋律生成（原有全部功能） ============ -->
-        <div id="view-singing">
+        <!-- 默认不显示（默认视图是和弦听辨）；内联 display 是为了首帧就不闪出这一页 -->
+        <div id="view-singing" style="display: none">
         <div class="controls">
             <div class="control-group">
                 <label>🎹 调性：</label>
@@ -729,8 +1084,8 @@
         <div class="key-hint">提示：旋律从主音开始，结束于主音，适合视唱练习</div>
         </div><!-- /#view-singing -->
 
-        <!-- ============ 视图二：和弦听辨 ============ -->
-        <div id="view-chord" style="display: none">
+        <!-- ============ 视图二：和弦听辨（默认视图） ============ -->
+        <div id="view-chord">
             <div class="controls">
                 <div class="control-group">
                     <label>📏 长度：</label>
@@ -815,6 +1170,60 @@
 
             <div class="key-hint" id="chord-key-hint"></div>
             <div class="key-hint" style="margin-top:4px;">💡 点击谱面上的任意小节，可从该小节开始播放</div>
+
+            <!-- ============================================================
+                 底部迷你播放器（手持练习用）：收起是一颗胶囊，点开展成全屏
+                 ------------------------------------------------------------
+                 逻辑全在 chord_recognition.js 里（它要实时读模块内部状态）。
+                 收起态的按钮只有「换一段」；收起条上**故意不显示罗马数字**，
+                 不然答案直接剧透了。
+                 ============================================================ -->
+            <div id="chord-mp" class="mp" data-state="collapsed">
+                <!-- 收起态：胶囊 -->
+                <div class="mp-bar" id="chord-mp-bar">
+                    <button class="mp-bar__open" id="chord-mp-expand" aria-label="展开播放器">
+                        <span class="mp-bar__grip" aria-hidden="true"></span>
+                        <span class="mp-bar__title" id="chord-mp-bar-title">第 1 / 8 小节</span>
+                        <span class="mp-bar__chevron" aria-hidden="true">▲</span>
+                    </button>
+                    <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min">🎲 换一段</button>
+                </div>
+
+                <!-- 展开态：全屏面板 -->
+                <div class="mp-sheet" id="chord-mp-sheet" role="dialog" aria-modal="true" aria-label="练习播放器">
+                    <div class="mp-sheet__top">
+                        <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器">▼ 收起</button>
+                        <button class="mp-icon-btn" id="chord-mp-playpause" aria-label="播放或暂停">▶ 播放</button>
+                    </div>
+
+                    <div class="mp-sheet__stage" id="chord-mp-stage">
+                        <canvas class="mp-cover" id="chord-mp-cover"></canvas>
+                        <button class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>点一下看答案</button>
+                    </div>
+
+                    <div class="mp-sheet__actions">
+                        <button class="mp-action-btn" id="chord-mp-prev">◀ 上一个</button>
+                        <button class="mp-action-btn mp-action-btn--main" id="chord-mp-report">报错</button>
+                        <button class="mp-action-btn" id="chord-mp-next">下一个 ▶</button>
+                    </div>
+
+                    <div class="mp-sheet__note" id="chord-mp-report-note"></div>
+
+                    <div class="mp-sheet__footer">
+                        <button class="btn btn-primary mp-generate" id="chord-mp-generate">🎲 换一段</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 报错浮窗：点报错键 → 选一个「我听成了哪个级数」 -->
+            <div id="chord-mp-error" class="mp-error" role="dialog" aria-modal="true" hidden>
+                <div class="mp-error__panel">
+                    <div class="mp-error__title">你听成了哪个级数？</div>
+                    <div class="mp-error__grid" id="chord-mp-error-grid"></div>
+                    <button class="mp-error__none" id="chord-mp-error-none">没听出来</button>
+                    <button class="mp-error__cancel" id="chord-mp-error-cancel">取消</button>
+                </div>
+            </div>
         </div><!-- /#view-chord -->
     </div>
 
@@ -2935,6 +3344,13 @@
         document.querySelectorAll('.app-tab').forEach((b) => {
             b.addEventListener('click', () => switchView(b.dataset.view));
         });
+
+        // ★ 默认视图 =「和弦听辨」。
+        //   静态 HTML 已经把 tab 的 active 与两个 view 的 display 设成和弦页，
+        //   这行是补「另一半」——switchView 会顺带调 ChordRecognition.activate()，
+        //   由它去建级数网格并先生成一段（否则和弦页是空的）。
+        //   注意：viewSinging 是 const（本作用域上方声明），这一行必须留在它之后。
+        switchView('chord');
     </script>
 </body>
 </html>
