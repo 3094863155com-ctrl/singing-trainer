@@ -26,3 +26,11 @@ yarn-error.log*
 # Environment
 .env
 .env.local
+
+# 本地开发产物 / 中间渲染文件（不发布）
+# 注意：绝不能写 *.mp3 或 音源/ —— 音源/ 与 音源/和弦钢琴/ 是线上运行必需的采样
+tools/render/
+试听_*.mp3
+采样试听_*.mp3
+预览_*.png
+四部大谱表_*.png
