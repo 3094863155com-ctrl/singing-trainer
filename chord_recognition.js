@@ -1349,11 +1349,7 @@
                     const vbW = parseFloat(p[2]);
                     const vbH = parseFloat(p[3]);
                     if (vbW > 0 && vbH > 0) {
-                        requestAnimationFrame(() => {
-                            if (window.innerWidth > 768) { svgEl.style.height = ''; return; }
-                            const w = svgEl.getBoundingClientRect().width;
-                            if (w > 0) svgEl.style.height = (w * vbH / vbW) + 'px';
-                        });
+                        requestAnimationFrame(() => fitSheetSvgHeight(svgEl, vbW, vbH));
                     }
                 }
             }
@@ -1361,6 +1357,14 @@
             console.error('和弦谱面渲染出错:', err);
             container.innerHTML = `<div style="color:red;padding:20px;">五线谱渲染出错: ${err.message}</div>`;
         }
+    }
+
+    // 手机竖屏下 SVG 的显式高度补偿（渲染完 / 谱表页展开时都要补一次 ——
+    // 若渲染发生在不可见容器里，这里量到宽度 0 会静默跳过，靠 CSS height:auto 兜底）
+    function fitSheetSvgHeight(svgEl, vbW, vbH) {
+        if (window.innerWidth > 768) { svgEl.style.height = ''; return; }
+        const w = svgEl.getBoundingClientRect().width;
+        if (w > 0) svgEl.style.height = (w * vbH / vbW) + 'px';
     }
 
     // ------------------------------------------------------------
@@ -1946,6 +1950,8 @@
     let data = null;              // { key, scale, keySig, chords }
     // 错题练习模式：出题换成"错误组合 + Ⅰ 胶水"，正确率不计入数据库，不设报错。
     let practiceMode = false;
+    let mpStarted = false;        // 本会话是否已开始听过（决定按钮叫"开始播放"还是"下一首"）
+    let mpStageView = 'card';     // 播放器舞台当前页：'card'（级数卡片）| 'sheet'（五线谱）
     let chordAudioEl = null;
     let blobUrl = null;
     let isRendering = false;
@@ -1999,6 +2005,7 @@
     const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要报错"
     const MP_UP_PX = 56;          // 按住之后往上滑多少算"要听辩辅助"（与下滑对称）
     const MP_LEFT_PX = 48;        // 按住之后往左滑多少算"回上一个和弦"（可连滑多次）
+    const MP_VIEW_PX = 64;        // **未长按**的水平快滑多少算"切换 卡片⇄谱表 页"（一次手势只切一页）
     const MP_REPORTS_MAX = 500;   // 内存里留存的明细上限
 
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
@@ -2040,6 +2047,7 @@
             mpClose: document.getElementById('chord-mp-close'),
             mpPlayPause: document.getElementById('chord-mp-playpause'),
             mpStage: document.getElementById('chord-mp-stage'),
+            mpSheetPage: document.getElementById('chord-mp-sheet-page'),
             mpCover: document.getElementById('chord-mp-cover'),
             mpCoverHidden: document.getElementById('chord-mp-cover-hidden'),
             mpPrev: document.getElementById('chord-mp-prev'),
@@ -2146,6 +2154,15 @@
         highlightedMeasure = m;
         if (m >= 0 && measureRects[m]) {
             measureRects[m].setAttribute('fill-opacity', '0.14');
+            // 播放器里的谱表页展开时，让当前小节自动滚进视野（克制：仅在小节变化时触发）
+            if (mpStageView === 'sheet' && mpExpanded && els && els.mpSheetPage) {
+                const scroller = els.mpSheetPage;
+                const r = measureRects[m].getBoundingClientRect();
+                const box = scroller.getBoundingClientRect();
+                if (r.top < box.top + 24 || r.bottom > box.bottom - 24) {
+                    measureRects[m].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                }
+            }
         }
         // 统计口径：**上一小节"完整播完"才算听过**。
         //   条件是"连续前进一格 + 没在 seek + 真的在播"—— 点小节跳转 / 拖进度条 /
@@ -2721,6 +2738,8 @@
         mode = mode || lastPlayMode || 'block';
         fromMeasure = fromMeasure || 0;
         if (!data || !data.chords.length || isRendering) return;
+        // 第一次真正出声 = 本会话"已开始"，两个生成按钮翻回「下一首」（幂等）
+        if (!mpStarted) { mpStarted = true; mpPaintGenerateLabels(); }
         if (!auto) cancelAutoNext();   // 用户手动播放 / 点小节 → 作废在途的自动接力
         const host = global.ChordHost;
         if (!host) { renderInfoText('音频桥接不可用', true); return; }
@@ -2968,9 +2987,11 @@
         if (els.mpGenerate) els.mpGenerate.addEventListener('click', () => { mpRegenerate(); });
         if (els.mpGenerateMin) els.mpGenerateMin.addEventListener('click', () => { mpRegenerate(); });
         if (els.mpErrorNone) els.mpErrorNone.addEventListener('click', () => mpSubmitReport(null));
+        // 用 pointerdown 而不是 click 关闭：iOS Safari 对 fixed 遮罩的 click
+        // 判定有坑（下方区域第一次 tap 常被吞/错位，要点两下）。按下即关最跟手。
         if (els.mpError) {
-            els.mpError.addEventListener('click', (e) => {
-                if (e.target === els.mpError) mpCloseError();   // 点遮罩关闭
+            els.mpError.addEventListener('pointerdown', (e) => {
+                if (e.target === els.mpError) mpCloseError();   // 按下遮罩（面板外）即关
             });
         }
 
@@ -2978,8 +2999,8 @@
         if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
         if (els.mpAidArp) els.mpAidArp.addEventListener('click', () => mpReplayAid('arp'));
         if (els.mpAid) {
-            els.mpAid.addEventListener('click', (e) => {
-                if (e.target === els.mpAid) mpCloseAid();       // 点窗外 = 停声+恢复播放+结束长按态
+            els.mpAid.addEventListener('pointerdown', (e) => {
+                if (e.target === els.mpAid) mpCloseAid();       // 按下窗外 = 停声+恢复播放+结束长按态
             });
         }
         if (els.mpErrorGrid) {
@@ -3019,9 +3040,13 @@
             flushStats();
         });
 
-        // 转屏 / 缩放后重画（canvas 尺寸跟着变）
+        // 转屏 / 缩放后重画（canvas 尺寸跟着变）；谱表页展开时顺带补 SVG 高度
         if (typeof window !== 'undefined') {
-            window.addEventListener('resize', () => { if (mpExpanded) mpPaintCover(); });
+            window.addEventListener('resize', () => {
+                if (!mpExpanded) return;
+                mpPaintCover();
+                if (mpStageView === 'sheet') requestAnimationFrame(fitSheetPage);
+            });
         }
         mpSetRevealed(false);
         mpSyncPlayIcon();
@@ -3052,9 +3077,35 @@
         if (mpExpanded) {
             mpPaintCover();
             mpSyncPlayIcon();
+            if (mpStageView === 'sheet') requestAnimationFrame(fitSheetPage);
         } else {
             mpCloseError();
         }
+    }
+
+    // 舞台两页切换：'card'（级数卡片/长按热区）⇄ 'sheet'（五线谱）。
+    //   谱表页没有长按揭示那套东西 —— 它自己的交互只有"点小节跳转"。
+    function mpSetStageView(v) {
+        v = (v === 'sheet') ? 'sheet' : 'card';
+        if (v === mpStageView) return;
+        mpCancelGesture();            // 切页瞬间作废在途手势
+        mpStageView = v;
+        if (els && els.mpSheetPage) {
+            els.mpSheetPage.hidden = (v !== 'sheet');
+            if (v === 'sheet') requestAnimationFrame(fitSheetPage);
+        }
+        // 切回卡片页时，若之前是揭示态，封面已在 canvas 里，无需重画
+    }
+
+    // 谱表页的高度补偿入口（手机竖屏需要显式给 SVG 设高，见 fitSheetSvgHeight）
+    function fitSheetPage() {
+        if (!els || !els.mpSheetPage) return;
+        const svgEl = els.mpSheetPage.querySelector('svg');
+        if (!svgEl) return;
+        const vb = (svgEl.getAttribute('viewBox') || '').split(/\s+/);
+        const vbW = parseFloat(vb[2]);
+        const vbH = parseFloat(vb[3]);
+        if (vbW > 0 && vbH > 0) fitSheetSvgHeight(svgEl, vbW, vbH);
     }
 
     // 小节变了 → 收起条上的进度文字 + （展开时）重画大图
@@ -3083,9 +3134,14 @@
 
     // 「下一首 / 开始播放」文案：还没生成任何内容时叫"开始播放"，生成后翻回"下一首"。
     //   两处按钮共用一个状态（收起条 + 面板底部），刷新统一挂在 doGenerate 与 init。
+    // 「下一首 / 开始播放」按钮文案。
+    //   规则（用户 2026-10-06 拍板）：本会话还没开始听过 → 显示「▶ 开始播放」，
+    //   点了是**播当前已有的一段**（activate 时会自动预生成一段）；一旦播过或
+    //   手动生成过新段，就翻回「⏭ 下一首」。刷新页面后没有"当前这首"的概念，
+    //   所以必须叫"开始播放"而不是"下一首"。
     function mpPaintGenerateLabels() {
         if (!els) return;
-        const t = (data && data.chords.length) ? '⏭ 下一首' : '▶ 开始播放';
+        const t = mpStarted ? '⏭ 下一首' : '▶ 开始播放';
         if (els.mpGenerate) els.mpGenerate.textContent = t;
         if (els.mpGenerateMin) els.mpGenerateMin.textContent = t;
     }
@@ -3277,14 +3333,17 @@
                 anchorX: e.clientX,
                 phase: 'pending',
                 axis: null,
+                viewOnly: mpStageView === 'sheet',   // 谱表页：没有长按揭示，只做滑页
                 consumed: false,      // 手势已被听辩辅助窗接管：松手只回收指针，不解冻
                 captured: false,
                 timer: 0
             };
             mpGesture = g;
             try { stage.setPointerCapture(e.pointerId); g.captured = true; } catch (err) {}
-            stage.classList.add('is-pressing');
-            g.timer = setTimeout(() => { g.timer = 0; mpArmGesture(g); }, MP_HOLD_MS);
+            if (!g.viewOnly) {
+                stage.classList.add('is-pressing');
+                g.timer = setTimeout(() => { g.timer = 0; mpArmGesture(g); }, MP_HOLD_MS);
+            }
         });
 
         stage.addEventListener('pointermove', (e) => {
@@ -3294,12 +3353,32 @@
             const dy = e.clientY - g.y0;
 
             if (g.phase === 'pending') {
-                // 还没到长按阈值就动了 → 当成滑动/误触，取消（既不揭示也不触发方向）
+                // 还没到长按阈值就动了：
+                //   水平主导 → 切页手势（卡片⇄谱表，见 MP_VIEW_PX）；
+                //   其余维持原行为 —— 当成滑动/误触取消（不揭示、不触发方向）。
                 if (Math.abs(dx) > MP_SLOP_PX || Math.abs(dy) > MP_SLOP_PX) {
                     if (g.timer) { clearTimeout(g.timer); g.timer = 0; }
                     stage.classList.remove('is-pressing');
-                    if (g.captured) { try { stage.releasePointerCapture(g.pointerId); } catch (err) {} g.captured = false; }
-                    mpGesture = null;
+                    if (Math.abs(dx) > Math.abs(dy) * 1.2) {
+                        g.phase = 'view';
+                        g.x0 = e.clientX;          // 以此刻重新锚定，再滑 MP_VIEW_PX 才切
+                    } else {
+                        if (g.captured) { try { stage.releasePointerCapture(g.pointerId); } catch (err) {} g.captured = false; }
+                        mpGesture = null;
+                    }
+                }
+                return;
+            }
+
+            if (g.phase === 'view') {
+                // 未长按的左右快滑 = 翻页。左滑 → 谱表页，右滑 → 卡片页；
+                // 只有两页，方向对不上（比如已在谱表页再左滑）就是空操作。
+                if (e.clientX - g.x0 < -MP_VIEW_PX) {
+                    g.phase = 'done';
+                    mpSetStageView('sheet');
+                } else if (e.clientX - g.x0 > MP_VIEW_PX) {
+                    g.phase = 'done';
+                    mpSetStageView('card');
                 }
                 return;
             }
@@ -3399,6 +3478,12 @@
     async function mpRegenerate() {
         if (isRendering) return;
         mpCancelGesture();
+        // 还没开始听过（按钮显示"开始播放"）：activate 时已预生成好一段，
+        // 这里不再重新出题，直接播这一段 —— "开始播放"就该是字面意思。
+        if (!mpStarted && data && data.chords.length) {
+            await doPlay(lastPlayMode, 0);
+            return;
+        }
         await doGenerate(false);
         if (MP_AUTOPLAY_AFTER_GENERATE) await doPlay(lastPlayMode, 0);
     }
@@ -3564,8 +3649,8 @@
     // 错题练习模式（复用迷你播放器，正确率不计入数据库，不设报错）
     // ============================================================
 
-    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左滑上一个';
-    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住上滑辅助 · 按住左滑上一个（不计统计 · 无报错）';
+    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左滑上一个 · 左右滑切换谱表';
+    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住上滑辅助 · 按住左滑上一个 · 左右滑切换谱表（不计统计 · 无报错）';
 
     // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 提示文案 / 收起条前缀 / 退出按钮
     function applyPracticeUi(on) {
@@ -3959,6 +4044,10 @@
             reportCount: mpReports.length
         }),
         _setMpExpanded: mpSetExpanded,
+        _setMpStageView: mpSetStageView,
+        _getMpStageView: () => mpStageView,
+        _getMpStarted: () => mpStarted,
+        _setMpStarted: (v) => { mpStarted = !!v; mpPaintGenerateLabels(); },
         _setMpMeasure: (m) => { mpMeasure = m; mpOnMeasure(m); },
         _setMpRevealed: mpSetRevealed,
         _openMpError: mpOpenError,

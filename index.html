@@ -60,6 +60,7 @@
             --mp-btn: clamp(48px, 15vw, 64px);
             --mp-gap: 12px;
             --mp-bar-h: 56px;
+            --nav-h: 44px;        /* 顶部常驻导航高度（按钮行高 + 下缘线） */
             --mp-safe: max(12px, env(safe-area-inset-bottom, 0px));
         }
 
@@ -67,7 +68,8 @@
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
             background: var(--bg-page);
             min-height: 100vh;
-            padding: 20px;
+            /* 顶部多让出常驻导航的高度（nav 已 fixed 脱离文档流） */
+            padding: calc(var(--nav-h) + 12px) 20px 20px;
             color: var(--text-primary);
         }
 
@@ -482,38 +484,66 @@
         /* ============================================================
            顶部导航：页面级路由（主页 = 和弦听辨 / 数据库 = 听辨统计）
            ============================================================ */
+        /* ------------------------------------------------------------
+           顶部导航：常驻固定（用户 2026-10-06）
+           与播放器的"悬浮胶囊"刻意区分 —— 通栏、实底、直角、只靠一根
+           下缘细线分界，像系统导航栏而不是浮在页面上的东西。
+           fixed 而非 sticky：body 有 20px 内边距，sticky 顶部会露出一条
+           页面底色，看起来又是"悬浮"的。z-index 40 压住内容、让位播放器。
+           ------------------------------------------------------------ */
         .app-nav {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 40;
             display: flex;
-            gap: 10px;
             justify-content: center;
-            flex-wrap: wrap;
-            margin-bottom: 22px;
+            align-items: stretch;
+            gap: 28px;
+            padding: 0 16px;
+            background: var(--bg-page);
+            border-bottom: 1px solid var(--border-strong);
         }
 
         .app-tab {
-            padding: 10px 24px;
+            position: relative;
+            display: flex;
+            align-items: center;
+            padding: 0 4px;
             font-size: 15px;
             font-weight: 600;
             font-family: inherit;
-            border: 1px solid var(--border-strong);
-            border-radius: var(--r-pill);
-            background: var(--surface);
+            border: none;
+            border-radius: 0;
+            background: none;
             color: var(--text-secondary);
             cursor: pointer;
-            transition: all 0.2s ease;
-            box-shadow: var(--shadow-sm);
+            transition: color 0.2s ease;
+            box-shadow: none;
         }
 
         .app-tab:hover {
-            border-color: var(--accent);
             color: var(--accent);
         }
 
         .app-tab.active {
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            color: #ffffff;
-            border-color: transparent;
-            box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+            background: none;
+            color: var(--text-primary);
+            border: none;
+            box-shadow: none;
+        }
+
+        /* 选中指示条：贴着导航的下缘线，加粗文字 + 短横线，固定感 */
+        .app-tab.active::after {
+            content: '';
+            position: absolute;
+            left: 6px;
+            right: 6px;
+            bottom: 0;
+            height: 3px;
+            border-radius: 3px 3px 0 0;
+            background: linear-gradient(90deg, var(--accent), var(--accent-2));
         }
 
         /* ============================================================
@@ -793,6 +823,47 @@
             -webkit-tap-highlight-color: transparent;
         }
 
+        /* ------------------------------------------------------------
+           舞台第二页：谱表（卡片 ⇄ 谱表，未长按左右滑切换）
+           写在上一条之后就是为了覆盖它的 touch-action —— 谱表页要上下
+           滚动，滚动手势得还给浏览器；水平切换仍由 JS 手势处理。
+           ------------------------------------------------------------ */
+        .mp-page--sheet {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px 8px;
+            overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
+            touch-action: pan-y;
+            cursor: pointer;
+        }
+
+        /* ★ 必须连子孙一起覆盖：上面 `.mp-sheet__stage *` 已把 SVG/热区写成
+           touch-action:none，不盖回来谱表页的竖向滚动会被掐死（滚动行为由
+           触摸起点沿链的 touch-action 交集决定）。pan-y 下横向滑动仍会完整
+           派发 pointer 事件给 JS 的切页手势。 */
+        .mp-page--sheet,
+        .mp-page--sheet * {
+            touch-action: pan-y;
+        }
+
+        .mp-page--sheet[hidden] {
+            display: none;
+        }
+
+        .mp-page--sheet .sheet-music-container {
+            width: 100%;
+            max-width: 640px;
+            margin: 0 auto;
+            box-shadow: var(--shadow-sm);
+            padding: 16px;
+            overflow-x: visible;   /* 谱面已按容器宽缩放，容器内不再横向滚动 */
+        }
+
         .mp-cover {
             display: block;
             /* ▲ canvas 是"替换元素"：只给 max-* + auto，浏览器才会按它自身的
@@ -803,8 +874,8 @@
             max-height: 100%;
             border-radius: var(--r-lg);
             box-shadow: var(--shadow-md);
-            /* 框内外都是白底，缩放看不出来 —— 一根极淡的描边让轮廓可辨（保持克制） */
-            border: 1px solid rgba(16, 24, 40, 0.07);
+            /* 框内外都是白底，缩放看不出来 —— 一根描边让轮廓可辨 */
+            border: 1px solid rgba(16, 24, 40, 0.16);
             /* 揭示 / 回遮只动 opacity + transform（合成层，不掉帧）。
                千万别在这里过渡 filter / box-shadow / 宽高。 */
             opacity: 0;
@@ -846,13 +917,15 @@
             border: 1px dashed var(--border-strong);
             border-radius: var(--r-lg);
             cursor: pointer;
-            transition: transform 0.14s ease, opacity 0.12s ease;
+            transition: transform 0.14s ease, opacity 0.12s ease, border-color 0.14s ease, background-color 0.14s ease;
         }
 
-        /* 阶段一：按下（还没到长按阈值）—— 卡片缩一下 + 舞台底部进度条从左往右长，
-           让手指明确感到"按住了"。进度条用 scaleX 而非 width，避免每帧布局。 */
+        /* 阶段一：按下（还没到长按阈值）—— 卡片缩一下 + 边框加深 + 舞台底部进度条
+           从左往右长，让手指明确感到"按住了"。进度条用 scaleX 而非 width，避免每帧布局。 */
         .mp-sheet__stage.is-pressing .mp-cover-hidden {
-            transform: translate(-50%, -50%) scale(0.97);
+            transform: translate(-50%, -50%) scale(0.94);
+            border-color: rgba(16, 24, 40, 0.34);
+            background: #eef0f4;
         }
 
         .mp-sheet__stage::after {
@@ -947,6 +1020,10 @@
             justify-content: center;
             padding: 16px;
             background: rgba(16, 24, 40, 0.42);
+            /* manipulation = 干掉 iOS 双击缩放判定（会吞第一次 tap 的 click）；
+               关闭走 pointerdown，按下即响应 */
+            touch-action: manipulation;
+            cursor: pointer;
         }
 
         .mp-error[hidden] {
@@ -1034,6 +1111,8 @@
             justify-content: center;
             padding: 16px;
             background: rgba(16, 24, 40, 0.42);
+            touch-action: manipulation;   /* 同 .mp-error：关双击判定，关闭走 pointerdown */
+            cursor: pointer;
         }
 
         .mp-aid[hidden] {
@@ -1223,7 +1302,7 @@
         <!-- 顶部页面级路由：主页（和弦听辨）/ 数据库（听辨统计）。
              视唱旋律生成已拆到独立站点，不再出现在这个应用里。 -->
         <nav class="app-nav">
-            <button class="app-tab active" data-root="home">🏠 主页</button>
+            <button class="app-tab active" data-root="home">⚙️ 设置</button>
             <button class="app-tab" data-root="db">📊 数据库</button>
         </nav>
 
@@ -1316,12 +1395,8 @@
             <div class="playback-info" id="chord-info">点击“下一首”开始</div>
             <div class="playback-info" id="chord-render-info" style="display: none; color: var(--accent); min-height: 20px;"></div>
 
-            <div class="sheet-music-container">
-                <div id="chord-sheet-music"></div>
-            </div>
-
-            <div class="key-hint" id="chord-key-hint"></div>
-            <div class="key-hint" style="margin-top:4px;">💡 点击谱面上的任意小节，可从该小节开始播放</div>
+            <!-- （2026-10-06）谱表整体搬进迷你播放器的舞台，作为"卡片 ⇄ 谱表"两页之一；
+                 这里只留设置类控件。 -->
 
             <!-- ============================================================
                  底部迷你播放器（手持练习用）：收起是一颗胶囊，点开展成全屏
@@ -1351,10 +1426,20 @@
                     </div>
 
                     <!-- 长按热区：整个舞台。按住=揭示答案；按住下滑=报错；按住上滑=听辩辅助；
-                         按住左滑=上一个和弦。手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
+                         按住左滑=上一个和弦。**未长按**的左右滑 = 卡片⇄谱表 两页切换
+                         （卡片要长按才触发二级左滑，所以快速滑不冲突）。
+                         手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
                     <div class="mp-sheet__stage" id="chord-mp-stage">
                         <canvas class="mp-cover" id="chord-mp-cover"></canvas>
                         <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>按住看答案</div>
+                        <!-- 谱表页：可读大小、上下滚动；点击小节跳转保留 -->
+                        <div class="mp-page--sheet" id="chord-mp-sheet-page" hidden>
+                            <div class="sheet-music-container">
+                                <div id="chord-sheet-music"></div>
+                            </div>
+                            <div class="key-hint" id="chord-key-hint"></div>
+                            <div class="key-hint" style="margin-top:4px;">💡 点击谱面上的任意小节，可从该小节开始播放</div>
+                        </div>
                     </div>
 
                     <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住左滑上一个</div>
