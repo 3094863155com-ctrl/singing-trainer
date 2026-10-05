@@ -1566,6 +1566,47 @@
         return host.audioBufferToWav(out);
     }
 
+    // 现场起 BufferSource 播一小撮音（不走离线渲染），供听辩辅助窗用。
+    //   style 'arp'   上行分解琶音：三和弦 [低,中,高,低+12]（与分解模式同构）、四音原序，
+    //                 每音间隔 0.325s（4 音 ≈ 1.3 秒）
+    //   style 'block' 柱式：全音同时、只弹一下
+    //   音源全部登记进 mpAid.sources，关窗/重放前可随时 stop()。
+    //   必须在手势调用栈内触发（iOS 自动播放策略）；采样缺失只 warn 不抛。
+    async function playInstantChord(midis, style) {
+        const host = global.ChordHost;
+        if (!host || !host.audioContext) return;
+        try { await host.initAudio(); } catch (e) {}
+        const ctx = host.audioContext;
+        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch (e) {} }
+
+        const pattern = (style === 'block')
+            ? null
+            : (midis.length === 3 ? [midis[0], midis[1], midis[2], midis[0] + 12] : midis.slice());
+        const GAP = 0.325;                 // 琶音每音间隔
+        const notes = (style === 'block')
+            ? midis.map((m) => ({ midi: m, at: 0, hold: Math.min(0.8, 60 / settings.tempo), gain: 0.45 }))
+            : pattern.map((m, i) => ({ midi: m, at: i * GAP, hold: 0.3, gain: 0.5 }));
+
+        for (const n of notes) {
+            const s = resolveSample(n.midi);
+            if (!s) { console.warn('听辩辅助：midi ' + n.midi + ' 无采样'); continue; }
+            const src = ctx.createBufferSource();
+            src.buffer = s.buffer;
+            src.playbackRate.value = s.rate;
+            const gain = ctx.createGain();
+            src.connect(gain); gain.connect(ctx.destination);
+            const t = ctx.currentTime + n.at;
+            // 包络与 renderChordAudio 一致：4ms 起音 → 按住 → 短淡出
+            gain.gain.setValueAtTime(0, t);
+            gain.gain.linearRampToValueAtTime(n.gain, t + 0.004);
+            gain.gain.setValueAtTime(n.gain, t + n.hold);
+            gain.gain.linearRampToValueAtTime(0, t + n.hold + CHORD_RELEASE);
+            src.start(t);
+            src.stop(t + n.hold + CHORD_RELEASE + 0.05);
+            if (mpAid) mpAid.sources.push(src);
+        }
+    }
+
     // ------------------------------------------------------------
     // 配置持久化（与视唱页完全隔离）
     // ------------------------------------------------------------
@@ -1956,6 +1997,7 @@
     const MP_HOLD_MS = 160;       // 按住多久算"长按"（到点才揭示答案，防误触剧透）
     const MP_SLOP_PX = 12;        // 长按阈值到达前的容差：超过就当成滑动/误触，取消本次
     const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要报错"
+    const MP_UP_PX = 56;          // 按住之后往上滑多少算"要听辩辅助"（与下滑对称）
     const MP_LEFT_PX = 48;        // 按住之后往左滑多少算"回上一个和弦"（可连滑多次）
     const MP_REPORTS_MAX = 500;   // 内存里留存的明细上限
 
@@ -2001,16 +2043,16 @@
             mpCover: document.getElementById('chord-mp-cover'),
             mpCoverHidden: document.getElementById('chord-mp-cover-hidden'),
             mpPrev: document.getElementById('chord-mp-prev'),
-            mpReport: document.getElementById('chord-mp-report'),
             mpNext: document.getElementById('chord-mp-next'),
-            mpNote: document.getElementById('chord-mp-report-note'),
             mpGenerate: document.getElementById('chord-mp-generate'),
             mpExitPractice: document.getElementById('chord-mp-exit-practice'),
             mpHint: document.getElementById('chord-mp-hint'),
             mpError: document.getElementById('chord-mp-error'),
             mpErrorGrid: document.getElementById('chord-mp-error-grid'),
             mpErrorNone: document.getElementById('chord-mp-error-none'),
-            mpErrorCancel: document.getElementById('chord-mp-error-cancel'),
+            mpAid: document.getElementById('chord-mp-aid'),
+            mpAidBlock: document.getElementById('chord-mp-aid-block'),
+            mpAidArp: document.getElementById('chord-mp-aid-arp'),
             // ---- 数据库页（听辨统计）----
             dbMatrix: document.getElementById('db-matrix'),
             dbTop: document.getElementById('db-top'),
@@ -2634,6 +2676,7 @@
         stopChordPlayback();
         // 错题练习：出题换成"错误组合 + Ⅰ 胶水"的固定序列（每次进入重洗一次顺序）
         data = practiceMode ? practiceProgression() : generateChordProgression(settings);
+        mpPaintGenerateLabels();        // 内容一落定，「开始播放」就翻回「下一首」
         renderChordSheet(data);
         updateHint();
         setPlayButtonsEnabled(true);
@@ -2647,7 +2690,6 @@
         //   它会在"用户正长按看答案"时只更新 mpLiveMeasure、不动显示，
         //   于是自动连播换段也不会把用户按住的那个答案换掉。
         mpOnMeasure(0);
-        mpSetNote('');                  // 上一段的报错提示也清掉
         // 顺便把整段的锁屏封面画好（异步）。等用户点播放时早就绪了，切小节零延迟。
         buildChordArtwork();
         if (!auto) renderInfoText('已生成新的一段，点击“播放”');
@@ -2925,12 +2967,19 @@
         if (els.mpPlayPause) els.mpPlayPause.addEventListener('click', () => { mpTogglePlay(); });
         if (els.mpGenerate) els.mpGenerate.addEventListener('click', () => { mpRegenerate(); });
         if (els.mpGenerateMin) els.mpGenerateMin.addEventListener('click', () => { mpRegenerate(); });
-        if (els.mpReport) els.mpReport.addEventListener('click', () => { mpCancelGesture(); mpOpenError(null); });
         if (els.mpErrorNone) els.mpErrorNone.addEventListener('click', () => mpSubmitReport(null));
-        if (els.mpErrorCancel) els.mpErrorCancel.addEventListener('click', () => mpCloseError());
         if (els.mpError) {
             els.mpError.addEventListener('click', (e) => {
                 if (e.target === els.mpError) mpCloseError();   // 点遮罩关闭
+            });
+        }
+
+        // 听辩辅助窗：重听柱式 / 再放琶音 / 点窗外关闭并恢复播放
+        if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
+        if (els.mpAidArp) els.mpAidArp.addEventListener('click', () => mpReplayAid('arp'));
+        if (els.mpAid) {
+            els.mpAid.addEventListener('click', (e) => {
+                if (e.target === els.mpAid) mpCloseAid();       // 点窗外 = 停声+恢复播放+结束长按态
             });
         }
         if (els.mpErrorGrid) {
@@ -2941,9 +2990,14 @@
             });
         }
 
-        // 错题练习：进入（数据库页的按钮）/ 退出（面板顶部的按钮）
+        // 错题练习开关：面板顶部按钮 = 开/关切换；数据库页按钮 = 快捷进入
         if (els.dbPractice) els.dbPractice.addEventListener('click', () => { startPractice(); });
-        if (els.mpExitPractice) els.mpExitPractice.addEventListener('click', () => { exitPractice(); });
+        if (els.mpExitPractice) els.mpExitPractice.addEventListener('click', () => {
+            if (practiceMode) { exitPractice(); return; }
+            startPractice().then((ok) => {
+                if (!ok) renderInfoText('还没有错题记录，先在普通模式练几题', false);
+            });
+        });
 
         // 长按看的答案：按住揭示、按住下滑报错、按住左滑上一个和弦
         bindStageGesture();
@@ -3023,8 +3077,17 @@
         // ★ 只报"第几小节"，**不报级数** —— 收起条上写级数等于剧透答案
         const base = total
             ? ('第 ' + (mpMeasure + 1) + ' / ' + total + ' 小节')
-            : '还没有内容，点「下一首」';
+            : '还没有内容，点「开始播放」';
         els.mpBarTitle.textContent = practiceMode ? ('错题 · ' + base) : base;
+    }
+
+    // 「下一首 / 开始播放」文案：还没生成任何内容时叫"开始播放"，生成后翻回"下一首"。
+    //   两处按钮共用一个状态（收起条 + 面板底部），刷新统一挂在 doGenerate 与 init。
+    function mpPaintGenerateLabels() {
+        if (!els) return;
+        const t = (data && data.chords.length) ? '⏭ 下一首' : '▶ 开始播放';
+        if (els.mpGenerate) els.mpGenerate.textContent = t;
+        if (els.mpGenerateMin) els.mpGenerateMin.textContent = t;
     }
 
     // 把当前小节的级数画进面板里那张 canvas（与锁屏封面同一套画法、同一份数据）
@@ -3131,6 +3194,7 @@
             info: info,
             degree: info.degree,
             roman: info.roman,
+            midis: data.chords[m].midis.slice(),   // 听辩辅助窗琶音/柱式要用（快照自带，跨段不串）
             prev2: mpPrevTwo(m),
             prev3: mpPrevDegrees(m, 3)
         };
@@ -3149,6 +3213,15 @@
 
     // 手势的统一收尾。任何"显式动作"（点按钮 / 换段 / 收起面板 / 切视图）都先调它。
     function mpCancelGesture() {
+        // 听辩辅助窗还开着时，任何显式收尾先静默收掉它（停声+恢复播放+收浮窗）。
+        //   注意这里不调 mpCloseAid —— 会递归（mpCloseAid 末尾也调 mpCancelGesture）。
+        if (mpAid) {
+            mpStopAidVoices();
+            if (els && els.mpAid) els.mpAid.hidden = true;
+            if (mpAid.wasPlaying && chordAudioEl) { try { chordAudioEl.play().catch(() => {}); } catch (e) {} }
+            mpAid = null;
+            mpSyncPlayIcon();
+        }
         if (mpGesture) {
             if (mpGesture.timer) clearTimeout(mpGesture.timer);
             if (els && els.mpStage && mpGesture.captured) {
@@ -3204,6 +3277,7 @@
                 anchorX: e.clientX,
                 phase: 'pending',
                 axis: null,
+                consumed: false,      // 手势已被听辩辅助窗接管：松手只回收指针，不解冻
                 captured: false,
                 timer: 0
             };
@@ -3231,10 +3305,11 @@
             }
             if (g.phase !== 'armed') return;
 
-            // 先定轴：斜滑按主导轴，绝不双触发。
-            //   错题练习不设报错 → 不认"下滑"这个轴（只认左滑回退）。
+            // 先定轴：斜滑按主导轴，绝不双触发；轴一旦锁定，另一方向就不再触发。
+            //   错题练习不设报错 → 不认"下滑"这个轴（上滑辅助/左滑回退照常）。
             if (!g.axis) {
                 if (!practiceMode && dy > MP_DOWN_PX && dy > Math.abs(dx) * 1.2) g.axis = 'down';
+                else if (dy < -MP_UP_PX && Math.abs(dy) > Math.abs(dx) * 1.2) g.axis = 'up';
                 else if (dx < -MP_LEFT_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'left';
             }
 
@@ -3242,6 +3317,15 @@
                 if (dy > MP_DOWN_PX) {
                     g.phase = 'done';                 // 一次性动作，之后忽略 move
                     mpOpenError(mpFreeze);            // 目标 = 冻结快照；音乐不停
+                }
+                return;
+            }
+
+            if (g.axis === 'up') {
+                if (dy < -MP_UP_PX) {
+                    g.phase = 'done';                 // 一次性动作，之后忽略 move
+                    g.consumed = true;                // 手势交给辅助窗接管：松手不解冻、不关门
+                    mpOpenAid(mpFreeze);              // 暂停 + 播冻结和弦的琶音 + 弹辅助窗
                 }
                 return;
             }
@@ -3260,15 +3344,17 @@
         const finish = (e) => {
             const g = mpGesture;
             if (!g || (e && e.pointerId !== undefined && e.pointerId !== g.pointerId)) return;
+            if (g.consumed) {
+                // 听辩辅助窗已接管：只回收指针。解冻/恢复播放由"关辅助窗"那一侧负责。
+                if (g.captured) { try { stage.releasePointerCapture(g.pointerId); } catch (err) {} }
+                mpGesture = null;
+                return;
+            }
             mpCancelGesture();
         };
         stage.addEventListener('pointerup', finish);
         stage.addEventListener('pointercancel', finish);
         stage.addEventListener('lostpointercapture', finish);
-    }
-
-    function mpSetNote(text) {
-        if (els && els.mpNote) els.mpNote.textContent = text || '';
     }
 
     function mpSyncPlayIcon() {
@@ -3313,7 +3399,6 @@
     async function mpRegenerate() {
         if (isRendering) return;
         mpCancelGesture();
-        mpSetNote('');
         await doGenerate(false);
         if (MP_AUTOPLAY_AFTER_GENERATE) await doPlay(lastPlayMode, 0);
     }
@@ -3401,6 +3486,50 @@
         if (els && els.mpError) els.mpError.hidden = true;
     }
 
+    // ---------------- 听辩辅助窗（长按 + 上滑） ----------------
+    //   触发即暂停主音频 → 播冻结和弦的上行琶音 → 弹浮窗；
+    //   浮窗里可重听柱式/再放琶音；点窗外关闭并恢复播放。
+    //   辅助窗不写任何统计（与报错浮窗的 practiceMode 闸门无关，错题模式也可用）。
+    let mpAid = null;   // { measure, midis, sources: [], wasPlaying }
+
+    async function mpOpenAid(frozen) {
+        if (!frozen || frozen.seg !== mpSeg) return;      // 跨段快照作废
+        const midis = (frozen.midis && frozen.midis.length)
+            ? frozen.midis
+            : ((data && data.chords[frozen.measure] || {}).midis);
+        if (!midis || !midis.length) return;
+        const wasPlaying = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
+        if (chordAudioEl && wasPlaying) { try { chordAudioEl.pause(); } catch (e) {} }
+        mpSyncPlayIcon();                                  // pause 事件会同步，这里兜底
+        mpAid = { measure: frozen.measure, midis: midis.slice(), sources: [], wasPlaying };
+        if (els && els.mpAid) els.mpAid.hidden = false;
+        try { await playInstantChord(midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
+    }
+
+    function mpStopAidVoices() {
+        if (!mpAid) return;
+        mpAid.sources.forEach((s) => { try { s.stop(); } catch (e) {} });   // 已结束的 stop() 无害
+        mpAid.sources = [];
+    }
+
+    // 用户主动关窗：停声 → 收浮窗 → 恢复播放 → 结束长按态（解冻）
+    function mpCloseAid() {
+        if (!mpAid) return;
+        mpStopAidVoices();
+        if (els && els.mpAid) els.mpAid.hidden = true;
+        const was = mpAid.wasPlaying;
+        mpAid = null;
+        if (was && chordAudioEl) { try { chordAudioEl.play().catch(() => {}); } catch (e) {} }
+        mpSyncPlayIcon();
+        mpCancelGesture();            // 解冻 + 收揭示态（mpCancelGesture 开头有 mpAid 兜底，不会递归）
+    }
+
+    function mpReplayAid(style) {
+        if (!mpAid) return;
+        mpStopAidVoices();
+        playInstantChord(mpAid.midis, style).catch(() => {});
+    }
+
     // 上报「我听成了哪个级数」。guessed = null 表示"没听出来"。
     function mpSubmitReport(guessed) {
         if (!mpErrorCtx) { mpCloseError(); return; }
@@ -3419,30 +3548,34 @@
         if (mpReports.length > MP_REPORTS_MAX) mpReports.shift();
         recordReport(rec);            // 聚合统计（数据库页的数据源 + 出题加权的依据）
         mpCloseError();
-        mpSetNote('已记录：你听成 ' + (rec.guessedRoman || '没听出来') +
-            ' ｜ 实际 ' + rec.actualRoman + '（第 ' + (rec.measure + 1) + ' 小节）');
         mpErrorCtx = null;
         try { console.log('[和弦听辨·报错]', rec); } catch (e) {}
-        // ★ 报错提交后回到报错和弦的小节开头**重播一小节**，播完自然继续往后。
-        //   （本轮明确推翻上一轮"报错提交后播放不停不跳转"的决定。）
-        //   doPlay 快路只是 seek，seeking 期间不会误计 heard；重播的那一小节会再计
+        // ★ 报错提交后回到**报错和弦的前一个**和弦的小节开头重播，播完自然继续往后
+        //   （把"出错和弦的前置语境"再给一遍，而不是孤零零重听出错的那一小节）。
+        //   rec.measure = 0 时没有前一个，原地退到 0。
+        //   doPlay 快路只是 seek，seeking 期间不会误计 heard；重播经过的小节会再计
         //   一次 —— 它确实又被完整听了一遍，属可接受的双计。
         //   isRendering 中提交时 doPlay 会静默跳过本次重播（概率极低）。
         mpCancelGesture();            // 长按冻结/揭示态先解冻，再 seek
-        if (!practiceMode) doPlay(lastPlayMode, rec.measure);
+        if (!practiceMode) doPlay(lastPlayMode, Math.max(0, rec.measure - 1));
     }
 
     // ============================================================
     // 错题练习模式（复用迷你播放器，正确率不计入数据库，不设报错）
     // ============================================================
 
-    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住左滑上一个';
-    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住左滑上一个（不计统计 · 无报错）';
+    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左滑上一个';
+    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住上滑辅助 · 按住左滑上一个（不计统计 · 无报错）';
 
     // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 提示文案 / 收起条前缀 / 退出按钮
     function applyPracticeUi(on) {
-        if (els && els.mpReport) els.mpReport.hidden = !!on;
-        if (els && els.mpExitPractice) els.mpExitPractice.hidden = !on;
+        // 错题练习开关：恒显，靠 is-on 高亮 + 文案区分开/关
+        if (els && els.mpExitPractice) {
+            els.mpExitPractice.hidden = false;
+            els.mpExitPractice.textContent = on ? '✕ 退出错题' : '错题练习';
+            els.mpExitPractice.classList.toggle('is-on', !!on);
+        }
+        if (els && els.dbPractice) els.dbPractice.disabled = !!on;   // 错题中禁用数据库页入口（已在错题里）
         if (els && els.mpHint) els.mpHint.textContent = on ? MP_HINT_PRACTICE : MP_HINT_NORMAL;
         mpPaintBarTitle();
         updateHint();
@@ -3696,6 +3829,7 @@
         loadStats();
         buildDegreeGrid();
         bindUI();
+        mpPaintGenerateLabels();        // 初始没有任何内容 → 按钮显示「▶ 开始播放」
         updateHint();
         inited = true;
     }
@@ -3821,6 +3955,7 @@
             gestureAxis: mpGesture ? mpGesture.axis : null,
             playing: !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended),
             errorOpen: !!(els && els.mpError && !els.mpError.hidden),
+            aidOpen: !!(els && els.mpAid && !els.mpAid.hidden),
             reportCount: mpReports.length
         }),
         _setMpExpanded: mpSetExpanded,
@@ -3828,6 +3963,8 @@
         _setMpRevealed: mpSetRevealed,
         _openMpError: mpOpenError,
         _closeMpError: mpCloseError,
+        _openMpAid: mpOpenAid,
+        _closeMpAid: mpCloseAid,
         // ---- 听辨统计 / 数据库页（调试 / 自测用）----
         renderStats: renderStats,
         _getStats: () => ({ all: statsAll, session: statsSession, scope: statsScope }),
