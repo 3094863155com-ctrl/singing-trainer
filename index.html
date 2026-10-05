@@ -769,6 +769,14 @@
                 <button class="btn btn-secondary" id="chord-play-arpeggio" disabled>🎶 分解和弦</button>
                 <button class="btn btn-secondary" id="chord-play-bass" disabled>🎵 单音</button>
                 <button class="btn btn-secondary" id="chord-stop">⏹ 停止</button>
+
+                <div class="control-group">
+                    <label>🔁 自动连播：</label>
+                    <input type="checkbox" id="chord-auto-continue" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
+                    <span style="color: var(--text-tertiary); font-size: 12px;">
+                        一段播完停约 1.5 秒，自动换新的一段接着播（调性重新随机）
+                    </span>
+                </div>
             </div>
 
             <details class="more-settings" open>

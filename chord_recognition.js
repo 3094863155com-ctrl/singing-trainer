@@ -80,6 +80,9 @@
         //   'fourpart' = 四部和声（SATB，大谱表，每个和弦 4 个音，按和声学规则重复音）
         //   'triad'    = 原模式（单行高音谱表，三和弦 3 个音 / 七和弦 4 个音）
         voicingMode: 'fourpart',
+        // 自动连播：一段播完 → 停约 1.5 秒 → 自动换新的一段（调性重新随机）接着播，无限进行。
+        // 任何手动操作（停止 / 播放 / 换一段 / 点小节 / 改参数 / 切视图）都会打断接力。
+        autoContinue: false,
         legato: LEGATO_DEFAULT,
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
@@ -1517,6 +1520,7 @@
         if (typeof s.allowInversion === 'boolean') settings.allowInversion = s.allowInversion;
         if (typeof s.allowSecondInv === 'boolean') settings.allowSecondInv = s.allowSecondInv;
         if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
+        if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
         if (s.legato !== undefined) settings.legato = clampLegato(s.legato);
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
@@ -1557,6 +1561,25 @@
     let blobMode = null;          // 已渲染音频对应的播放方式（柱式/分解/单音）
     let seeking = false;          // seek 期间不要因 pause 事件清掉高亮
 
+    // ---- 自动连播 ----
+    //   一段播完 → 停约 AUTO_CONTINUE_GAP_MS → 自动生成新的一段接着播，无限接力。
+    //   接力用「代数」判定是否还有效：任何让当前播放作废的动作（停止 / 手动播放 /
+    //   换一段 / 点小节 / 改速度 / 切视图）都会把代数 +1，在途的接力发现代数变了就放弃。
+    let autoTimer = null;         // 段间停顿定时器
+    let autoBreak = 0;            // 打断代数：用户动手就 +1
+    let autoRunning = false;      // 接力自身执行中（此期间的 stop 不算"用户打断"）
+
+    // 段间停顿：从"上一段结束"算起，隔这么久去生成下一段。
+    //   实际静音时长 = 这个值 + 生成/渲染耗时。实测（8 小节 / 四部和声 / 柱式）：
+    //   1050 → 静音约 1.5 秒（渲染额外吃掉约 0.45 秒）。16 小节或分解和弦渲染更久，
+    //   静音会到 1.8 秒左右。听着觉得太长/太短，就改这一个数。
+    const AUTO_CONTINUE_GAP_MS = 1050;
+    const autoStats = { chains: 0, lastEndedAt: 0 };   // 自测用：接力了几次
+
+    // ---- 进度轮询（高亮 + 锁屏封面跟随）----
+    let progressRaf = 0;          // requestAnimationFrame 句柄
+    let lastPosPush = 0;          // 上次推锁屏进度的时刻（setPositionState 限流用）
+
     let els = null;
 
     function cacheEls() {
@@ -1573,6 +1596,7 @@
             playArp: document.getElementById('chord-play-arpeggio'),
             playBass: document.getElementById('chord-play-bass'),
             stop: document.getElementById('chord-stop'),
+            autoContinue: document.getElementById('chord-auto-continue'),
             grid: document.getElementById('degree-grid'),
             inversion: document.getElementById('chord-inversion'),
             secondInv: document.getElementById('chord-second-inv'),
@@ -1666,9 +1690,98 @@
         return 4 * (60 / settings.tempo);
     }
 
-    // 让高亮跟随播放进度。
-    //   用 timeupdate（约 4 次/秒，远够小节级跟随）而不是 requestAnimationFrame —— 省电得多。
-    //   只为"小节级"高亮服务，所以不需要更细的精度。
+    // ------------------------------------------------------------
+    // 进度跟随（高亮 + 锁屏封面）
+    //
+    //   用 requestAnimationFrame 每帧问一次"现在第几小节"：小节切换点能抓到 16ms 精度，
+    //   锁屏封面基本是踩着拍子换的。
+    //   原先只挂 timeupdate（浏览器约 4 次/秒 = 250ms 一跳），平均要慢 ~125ms、
+    //   最坏 ~250ms 才换封面 —— 用户实测到的"慢 200ms 左右"就是它。
+    //
+    //   timeupdate 保留作兜底：后台标签页里 rAF 会被浏览器停掉，那时靠它继续推。
+    // ------------------------------------------------------------
+    function updateProgress(force) {
+        if (!data || !chordAudioEl) return;
+        const m = Math.min(data.chords.length - 1,
+            Math.floor(chordAudioEl.currentTime / measureDuration()));
+        setMeasureHighlight(m);
+        // 锁屏进度条（可拖动）也要跟着走。但没必要每秒推 60 次，限流到 4 次/秒。
+        const now = Date.now();
+        if (force || now - lastPosPush >= 250) {
+            lastPosPush = now;
+            const host = global.ChordHost;
+            if (host && host.updateMediaPosition) host.updateMediaPosition(chordAudioEl);
+        }
+    }
+
+    function progressLoop() {
+        progressRaf = 0;
+        if (!chordAudioEl || chordAudioEl.paused || chordAudioEl.ended) return;
+        updateProgress(false);
+        progressRaf = requestAnimationFrame(progressLoop);
+    }
+
+    function startProgressLoop() {
+        if (progressRaf) return;
+        lastPosPush = 0;
+        progressRaf = requestAnimationFrame(progressLoop);
+    }
+
+    function stopProgressLoop() {
+        if (progressRaf) {
+            cancelAnimationFrame(progressRaf);
+            progressRaf = 0;
+        }
+    }
+
+    // ------------------------------------------------------------
+    // 自动连播：一段播完 → 停一下 → 自动换新的一段接着播，无限接力
+    // ------------------------------------------------------------
+
+    // 作废所有在途的接力（定时器 / 尚未开播的那一步）。
+    //   接力用"代数"判定有效性：这里 +1，在途的接力发现代数变了就放弃自己。
+    function cancelAutoNext() {
+        autoBreak++;
+        if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; }
+    }
+
+    // 一段播完时调用。注意退出条件：用户可能在这段时间里动手（取消勾选 / 按停止 /
+    // 手动播放 / 点小节 / 切视图），那些动作都会把 autoBreak +1 → 这里就放弃接力。
+    function scheduleAutoNext() {
+        if (!settings.autoContinue) return;
+        cancelAutoNext();                        // 清掉可能残留的上一次接力（同时抬高代数）
+        const brk = autoBreak;
+        showAutoInfo('🔁 自动连播：马上换新的一段…');
+        autoTimer = setTimeout(() => {
+            autoTimer = null;
+            if (brk !== autoBreak) return;
+            if (!settings.autoContinue || isRendering || !data) return;
+            autoAdvance(brk);
+        }, AUTO_CONTINUE_GAP_MS);
+    }
+
+    // 换新的一段并接着播。
+    //   doGenerate 内部会走 stopChordPlayback —— 那是"接力自己引起的停止"，
+    //   不该把接力掐死，所以整段用 autoRunning 罩住。
+    async function autoAdvance(brk) {
+        const mode = lastPlayMode || 'block';
+        autoRunning = true;
+        try {
+            await doGenerate(true);
+        } finally {
+            autoRunning = false;
+        }
+        if (brk !== autoBreak || !settings.autoContinue) return;
+        autoStats.chains++;
+        await doPlay(mode, 0, true);
+    }
+
+    function showAutoInfo(text) {
+        if (!els.renderInfo) return;
+        els.renderInfo.style.display = 'block';
+        els.renderInfo.textContent = text;
+    }
+
     function bindAudioProgress() {
         if (!chordAudioEl || chordAudioEl.__crBound) return;
         chordAudioEl.__crBound = true;
@@ -1681,17 +1794,11 @@
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'playing';
             }
+            startProgressLoop();     // 每帧跟随（timeupdate 太粗，封面会慢半拍）
         });
 
-        chordAudioEl.addEventListener('timeupdate', () => {
-            if (!data) return;
-            const m = Math.min(data.chords.length - 1,
-                Math.floor(chordAudioEl.currentTime / measureDuration()));
-            setMeasureHighlight(m);
-            // 锁屏进度条（可拖动）也要跟着走
-            const host = global.ChordHost;
-            if (host && host.updateMediaPosition) host.updateMediaPosition(chordAudioEl);
-        });
+        // 兜底：后台标签页 rAF 被停掉时，靠 timeupdate 继续推（粗一点但不断）
+        chordAudioEl.addEventListener('timeupdate', () => updateProgress(false));
 
         chordAudioEl.addEventListener('loadedmetadata', () => {
             const host = global.ChordHost;
@@ -1699,13 +1806,23 @@
         });
 
         chordAudioEl.addEventListener('ended', () => {
+            stopProgressLoop();
             setMeasureHighlight(-1);
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'none';
             }
+            // ★ 只有"整段真实音频"播完才算一段结束。
+            //   渲染期间用来解锁 <audio> 的静音占位 WAV 也会触发 ended —— 那种不算，
+            //   否则每次播放都会顺手多生成一段。
+            const isRealAudio = !!(blobUrl && chordAudioEl.getAttribute('src') === blobUrl);
+            if (isRealAudio && !isRendering) {
+                autoStats.lastEndedAt = Date.now();
+                scheduleAutoNext();
+            }
         });
 
         chordAudioEl.addEventListener('pause', () => {
+            stopProgressLoop();
             if (!seeking) setMeasureHighlight(-1);   // seek 过程中会短暂 pause，别清高亮
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'paused';
@@ -1714,9 +1831,12 @@
     }
 
     function stopChordPlayback() {
+        // 接力自己引起的"停止"不算用户打断，否则接力会把自己掐死。
+        if (!autoRunning) cancelAutoNext();
         if (chordAudioEl) {
             try { chordAudioEl.pause(); } catch (e) {}
         }
+        stopProgressLoop();
         setMeasureHighlight(-1);
     }
 
@@ -1996,10 +2116,12 @@
 
     // mode：'block' 柱式 / 'arpeggio' 分解 / 'bass' 单音
     // fromMeasure：从第几小节开始（0 = 从头）。点谱面小节时传入该小节索引。
-    async function doPlay(mode, fromMeasure) {
+    // auto：true = 本次是"自动连播"接力发起的，不要当成用户操作去打断接力。
+    async function doPlay(mode, fromMeasure, auto) {
         mode = mode || lastPlayMode || 'block';
         fromMeasure = fromMeasure || 0;
         if (!data || !data.chords.length || isRendering) return;
+        if (!auto) cancelAutoNext();   // 用户手动播放 / 点小节 → 作废在途的自动接力
         const host = global.ChordHost;
         if (!host) { renderInfoText('音频桥接不可用', true); return; }
 
@@ -2187,8 +2309,23 @@
         if (els.play) els.play.addEventListener('click', () => doPlay('block', 0));
         if (els.playArp) els.playArp.addEventListener('click', () => doPlay('arpeggio', 0));
         if (els.playBass) els.playBass.addEventListener('click', () => doPlay('bass', 0));
+
+        // 🔁 自动连播：一段播完 → 停一下 → 自动换新的一段接着播
+        if (els.autoContinue) {
+            els.autoContinue.checked = settings.autoContinue;
+            els.autoContinue.addEventListener('change', (e) => {
+                settings.autoContinue = e.target.checked;
+                saveSettings();
+                if (!settings.autoContinue) {
+                    cancelAutoNext();
+                    showAutoInfo('已关闭自动连播');
+                }
+            });
+        }
+
         if (els.stop) {
             els.stop.addEventListener('click', () => {
+                cancelAutoNext();   // 用户按停止 → 一定打断自动连播（含"正在准备下一段"那一步）
                 stopChordPlayback();
                 if (els.renderInfo) { els.renderInfo.textContent = '已停止'; }
             });
@@ -2278,6 +2415,19 @@
         _measureDuration: measureDuration,
         _getAudioEl: () => chordAudioEl,
         _getBlobUrl: () => blobUrl,
+        // 自动连播（调试 / 自测用）
+        _getAutoState: () => ({
+            autoContinue: settings.autoContinue,
+            timerPending: !!autoTimer,
+            breakGen: autoBreak,
+            running: autoRunning,
+            chains: autoStats.chains,
+            gapMs: AUTO_CONTINUE_GAP_MS,
+            progressRaf: progressRaf
+        }),
+        _cancelAutoNext: cancelAutoNext,
+        _scheduleAutoNext: scheduleAutoNext,
+        _getCheckBox: () => els.autoContinue,
         // 锁屏封面（调试 / 自测用）
         _artSupported: artSupported,
         _buildChordArtwork: buildChordArtwork,
