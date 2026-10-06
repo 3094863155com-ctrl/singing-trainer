@@ -123,6 +123,70 @@
             box-shadow: var(--shadow-md);
         }
 
+        /* ============================================================
+           播放方式：连体椭圆滑块（分段控件）
+           ------------------------------------------------------------
+           一个胶囊轨道里嵌一块实心滑块，选中项的文字转白 —— 「三个连在一起的
+           椭圆」说的就是它。"相连"靠滑块是从轨道里滑过去（left/width 过渡），
+           而不是三个各自独立的按钮。滑块几何由 JS 按选中项的 offsetLeft/Width 写。
+           ============================================================ */
+        .seg {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            padding: 4px;
+            background: var(--track);
+            border-radius: var(--r-pill);
+        }
+
+        .seg__thumb {
+            position: absolute;
+            top: 4px;
+            bottom: 4px;
+            left: 4px;
+            width: 0;
+            border-radius: var(--r-pill);
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            transition: left 0.22s ease, width 0.22s ease;
+            pointer-events: none;
+        }
+
+        .seg__opt {
+            position: relative;      /* 压在滑块之上 */
+            z-index: 1;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border: none;
+            background: none;
+            box-shadow: none;
+            padding: 9px 14px;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-radius: var(--r-pill);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: color 0.2s ease;
+        }
+
+        /* 图标：柱式 = 柱式和弦示意、分解和弦 = 斜向琶音、单音 = 单个音符。
+           和文字同色（currentColor），选中态跟着变白。 */
+        .seg__opt .ic {
+            --ic: 16px;
+        }
+
+        .seg__opt.active {
+            color: #fff;
+        }
+
+        /* 还没生成 / 正在渲染 → 整组置灰（语义同原三个播放键的 disabled） */
+        .seg.is-disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
         .more-settings {
             margin-bottom: 30px;
             padding: 0 20px 20px;
@@ -698,13 +762,13 @@
         }
 
         /* ============================================================
-           底部迷你播放器（只在「和弦听辨」页面内）
+           底部迷你播放器与两个浮窗（跨页常驻）
            ------------------------------------------------------------
-           ★ 它整块 DOM 放在 #view-chord 内部。切到数据库页时 #view-chord 是
-             display:none，而 display:none 子树里的 position:fixed 同样不渲染
-             —— 「切页自动隐藏」白拿，不用在 switchRoot 里写分支。
-           ★ 因此约束：body / .container / #view-chord 这条祖先链上不能出现
-             transform / filter / will-change，否则 fixed 的包含块会被劫持。
+           ★ 它们整块 DOM 放在 .container **之外**（body 的直接子级），所以切到
+             「数据库」页也照样在 —— 这是用户 2026-10-06 明确要的（播放器要常驻）。
+           ★ 因此约束只剩一条：**body 上不能出现 transform / filter / will-change**，
+             否则 fixed 的包含块会被劫持（播放器与浮窗全靠 fixed 定位）。
+           ★ 页面底部留白由 #view-chord / #view-db 各自负责（见下面两条）。
            ============================================================ */
 
         /* 给和弦页底部留出「收起胶囊」的高度，免得挡住谱面 */
@@ -712,9 +776,9 @@
             padding-bottom: calc(var(--mp-bar-h) + var(--mp-gap) * 2 + var(--mp-safe));
         }
 
-        /* 数据库页没有迷你播放器，正常留白即可 */
+        /* 播放器现在跨页常驻 → 数据库页也要让出「收起胶囊」的高度，别盖住底部按钮 */
         #view-db {
-            padding-bottom: calc(var(--mp-safe) + 8px);
+            padding-bottom: calc(var(--mp-bar-h) + var(--mp-gap) * 2 + var(--mp-safe));
         }
 
         .mp {
@@ -811,6 +875,20 @@
             50% { transform: scaleY(2.1); }
         }
 
+        /* ★ 有真实音频包络时（JS 给 .mp-wave 加 .is-live，并逐条写行内 scaleY）：
+           必须把上面那条 keyframe 动画关掉 —— CSS 动画的优先级高于行内 style，
+           不关的话每帧写的 transform 会被动画原封不动盖掉，看着还是"假起伏"。
+           波形跟着真实音频走以后，高度就是这一段音乐的走势图：
+           左边是刚放过的、右边是将要放的（窗口以当前播放位置为中心）。 */
+        .mp-wave.is-live i {
+            background: var(--accent);
+            transition: transform 0.1s linear;
+        }
+
+        .mp-bar__open.is-playing .mp-wave.is-live i {
+            animation: none;
+        }
+
         .mp-bar__chevron {
             flex: 0 0 auto;
             display: flex;
@@ -828,12 +906,15 @@
             font-size: 15px;
         }
 
-        /* 收起条上的小圆播放键：约为「下一首」一半大小，外圈一根细环 = 播放进度
-           （conic-gradient + mask 挖空成环，--mp-prog 由 JS 按小节进度写入） */
+        /* 收起条播放键（方案 B，用户 2026-10-06 拍板）：
+           横向加宽的胶囊（64×40，不是正圆）+ 沿外圈走一根细描边 = 播放进度。
+           进度用 SVG 矩形的 stroke-dashoffset 画（dashoffset = 1 − 进度），
+           旧的 conic-gradient + mask 圆环已删 —— 键一横向加宽，正圆环就不贴形了。
+           ★ --mp-prog 这个变量名保留（仍然是 0…1 的小节进度），只是现在只作对外读数。 */
         .mp-bar__play {
             flex: 0 0 auto;
             position: relative;
-            width: 40px;
+            width: 64px;
             height: 40px;
             display: flex;
             align-items: center;
@@ -844,19 +925,39 @@
             color: var(--accent);
             background: var(--surface);
             border: none;
-            border-radius: 50%;
+            border-radius: var(--r-pill);
             cursor: pointer;
         }
 
-        .mp-bar__play::before {
-            content: '';
+        .mp-ring {
             position: absolute;
             inset: 0;
-            border-radius: 50%;
-            background: conic-gradient(var(--accent) calc(var(--mp-prog, 0) * 360deg), rgba(16, 24, 40, 0.10) 0);
-            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
-            mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2px));
+            display: block;
+            width: 100%;
+            height: 100%;
             pointer-events: none;
+        }
+
+        .mp-ring__track {
+            fill: none;
+            stroke: var(--border-strong);
+            stroke-width: 2.5;
+        }
+
+        .mp-ring__bar {
+            fill: none;
+            stroke: var(--accent);
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-dasharray: 1 1;
+            /* 走到哪亮到哪：值由 mpPaintProgress() 写（1 − 进度） */
+            stroke-dashoffset: 1;
+        }
+
+        /* 图标压在进度环之上 */
+        .mp-bar__play .ic {
+            position: relative;
+            z-index: 1;
         }
 
         .mp-bar__play:active {
@@ -880,15 +981,30 @@
         }
 
         .mp[data-state="expanded"] .mp-sheet {
-            transform: translateY(0);
+            /* 展开态由变量接管位移：从顶行往下拖时 JS 只改 --mp-sheet-y；
+               松手决定收起就把状态切回 collapsed，过渡便会从"当前拖到哪"平滑滑到 100% */
+            transform: translateY(var(--mp-sheet-y, 0px));
+        }
+
+        /* 从顶行往下拖＝收起：拖动中关掉过渡（严格跟手），松手没够阈值就回弹 */
+        .mp-sheet.is-collapsing {
+            transition: none;
+        }
+
+        .mp-sheet.is-settling {
+            transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         .mp-sheet__top {
             flex: 0 0 auto;
+            position: relative;
             display: flex;
             align-items: center;
             justify-content: space-between;
             gap: var(--mp-gap);
+            /* 顶行同时是「往下拖收起」的抓手：这行的触摸事件不交给浏览器，
+               才有机会在 pointermove 里读到纵向位移（面板其余区域照旧）。 */
+            touch-action: none;
         }
 
         .mp-icon-btn {
@@ -1008,8 +1124,8 @@
             opacity: 0;
             transform: scale(0.96);
             /* 跟手位移走独立属性 translate（与 transform:scale 互不覆盖）。
-               常态是 0px；拖动时由 JS 往舞台写 --mp-drag-x。 */
-            translate: var(--mp-drag-x, 0px) 0;
+               常态都是 0px；拖动时由 JS 往舞台写 --mp-drag-x / --mp-drag-y（横竖都跟手）。 */
+            translate: var(--mp-drag-x, 0px) var(--mp-drag-y, 0px);
             transition: opacity 0.12s ease, transform 0.14s cubic-bezier(0.34, 1.4, 0.5, 1), translate 0.18s ease;
             pointer-events: none;      /* 手势统一由舞台收，canvas 不单独吃事件 */
         }
@@ -1032,27 +1148,74 @@
             transform: scale(1);
         }
 
-        /* 遮住时代替它出现的中性灰卡片。尺寸由 JS 钉成和那张图一样的正方形。
-           刻意不带任何级数颜色，只写一句提示。 */
+        /* 遮住时代替它出现的中性卡片。尺寸由 JS 钉成和那张图一样的正方形。
+           刻意不带任何级数颜色。
+           设计（用户 2026-10-06 拍板：要"被遮盖的波形"，但不走拟物，要简洁现代）：
+             · 底 → 极浅的冷灰渐变（不是纯白，也不是灰塑料），一根 1px 实线细边收轮廓；
+             · 中 → 一列真实音频包络画的竖条（JS: mpPaintHiddenWave）；
+             · 上 → 一条"中间浓、上下渐隐"的雾带：波形中段被盖住，上下两端透出来
+                   → 一眼"这里有内容"，但读不出是什么；
+             · 顶 → 居中的胶囊提示（手指图标 + 按住看答案），自带半透明白底，压得住雾。 */
         .mp-cover-hidden {
             position: absolute;
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            gap: 10px;
-            font-family: inherit;
-            font-size: 16px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            background: var(--surface);
-            border: 1px dashed var(--border-strong);
+            display: block;
+            overflow: hidden;
+            background: linear-gradient(180deg, #f5f7fa 0%, #eaedf3 100%);
+            border: 1px solid rgba(16, 24, 40, 0.14);
             border-radius: var(--r-lg);
+            box-shadow: var(--shadow-md);
             cursor: pointer;
             transition: transform 0.14s ease, opacity 0.12s ease, border-color 0.14s ease, background-color 0.14s ease;
+        }
+
+        .mp-cover-hidden__wave {
+            position: absolute;
+            inset: 0;
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 雾带：中段几乎全盖，上下渐隐 → 波形像沉在雾里 */
+        .mp-cover-hidden__veil {
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(180deg,
+                rgba(245, 247, 250, 0) 0%,
+                rgba(245, 247, 250, 0.44) 30%,
+                rgba(245, 247, 250, 0.88) 44%,
+                rgba(245, 247, 250, 0.88) 56%,
+                rgba(245, 247, 250, 0.44) 70%,
+                rgba(245, 247, 250, 0) 100%);
+            pointer-events: none;
+        }
+
+        .mp-cover-hidden__hint {
+            position: absolute;
+            left: 50%;
+            top: 50%;
+            transform: translate(-50%, -50%);
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 8px 16px;
+            font-family: inherit;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+            color: var(--text-tertiary);
+            background: rgba(255, 255, 255, 0.74);
+            border: 1px solid rgba(16, 24, 40, 0.08);
+            border-radius: var(--r-pill);
+        }
+
+        .mp-cover-hidden__hint .ic {
+            --ic: 15px;
+            color: var(--text-tertiary);
         }
 
         /* 阶段一：按下（还没到长按阈值）—— 卡片缩一下 + 边框加深 + 舞台底部进度条
@@ -1060,7 +1223,7 @@
         .mp-sheet__stage.is-pressing .mp-cover-hidden {
             transform: translate(-50%, -50%) scale(0.94);
             border-color: rgba(16, 24, 40, 0.34);
-            background: #eef0f4;
+            background: linear-gradient(180deg, #edf0f5 0%, #e3e7ee 100%);
         }
 
         .mp-sheet__stage::after {
@@ -1297,8 +1460,28 @@
             text-align: center;
         }
 
+        /* 左列按钮 + 右列音名：底部对齐（音名自下而上长，和按钮下缘站齐最稳） */
+        .mp-aid__body {
+            display: flex;
+            align-items: flex-end;
+            justify-content: center;
+            gap: 18px;
+        }
+
+        .mp-aid__btns {
+            display: flex;
+            flex-direction: column;
+            gap: var(--mp-gap);
+        }
+
         .mp-aid__opt {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-width: 132px;
             min-height: var(--mp-btn);
+            padding: 0 16px;
             font-family: inherit;
             font-size: 17px;
             font-weight: 700;
@@ -1309,8 +1492,35 @@
             cursor: pointer;
         }
 
+        .mp-aid__opt .ic {
+            --ic: 18px;
+            color: var(--accent);
+        }
+
         .mp-aid__opt:active {
             filter: brightness(0.94);
+        }
+
+        /* 音名一列：DOM 里是"低音在前"，靠 column-reverse 让它**自下而上**长。
+           这样最低音永远贴在底部，读起来就是从下往上 C G C E。 */
+        .mp-aid__tones {
+            display: flex;
+            flex-direction: column-reverse;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .mp-aid__tone {
+            min-width: 46px;
+            padding: 3px 10px;
+            text-align: center;
+            font-size: 19px;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-primary);
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
         }
 
         .mp-aid__hint {
@@ -1490,6 +1700,16 @@
             <circle cx="18.1" cy="12.8" r="2.3"/>
             <path d="M20.4 12.8V6.6"/>
         </symbol>
+        <!-- 柱式和弦：三个音头纵向叠放、共用一根符干（与 #i-arpeggio 的"斜向滚动"成对）。
+             音头**填实**：16px 下空心椭圆的描边会把三个音头糊成一坨，
+             填实之后是一整条竖块，小尺寸也一眼可辨 —— 这正是"柱式"的意思。
+             实心只在这三颗音头上（行内 style 优先级高于 .ic 的 fill:none），符干仍是线性。 -->
+        <symbol id="i-chord-block" viewBox="0 0 24 24">
+            <path d="M15.2 19.6V4.4"/>
+            <ellipse cx="12.1" cy="19.2" rx="3.1" ry="2.2" style="fill:currentColor;stroke:none"/>
+            <ellipse cx="12.1" cy="14.1" rx="3.1" ry="2.2" style="fill:currentColor;stroke:none"/>
+            <ellipse cx="12.1" cy="9" rx="3.1" ry="2.2" style="fill:currentColor;stroke:none"/>
+        </symbol>
         <symbol id="i-note" viewBox="0 0 24 24">
             <circle cx="9" cy="17.4" r="2.7"/>
             <path d="M11.7 17.4V4.4c2.6.8 4.8 2.2 4.8 4.6"/>
@@ -1557,6 +1777,14 @@
             <rect x="6.4" y="4.8" width="4" height="14.4" rx="1.7"/>
             <rect x="13.6" y="4.8" width="4" height="14.4" rx="1.7"/>
         </symbol>
+
+        <!-- ---------- 手势类：一只手（食指按下） ---------- -->
+        <symbol id="i-tap" viewBox="0 0 24 24">
+            <path d="M18 11.5V7.6a1.9 1.9 0 0 0-3.8 0v.6"/>
+            <path d="M14.2 11.2V5.4a1.9 1.9 0 0 0-3.8 0v5.8"/>
+            <path d="M10.4 11.4V6.9a1.9 1.9 0 0 0-3.8 0v7.2"/>
+            <path d="M18 8.7a1.9 1.9 0 0 1 3.8 0v4.8A7.5 7.5 0 0 1 14.3 21h-1.9c-2.6 0-4.2-.8-5.6-2.2l-3.4-3.4a1.9 1.9 0 0 1 2.7-2.7l1.7 1.7"/>
+        </symbol>
     </svg>
 
     <div class="container">
@@ -1594,20 +1822,15 @@
                     <span style="color: var(--text-tertiary);">BPM</span>
                 </div>
 
-                <div class="tempo-control">
-                    <label>连奏：</label>
-                    <input type="range" id="chord-legato" min="35" max="140" value="100">
-                    <span class="tempo-value" id="chord-legato-val">1.0</span>
-                    <span style="color: var(--text-tertiary); font-size: 12px;">
-                        × 一拍（<span id="chord-legato-word">连奏</span>）
-                    </span>
+                <!-- 播放方式：连体椭圆滑块（三选一）。点一下就切成该方式，并把当前这段按该方式重放一遍。
+                     生成新一段统一走底部常驻播放器的「下一首」；页面不再放 生成/播放/停止 三个键
+                     （用户 2026-10-06 拍板）。 -->
+                <div class="seg" id="chord-play-seg" role="radiogroup" aria-label="播放方式">
+                    <span class="seg__thumb" aria-hidden="true"></span>
+                    <button type="button" class="seg__opt" data-mode="block" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-chord-block"/></svg>柱式</button>
+                    <button type="button" class="seg__opt" data-mode="arpeggio" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>分解和弦</button>
+                    <button type="button" class="seg__opt" data-mode="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>单音</button>
                 </div>
-
-                <button class="btn btn-primary" id="chord-generate"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
-                <button class="btn btn-secondary" id="chord-play" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>播放</button>
-                <button class="btn btn-secondary" id="chord-play-arpeggio" disabled><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>分解和弦</button>
-                <button class="btn btn-secondary" id="chord-play-bass" disabled><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>单音</button>
-                <button class="btn btn-secondary" id="chord-stop"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg>停止</button>
 
                 <div class="control-group">
                     <label>自动连播：</label>
@@ -1653,90 +1876,12 @@
                 </div>
             </details>
 
-            <div class="playback-info" id="chord-info">点击“下一首”开始</div>
+            <div class="playback-info" id="chord-info">点下面的播放方式开始</div>
             <div class="playback-info" id="chord-render-info" style="display: none; color: var(--accent); min-height: 20px;"></div>
 
             <!-- （2026-10-06）谱表整体搬进迷你播放器的舞台，作为"卡片 ⇄ 谱表"两页之一；
                  这里只留设置类控件。 -->
 
-            <!-- ============================================================
-                 底部迷你播放器（手持练习用）：收起是一颗胶囊，点开展成全屏
-                 ------------------------------------------------------------
-                 逻辑全在 chord_recognition.js 里（它要实时读模块内部状态）。
-                 收起态的按钮是「播放/暂停」+「下一首」两个固定键（不再动态改名）；
-                 收起条上**故意不显示罗马数字**，
-                 不然答案直接剧透了。
-                 ============================================================ -->
-            <div id="chord-mp" class="mp" data-state="collapsed">
-                <!-- 收起态：胶囊。左=波形动画（点击展开），右=两个**固定功能**键：
-                     播放/暂停（小圆键+进度环）与「下一首」。没有动态改名的逻辑。 -->
-                <div class="mp-bar" id="chord-mp-bar">
-                    <button class="mp-bar__open" id="chord-mp-expand" aria-label="展开播放器">
-                        <span class="mp-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-                        <span class="mp-bar__chevron" aria-hidden="true"><svg class="ic"><use href="#i-chevron-up"/></svg></span>
-                    </button>
-                    <button class="mp-bar__play" id="chord-mp-playpause-min" aria-label="播放或暂停"><svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg></button>
-                    <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
-                </div>
-
-                <!-- 展开态：全屏面板 -->
-                <div class="mp-sheet" id="chord-mp-sheet" role="dialog" aria-modal="true" aria-label="练习播放器">
-                    <div class="mp-sheet__top">
-                        <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器"><svg class="ic" aria-hidden="true"><use href="#i-chevron-down"/></svg>收起</button>
-                        <!-- 卡片⇄谱表 切换键（占原来中央播放键的位置；播放键已挪到底部） -->
-                        <button class="mp-icon-btn" id="chord-mp-sheet-toggle" aria-label="切换卡片与谱表"><svg class="ic" aria-hidden="true"><use href="#i-staff"/></svg>谱表</button>
-                        <!-- 错题练习开关：关=点进入（重新生成覆盖当前），开=点退出（同样重新生成） -->
-                        <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="错题练习开关"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg>错题练习</button>
-                    </div>
-
-                    <!-- 长按热区：整个舞台。按住=揭示答案；按住下滑=报错；按住上滑=听辩辅助；
-                         按住左/右滑=上一个/下一个和弦（可连滑）。卡片⇄谱表切换走顶行中央的按钮。
-                         手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
-                    <div class="mp-sheet__stage" id="chord-mp-stage">
-                        <canvas class="mp-cover" id="chord-mp-cover"></canvas>
-                        <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>按住看答案</div>
-                        <!-- 谱表页：可读大小、上下滚动；点击小节跳转保留 -->
-                        <div class="mp-page--sheet" id="chord-mp-sheet-page" hidden>
-                            <div class="sheet-music-container">
-                                <div id="chord-sheet-music"></div>
-                            </div>
-                            <div class="key-hint" id="chord-key-hint"></div>
-                            <div class="key-hint" style="margin-top:4px;"><svg class="ic" aria-hidden="true"><use href="#i-bulb"/></svg> 点击谱面上的任意小节，可从该小节开始播放</div>
-                        </div>
-                    </div>
-
-                    <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表</div>
-
-                    <div class="mp-sheet__actions">
-                        <button class="mp-action-btn" id="chord-mp-prev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg>上一个</button>
-                        <button class="mp-action-btn" id="chord-mp-next">下一个<svg class="ic" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
-                    </div>
-
-                    <div class="mp-sheet__footer">
-                        <button class="mp-play-main" id="chord-mp-playpause" aria-label="播放或暂停"><svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg></button>
-                        <button class="btn btn-primary mp-generate" id="chord-mp-generate"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
-                    </div>
-                </div>
-            </div>
-
-            <!-- 报错浮窗：点报错键 → 选一个「我听成了哪个级数」 -->
-            <div id="chord-mp-error" class="mp-error" role="dialog" aria-modal="true" hidden>
-                <div class="mp-error__panel">
-                    <div class="mp-error__title">你听成了哪个级数？</div>
-                    <div class="mp-error__grid" id="chord-mp-error-grid"></div>
-                    <button class="mp-error__none" id="chord-mp-error-none">没听出来</button>
-                </div>
-            </div>
-
-            <!-- 听辩辅助浮窗：长按 + 上滑 → 暂停并播冻结和弦的琶音；点窗外关闭并恢复播放 -->
-            <div id="chord-mp-aid" class="mp-aid" role="dialog" aria-modal="true" hidden>
-                <div class="mp-aid__panel">
-                    <div class="mp-aid__title">听辩辅助</div>
-                    <button class="mp-aid__opt" id="chord-mp-aid-block">重听柱式</button>
-                    <button class="mp-aid__opt" id="chord-mp-aid-arp">再放琶音</button>
-                    <div class="mp-aid__hint">点窗外任意处关闭并继续播放</div>
-                </div>
-            </div>
         </div><!-- /#view-chord -->
 
         <!-- ============ 视图三：数据库（听辨统计） ============
@@ -1790,6 +1935,108 @@
             </div>
         </div>
     </div><!-- /.container -->
+
+    <!-- ============================================================
+         底部迷你播放器 + 两个浮窗（报错 / 听辩辅助）
+         ------------------------------------------------------------
+         ★ 这三块放在 .container **之外**、body 的直接子级 —— 因为它们要跨页常驻：
+           切到「数据库」页时 #view-chord 是 display:none，若还挂在它里面就会被一起藏掉。
+         ★ 因此约束：body 上不能出现 transform / filter / will-change，
+           否则 position:fixed 的包含块会被劫持（播放器与浮窗全靠 fixed 定位）。
+         ★ 逻辑全在 chord_recognition.js 里（它要实时读模块内部状态）。
+           收起态是「播放/暂停」+「下一首」两个固定键；收起条上故意不显示罗马数字（会剧透）。
+         ============================================================ -->
+    <div id="chord-mp" class="mp" data-state="collapsed">
+        <!-- 收起态：胶囊。左=波形（点击展开），右=两个固定功能键：播放/暂停 与「下一首」 -->
+        <div class="mp-bar" id="chord-mp-bar">
+            <button class="mp-bar__open" id="chord-mp-expand" aria-label="展开播放器">
+                <span class="mp-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                <span class="mp-bar__chevron" aria-hidden="true"><svg class="ic"><use href="#i-chevron-up"/></svg></span>
+            </button>
+            <button class="mp-bar__play" id="chord-mp-playpause-min" aria-label="播放或暂停">
+                <!-- 方案 B：胶囊 + 沿外圈走一根进度描边（比原来的圆环更贴键形，
+                     也不会在"横向加宽后"变成一个突兀的圆） -->
+                <svg class="mp-ring" viewBox="0 0 64 40" preserveAspectRatio="none" aria-hidden="true">
+                    <rect class="mp-ring__track" x="1.5" y="1.5" width="61" height="37" rx="18.5"/>
+                    <rect class="mp-ring__bar" id="chord-mp-ring-bar" pathLength="1" x="1.5" y="1.5" width="61" height="37" rx="18.5"/>
+                </svg>
+                <svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg>
+            </button>
+            <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
+        </div>
+
+        <!-- 展开态：全屏面板 -->
+        <div class="mp-sheet" id="chord-mp-sheet" role="dialog" aria-modal="true" aria-label="练习播放器">
+            <div class="mp-sheet__top" id="chord-mp-sheet-top">
+                <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器"><svg class="ic" aria-hidden="true"><use href="#i-chevron-down"/></svg>收起</button>
+                <!-- 卡片⇄谱表 切换键（占原来中央播放键的位置；播放键已挪到底部） -->
+                <button class="mp-icon-btn" id="chord-mp-sheet-toggle" aria-label="切换卡片与谱表"><svg class="ic" aria-hidden="true"><use href="#i-staff"/></svg>谱表</button>
+                <!-- 错题练习开关：关=点进入（重新生成覆盖当前），开=点退出（同样重新生成） -->
+                <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="错题练习开关"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg>错题练习</button>
+            </div>
+
+            <!-- 长按热区：整个舞台。按住=揭示答案；按住下滑=报错；按住上滑=听辩辅助；
+                 按住左/右滑=上一个/下一个和弦（左右互通、可连滑）。顶行按钮切换卡片⇄谱表。
+                 手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
+            <div class="mp-sheet__stage" id="chord-mp-stage">
+                <canvas class="mp-cover" id="chord-mp-cover"></canvas>
+                <!-- 遮住态：一张"被雾盖住的波形" + 居中的按住提示。
+                     波形用真实音频包络画的静态缩略图（JS: mpPaintHiddenWave），
+                     上面盖一层中间浓、上下渐隐的雾 —— 看得出有内容，读不出是哪个和弦。 -->
+                <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>
+                    <canvas class="mp-cover-hidden__wave" id="chord-mp-hidden-wave" aria-hidden="true"></canvas>
+                    <span class="mp-cover-hidden__veil" aria-hidden="true"></span>
+                    <span class="mp-cover-hidden__hint"><svg class="ic" aria-hidden="true"><use href="#i-tap"/></svg>按住看答案</span>
+                </div>
+                <!-- 谱表页：可读大小、上下滚动；点击小节跳转保留 -->
+                <div class="mp-page--sheet" id="chord-mp-sheet-page" hidden>
+                    <div class="sheet-music-container">
+                        <div id="chord-sheet-music"></div>
+                    </div>
+                    <div class="key-hint" id="chord-key-hint"></div>
+                    <div class="key-hint" style="margin-top:4px;"><svg class="ic" aria-hidden="true"><use href="#i-bulb"/></svg> 点击谱面上的任意小节，可从该小节开始播放</div>
+                </div>
+            </div>
+
+            <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表</div>
+
+            <div class="mp-sheet__actions">
+                <button class="mp-action-btn" id="chord-mp-prev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg>上一个</button>
+                <button class="mp-action-btn" id="chord-mp-next">下一个<svg class="ic" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
+            </div>
+
+            <div class="mp-sheet__footer">
+                <button class="mp-play-main" id="chord-mp-playpause" aria-label="播放或暂停"><svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg></button>
+                <button class="btn btn-primary mp-generate" id="chord-mp-generate"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 报错浮窗：按住下滑 → 选一个「我听成了哪个级数」 -->
+    <div id="chord-mp-error" class="mp-error" role="dialog" aria-modal="true" hidden>
+        <div class="mp-error__panel">
+            <div class="mp-error__title">你听成了哪个级数？</div>
+            <div class="mp-error__grid" id="chord-mp-error-grid"></div>
+            <button class="mp-error__none" id="chord-mp-error-none">没听出来</button>
+        </div>
+    </div>
+
+    <!-- 听辨辅助浮窗：按住上滑 → 暂停并播冻结和弦的琶音；点窗外关闭并恢复播放。
+         版式（用户 2026-10-06 定）：左列两个按钮（上=琶音 / 下=柱式，图标即示意），
+         右列一列音名，**按音高自下而上**排（最低音在最下），如 C G C E —— 和卡片写法一致。 -->
+    <div id="chord-mp-aid" class="mp-aid" role="dialog" aria-modal="true" hidden>
+        <div class="mp-aid__panel" role="group" aria-label="听辨辅助">
+            <div class="mp-aid__title">听辨辅助</div>
+            <div class="mp-aid__body">
+                <div class="mp-aid__btns">
+                    <button class="mp-aid__opt" id="chord-mp-aid-arp"><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>琶音</button>
+                    <button class="mp-aid__opt" id="chord-mp-aid-block"><svg class="ic" aria-hidden="true"><use href="#i-chord-block"/></svg>柱式</button>
+                </div>
+                <div class="mp-aid__tones" id="chord-mp-aid-tones"></div>
+            </div>
+            <div class="mp-aid__hint">点窗外任意处关闭并继续播放</div>
+        </div>
+    </div>
 
     <script>
         // ============================================================

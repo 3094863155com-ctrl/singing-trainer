@@ -45,28 +45,12 @@
     const SETTINGS_KEY = 'chordTrainerSettings';
 
     // ---- 奏法（连奏程度）----
-    // 每个和弦音"按住"的时长 = 一拍 × legato。钢琴采样本身就在自然衰减，
+    // 每个和弦音"按住"的时长 = 一拍 × LEGATO。钢琴采样本身就在自然衰减，
     // 只要不人为把它压下去，按住就能得到连贯的声音。
-    //   0.4  ≈ 断奏（弹一下就松手，短促）
-    //   1.0  ≈ 连奏（按满一拍，到下一拍才换）★ 默认
-    //   1.4  ≈ 更连贯（越过下一拍，相邻和弦轻微叠在一起，像踩了延音踏板）
-    const LEGATO_MIN = 0.35;
-    const LEGATO_MAX = 1.40;
-    const LEGATO_DEFAULT = 1.00;
+    //   ★ 用户 2026-10-06 拍板：固定 1.0（按满一拍、到下一拍才换）。
+    //     设置页那个可拖动的「连奏」滑块已删除，不再提供断奏 / 更连贯两档。
+    const LEGATO = 1.00;
     const CHORD_RELEASE = 0.12;   // 松手淡出时长（秒），避免"咔"的切断声
-
-    function clampLegato(v) {
-        const n = parseFloat(v);
-        if (!isFinite(n)) return LEGATO_DEFAULT;
-        return Math.min(LEGATO_MAX, Math.max(LEGATO_MIN, n));
-    }
-
-    function legatoWord(v) {
-        const n = clampLegato(v);
-        if (n < 0.75) return '断奏';
-        if (n > 1.15) return '更连贯';
-        return '连奏';
-    }
 
     const DEFAULT_SETTINGS = {
         length: 8,
@@ -83,7 +67,6 @@
         // 自动连播：一段播完 → 停约 1.5 秒 → 自动换新的一段（调性重新随机）接着播，无限进行。
         // 任何手动操作（停止 / 播放 / 换一段 / 点小节 / 改参数 / 切视图）都会打断接力。
         autoContinue: false,
-        legato: LEGATO_DEFAULT,
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
         // 各级出现七和弦的概率（%）
@@ -1084,6 +1067,26 @@
 
         const accClass = Vex.Accidental || Vex.Flow.Accidental;
 
+        // ---- 谱面线条色（用户 2026-10-06：只把谱线减淡）----
+        //   五条横线（stroke）与竖直小节线（fillRect）转浅灰，音符 / 谱号 / 调号 / 拍号
+        //   保持深色 —— 像真实乐谱那样让线条退到内容后面，去掉"每小节一个硬黑框"的呆板感。
+        const LINE = '#c2c6d0';
+        const INK = '#2b2f39';
+
+        // 谱号 / 调号 / 拍号默认继承 ctx 当前色，会跟着线条一起变灰，这里单独标深色。
+        //   若这个 VexFlow 构建不给 modifier 应用样式，调用无效 —— 降级结果只是谱号也变浅灰。
+        function inkStaveModifiers(stave) {
+            try {
+                const mods = stave.getModifiers ? stave.getModifiers() : [];
+                for (let i = 0; i < mods.length; i++) {
+                    const cat = (mods[i].getCategory && mods[i].getCategory()) || '';
+                    if (cat === 'Clef' || cat === 'KeySignature' || cat === 'TimeSignature') {
+                        mods[i].setStyle({ fillStyle: INK, strokeStyle: INK });
+                    }
+                }
+            } catch (e) { /* ignore */ }
+        }
+
         // ============ 单行高音谱表（原模式，逻辑未改动） ============
         function drawSingleMeasure(ctx, g, m, shifts) {
             const x = g.x;
@@ -1099,6 +1102,10 @@
             if (m === totalMeasures - 1) {
                 stave.setEndBarType(Vex.Barline.type.END);
             }
+            // 谱线减淡：横线走 stroke、竖直小节线走 fillRect，两者都吃 ctx 当前色
+            ctx.setStrokeStyle(LINE);
+            ctx.setFillStyle(LINE);
+            inkStaveModifiers(stave);
             stave.draw();
 
             const chord = chords[m];
@@ -1138,6 +1145,9 @@
                 try { note.setXShift(shifts[m]); } catch (e) { /* 居中失败不影响出谱 */ }
             }
 
+            // 音符 / 临时记号的层次压在浅灰线条之上
+            ctx.setStrokeStyle(INK);
+            ctx.setFillStyle(INK);
             voice.draw(ctx, stave);
 
             // 这个 VexFlow 构建里横向位置要 draw() 之后才确定，也是必须量两遍的原因
@@ -1148,7 +1158,7 @@
             // 罗马数字级数标注（谱表下方，居中于本小节的和弦）
             ctx.save();
             ctx.setFont('Arial', 14, '');
-            ctx.setFillStyle('#555');
+            ctx.setFillStyle(INK);
             const labelY = stave.getYForLine(4) + 46;
             const estW = chord.roman.length * 8;
             ctx.fillText(chord.roman, centerX - estW / 2, labelY);
@@ -1188,6 +1198,11 @@
             //   绝不能跨小节取 Max 再回灌到所有小节 —— 那样每个小节的音符都会被
             //   挤到同一个 x（8 个小节叠在一起），已踩过这个坑。
             try { bass.setNoteStartX(treble.getNoteStartX()); } catch (e) { /* ignore */ }
+            // 谱线减淡：同单行谱 —— 线条浅灰，谱号 / 调号 / 拍号保持深色
+            ctx.setStrokeStyle(LINE);
+            ctx.setFillStyle(LINE);
+            inkStaveModifiers(treble);
+            inkStaveModifiers(bass);
             treble.draw();
             bass.draw();
 
@@ -1243,14 +1258,20 @@
                 } catch (e) { /* ignore */ }
             }
 
+            // 音符层次压在浅灰线条之上
+            ctx.setStrokeStyle(INK);
+            ctx.setFillStyle(INK);
             vU.draw(ctx, treble);
             vL.draw(ctx, bass);
 
             let naturalAbs = NaN;
             try { naturalAbs = upper.getAbsoluteX(); } catch (e) { /* ignore */ }
 
-            // 大括号 + 左侧竖线：只在每行第一个小节画一次
+            // 大括号 + 左侧竖线：只在每行第一个小节画一次。
+            //   它们属于"谱表外面的那个框"，跟着线条一起走浅灰 —— 框不该抢内容
             if (isFirstInLine) {
+                ctx.setStrokeStyle(LINE);
+                ctx.setFillStyle(LINE);
                 try {
                     const brace = new Vex.StaveConnector(treble, bass);
                     brace.setType(Vex.StaveConnector.type.BRACE);
@@ -1268,7 +1289,7 @@
             // 想让级数离谱表更远/更近，就改这个 34。
             ctx.save();
             ctx.setFont('Arial', 14, '');
-            ctx.setFillStyle('#555');
+            ctx.setFillStyle(INK);
             const labelY = bass.getYForLine(4) + 34;
             const estW = chord.roman.length * 8;
             ctx.fillText(chord.roman, centerX - estW / 2, labelY);
@@ -1505,6 +1526,33 @@
         return out;
     }
 
+    // 逐桶峰值包络：把整段渲染结果切成 winMs 一桶，取每桶的 max(|sample|)（双声道取大），
+    //   再除以全段最大值归一化、做一次 sqrt 提曲线 —— 不做 sqrt 的话，弱拍（分解和弦的
+    //   后几个音、单音模式的长衰减尾巴）在 14 根小竖条上几乎看不见，波形会显得很"秃"。
+    //   返回 { bars, winMs, durSec }；bars 取值 0…1。
+    function buildEnvelope(buffer, winMs) {
+        const sr = buffer.sampleRate || 44100;
+        const nch = buffer.numberOfChannels;
+        const len = buffer.length;
+        const win = Math.max(1, Math.round(sr * (winMs || ENV_WIN_MS) / 1000));
+        const count = Math.max(1, Math.ceil(len / win));
+        const bars = new Float32Array(count);
+        for (let c = 0; c < nch; c++) {
+            const d = buffer.getChannelData(c);
+            for (let i = 0; i < len; i++) {
+                const v = d[i] < 0 ? -d[i] : d[i];
+                const b = (i / win) | 0;
+                if (b < count && v > bars[b]) bars[b] = v;
+            }
+        }
+        let global = 0;
+        for (let i = 0; i < count; i++) if (bars[i] > global) global = bars[i];
+        if (global > 1e-6) {
+            for (let i = 0; i < count; i++) bars[i] = Math.sqrt(bars[i] / global);
+        }
+        return { bars: bars, winMs: winMs || ENV_WIN_MS, durSec: len / sr };
+    }
+
     async function renderChordAudio(chords, tempo, onProgress, mode) {
         mode = mode || 'block';
         const report = (t) => { if (onProgress) onProgress(t); };
@@ -1514,8 +1562,8 @@
         report('构建时间表…');
         const events = buildChordSchedule(chords, tempo, mode);
 
-        const legato = clampLegato(settings.legato);
-        // 事件自带 hold 时用它（分解模式固定一拍），否则按连奏滑杆算 —— 柱式/单音行为不变
+        const legato = LEGATO;
+        // 事件自带 hold 时用它（分解模式固定一拍），否则按连奏算 —— 柱式/单音行为不变
         const holdOf = (e) => (e.hold != null) ? e.hold : e.dur * legato;
         const slot = (e) => e.time + holdOf(e) + CHORD_RELEASE;
 
@@ -1562,6 +1610,10 @@
         }
 
         const mixed = await offlineCtx.startRendering();
+
+        // 顺手把整段的真实包络算出来（此时还没做归一化，但包络只关心相对形状）。
+        //   放在这里而不是播放时算：渲染本来就要等，多这一趟几乎看不出来。
+        envFor = buildEnvelope(mixed, ENV_WIN_MS);
 
         report('编码 WAV…');
         let out = mixed;
@@ -1634,7 +1686,7 @@
         if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
         if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
         if (typeof s.adaptiveFromStats === 'boolean') settings.adaptiveFromStats = s.adaptiveFromStats;
-        if (s.legato !== undefined) settings.legato = clampLegato(s.legato);
+        // 连奏已固定 1.0（用户 2026-10-06 拍板，滑块已删）：localStorage 里的旧值一律忽略
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
                 if (typeof s.degrees[d] === 'boolean') settings.degrees[d] = s.degrees[d];
@@ -1968,6 +2020,22 @@
     let blobMode = null;          // 已渲染音频对应的播放方式（柱式/分解/单音）
     let seeking = false;          // seek 期间不要因 pause 事件清掉高亮
 
+    // ---- 真实音频包络（收起条波形 / 遮住态卡片的波形都吃它）----
+    //   以前收起条那 14 根竖条是纯 CSS keyframe 假起伏，跟音乐没关系。
+    //   现在改成：离线渲染完就把整段的**逐桶峰值包络**算出来存这儿，
+    //   播放时按当前时间取样 → 竖条高度就是真实音量走势。
+    //   ★ 不引 AnalyserNode：这段音频本来就是我们自己渲染出来的，
+    //     直接对渲染结果算包络，比实时分析更准，还省一条 analyser→destination 的连接。
+    //
+    //   ENV_WIN_MS      包络的采样粒度（每 25ms 一桶）
+    //   ENV_BAR_SPAN_MS 收起条上每一根竖条覆盖多少毫秒音频
+    //   ENV_BARS        收起条竖条根数（必须和 HTML 里 .mp-wave 的 <i> 个数一致）
+    //   调手感：想要波形"走得更快/更跳"，改 ENV_BAR_SPAN_MS 就行（越大越平缓）。
+    const ENV_WIN_MS = 25;
+    const ENV_BAR_SPAN_MS = 36;
+    const ENV_BARS = 14;
+    let envFor = null;            // { bars: Float32Array, winMs, durSec } | null
+
     // ---- 自动连播 ----
     //   一段播完 → 停约 AUTO_CONTINUE_GAP_MS → 自动生成新的一段接着播，无限接力。
     //   接力用「代数」判定是否还有效：任何让当前播放作废的动作（停止 / 手动播放 /
@@ -2005,8 +2073,10 @@
     const MP_SLOP_PX = 12;        // 长按阈值到达前的容差：超过就当成滑动/误触，取消本次
     const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要报错"
     const MP_UP_PX = 56;          // 按住之后往上滑多少算"要听辩辅助"（与下滑对称）
-    const MP_LEFT_PX = 48;        // 按住之后往左滑多少算"回上一个和弦"（可连滑多次）
-    const MP_RIGHT_PX = 48;       // 按住之后往右滑多少算"进下一个和弦"（与左滑对称，可连滑）
+    // 水平方向只有一个轴：左右互通 —— 台阶锚点跟着"最后停下的位置"走，
+    //   所以左滑几格之后不用把手指拉回原位，相对当前停留点再右滑够一格就是前进。
+    //   垂直方向相反：一旦判成上下就锁死，不再切水平（上下各自是一次性动作）。
+    const MP_STEP_PX = 48;        // 每滑过这么多算走一格（往左退一个 / 往右进一个）
     const MP_REPORTS_MAX = 500;   // 内存里留存的明细上限
 
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
@@ -2020,15 +2090,9 @@
             length: document.getElementById('chord-length'),
             tempo: document.getElementById('chord-tempo'),
             tempoVal: document.getElementById('chord-tempo-val'),
-            legato: document.getElementById('chord-legato'),
-            legatoVal: document.getElementById('chord-legato-val'),
-            legatoWord: document.getElementById('chord-legato-word'),
-            generate: document.getElementById('chord-generate'),
             voicingMode: document.getElementById('chord-voicing-mode'),
-            play: document.getElementById('chord-play'),
-            playArp: document.getElementById('chord-play-arpeggio'),
-            playBass: document.getElementById('chord-play-bass'),
-            stop: document.getElementById('chord-stop'),
+            // 播放方式改成了连体椭圆滑块（原 generate / play / playArp / playBass / stop 五个键已删）
+            playSeg: document.getElementById('chord-play-seg'),
             autoContinue: document.getElementById('chord-auto-continue'),
             grid: document.getElementById('degree-grid'),
             inversion: document.getElementById('chord-inversion'),
@@ -2042,9 +2106,12 @@
             mp: document.getElementById('chord-mp'),
             mpBar: document.getElementById('chord-mp-bar'),
             mpExpand: document.getElementById('chord-mp-expand'),
+            mpWave: document.querySelector('#chord-mp-expand .mp-wave'),
             mpPlayPauseMin: document.getElementById('chord-mp-playpause-min'),
+            mpRingBar: document.getElementById('chord-mp-ring-bar'),
             mpGenerateMin: document.getElementById('chord-mp-generate-min'),
             mpSheet: document.getElementById('chord-mp-sheet'),
+            mpSheetTop: document.getElementById('chord-mp-sheet-top'),
             mpClose: document.getElementById('chord-mp-close'),
             mpPlayPause: document.getElementById('chord-mp-playpause'),
             mpSheetToggle: document.getElementById('chord-mp-sheet-toggle'),
@@ -2052,6 +2119,7 @@
             mpSheetPage: document.getElementById('chord-mp-sheet-page'),
             mpCover: document.getElementById('chord-mp-cover'),
             mpCoverHidden: document.getElementById('chord-mp-cover-hidden'),
+            mpHiddenWave: document.getElementById('chord-mp-hidden-wave'),
             mpPrev: document.getElementById('chord-mp-prev'),
             mpNext: document.getElementById('chord-mp-next'),
             mpGenerate: document.getElementById('chord-mp-generate'),
@@ -2063,6 +2131,7 @@
             mpAid: document.getElementById('chord-mp-aid'),
             mpAidBlock: document.getElementById('chord-mp-aid-block'),
             mpAidArp: document.getElementById('chord-mp-aid-arp'),
+            mpAidTones: document.getElementById('chord-mp-aid-tones'),
             // ---- 数据库页（听辨统计）----
             dbMatrix: document.getElementById('db-matrix'),
             dbTop: document.getElementById('db-top'),
@@ -2206,6 +2275,8 @@
         // 锁屏封面：带一点提前量（见 ART_LEAD_MS），把系统侧那几十毫秒的滞后补回来
         const mc = Math.min(last, Math.floor((chordAudioEl.currentTime + coverLeadSeconds()) / dur));
         setCoverMeasure(mc);
+        // 收起条那 14 根竖条：跟真实音频的包络走（不是假动画）
+        mpPaintWaveFromAudio();
         // 锁屏进度条（可拖动）也要跟着走。但没必要每秒推 60 次，限流到 4 次/秒。
         const now = Date.now();
         if (force || now - lastPosPush >= 250) {
@@ -2311,6 +2382,7 @@
 
         chordAudioEl.addEventListener('ended', () => {
             stopProgressLoop();
+            mpResetWave();
             // ★ 只有"整段真实音频"播完才算一段结束。
             //   渲染期间用来解锁 <audio> 的静音占位 WAV 也会触发 ended —— 那种不算，
             //   否则每次播放都会顺手多生成一段。
@@ -2331,6 +2403,7 @@
 
         chordAudioEl.addEventListener('pause', () => {
             stopProgressLoop();
+            mpResetWave();                           // 停了就把波形收回中性高度
             if (!seeking) setMeasureHighlight(-1);   // seek 过程中会短暂 pause，别清高亮
             if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
                 navigator.mediaSession.playbackState = 'paused';
@@ -2346,6 +2419,7 @@
             try { chordAudioEl.pause(); } catch (e) {}
         }
         stopProgressLoop();
+        mpResetWave();
         setMeasureHighlight(-1);
     }
 
@@ -2356,6 +2430,7 @@
         stopChordPlayback();
         blobData = null;
         blobMode = null;
+        envFor = null;           // 包络和这段 WAV 是一体的，一起作废
         if (hintText && els.renderInfo) {
             els.renderInfo.style.display = 'block';
             els.renderInfo.textContent = hintText;
@@ -2670,11 +2745,32 @@
         }
     };
 
+    // 首屏还没生成 / 正在渲染 → 整组置灰（语义与原三个播放键的 disabled 一致）
     function setPlayButtonsEnabled(on) {
-        const btns = [els.play, els.playArp, els.playBass];
-        for (let i = 0; i < btns.length; i++) {
-            if (btns[i]) btns[i].disabled = !on;
+        if (els.playSeg) els.playSeg.classList.toggle('is-disabled', !on);
+    }
+
+    // 把滑块挪到「当前播放方式」那一项上。
+    //   几何量两遍：首次调用时这块可能刚被 display 切出来，offsetWidth 还没稳。
+    function updateSegActive() {
+        if (!els || !els.playSeg) return;
+        const opts = els.playSeg.querySelectorAll('.seg__opt');
+        if (!opts.length) return;
+        let active = null;
+        for (let i = 0; i < opts.length; i++) {
+            const on = (opts[i].dataset.mode === lastPlayMode);
+            opts[i].classList.toggle('active', on);
+            opts[i].setAttribute('aria-checked', on ? 'true' : 'false');
+            if (on) active = opts[i];
         }
+        const thumb = els.playSeg.querySelector('.seg__thumb');
+        if (!active || !thumb) return;
+        const place = () => {
+            thumb.style.left = active.offsetLeft + 'px';
+            thumb.style.width = active.offsetWidth + 'px';
+        };
+        place();
+        requestAnimationFrame(place);
     }
 
     function updateHint() {
@@ -2702,6 +2798,7 @@
         // 换了一段 → 之前渲染的音频与高亮全部作废（不然点小节会跳到旧音频上）
         blobData = null;
         blobMode = null;
+        envFor = null;                  // 包络同理：新一段还没渲染，先清空
         highlightedMeasure = -1;
         coverMeasure = -1;              // 锁屏封面的"当前小节"也要复位（否则下一段第一小节会被判成"没变"）
         mpSeg++;                        // 段落代数 +1：冻结快照靠它判断"是不是已经跨到新一段了"
@@ -2745,6 +2842,7 @@
         if (!host) { renderInfoText('音频桥接不可用', true); return; }
 
         lastPlayMode = mode;   // 记住这次用的播放方式 —— 点谱面小节时会沿用它
+        updateSegActive();     // 从播放器 / 锁屏发起的播放也要让页面上的滑块跟上
 
         // ★ 移动端必需：在用户手势内解锁音频上下文
         try {
@@ -2863,20 +2961,6 @@
             });
         }
 
-        // 连奏程度：只影响"弹"，不需要重新生成（改完直接再点播放即可）
-        if (els.legato) {
-            els.legato.value = String(Math.round(settings.legato * 100));
-            if (els.legatoVal) els.legatoVal.textContent = settings.legato.toFixed(1);
-            if (els.legatoWord) els.legatoWord.textContent = legatoWord(settings.legato);
-            els.legato.addEventListener('input', (e) => {
-                settings.legato = clampLegato(parseInt(e.target.value, 10) / 100);
-                if (els.legatoVal) els.legatoVal.textContent = settings.legato.toFixed(1);
-                if (els.legatoWord) els.legatoWord.textContent = legatoWord(settings.legato);
-                saveSettings();
-                invalidateRenderedAudio('连奏已改为 ' + settings.legato.toFixed(1) + '×，点播放键重新渲染');
-            });
-        }
-
         if (els.inversion) {
             els.inversion.checked = settings.allowInversion;
             els.inversion.addEventListener('change', (e) => {
@@ -2937,10 +3021,18 @@
             });
         }
 
-        if (els.generate) els.generate.addEventListener('click', () => doGenerate(false));
-        if (els.play) els.play.addEventListener('click', () => doPlay('block', 0));
-        if (els.playArp) els.playArp.addEventListener('click', () => doPlay('arpeggio', 0));
-        if (els.playBass) els.playBass.addEventListener('click', () => doPlay('bass', 0));
+        // 播放方式（连体椭圆滑块）：点一项 = 切成该方式 + 把当前这段按该方式重放一遍
+        if (els.playSeg) {
+            els.playSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.mode) return;
+                if (els.playSeg.classList.contains('is-disabled')) return;
+                lastPlayMode = opt.dataset.mode;
+                updateSegActive();
+                doPlay(lastPlayMode, 0);
+            });
+            updateSegActive();
+        }
 
         // 🔁 自动连播：一段播完 → 停一下 → 自动换新的一段接着播
         if (els.autoContinue) {
@@ -2955,13 +3047,7 @@
             });
         }
 
-        if (els.stop) {
-            els.stop.addEventListener('click', () => {
-                cancelAutoNext();   // 用户按停止 → 一定打断自动连播（含"正在准备下一段"那一步）
-                stopChordPlayback();
-                if (els.renderInfo) { els.renderInfo.textContent = '已停止'; }
-            });
-        }
+        // （原「停止」键已删：要停下来统一按底部播放器的暂停键，那一下同样会打断自动连播接力）
 
         // 点击谱面上的小节 → 从该小节开头播放（沿用上次按的那个播放键）。
         //   事件委托：命中矩形带 data-measure，点它任意位置都算点这一小节。
@@ -2993,19 +3079,23 @@
         if (els.mpErrorNone) els.mpErrorNone.addEventListener('click', () => mpSubmitReport(null));
         // 用 pointerdown 而不是 click 关闭：iOS Safari 对 fixed 遮罩的 click
         // 判定有坑（下方区域第一次 tap 常被吞/错位，要点两下）。按下即关最跟手。
+        // ★ 判定从"落点严格等于遮罩"改成"落点不在面板内"：
+        //   面板有 18px 内边距、遮罩有 16px 内边距，落在这些缝隙里的点击
+        //   原来的写法不算数 → 表现为"要点两下才关"。现在一次即关。
+        //   用 capture 阶段，避免面板内部按钮的冒泡被误判。
         if (els.mpError) {
             els.mpError.addEventListener('pointerdown', (e) => {
-                if (e.target === els.mpError) mpCloseError();   // 按下遮罩（面板外）即关
-            });
+                if (!e.target.closest || !e.target.closest('.mp-error__panel')) mpCloseError();
+            }, { capture: true });
         }
 
-        // 听辩辅助窗：重听柱式 / 再放琶音 / 点窗外关闭并恢复播放
+        // 听辨辅助窗：琶音 / 柱式（切换即试听一遍）/ 点窗外关闭并恢复播放
         if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
         if (els.mpAidArp) els.mpAidArp.addEventListener('click', () => mpReplayAid('arp'));
         if (els.mpAid) {
             els.mpAid.addEventListener('pointerdown', (e) => {
-                if (e.target === els.mpAid) mpCloseAid();       // 按下窗外 = 停声+恢复播放+结束长按态
-            });
+                if (!e.target.closest || !e.target.closest('.mp-aid__panel')) mpCloseAid();
+            }, { capture: true });
         }
         if (els.mpErrorGrid) {
             els.mpErrorGrid.addEventListener('click', (e) => {
@@ -3024,8 +3114,11 @@
             });
         });
 
-        // 长按看的答案：按住揭示、按住下滑报错、按住左滑上一个和弦
+        // 长按看的答案：按住揭示、按住下滑报错、按住左/右滑上一个/下一个（左右互通）
         bindStageGesture();
+
+        // 展开面板：从顶行往下拖也能收起（防误触见 bindSheetCollapseGesture 里的阈值）
+        bindSheetCollapseGesture();
 
         // ---------------- 数据库页（听辨统计） ----------------
         if (els.dbScopeAll) els.dbScopeAll.addEventListener('click', () => setStatsScope('all'));
@@ -3064,10 +3157,11 @@
     //   展开：铺满一屏 —— 顶行（收起 / 播放暂停）、中间级数大图（可点着切换显隐）、
     //         一行三键（上一个 / 报错 / 下一个）、底部「换一段」。
     //
-    //   它整块 DOM 放在 #view-chord 里面：切到视唱页时 #view-chord 是 display:none，
-    //   display:none 子树里的 position:fixed 同样不渲染 → 切页自动隐藏。
-    //   代价：body / .container / #view-chord 这条链上不能加 transform / filter，
-    //   否则 fixed 的包含块会被劫持。
+    //   ★ 它是**常驻**的（用户 2026-10-06）：整块 DOM（面板 + 报错浮窗 + 辅助浮窗）
+    //     挂在 body 直接子级，不放在任何视图里 —— 切到数据库页它照样在。
+    //     切页时只停声音（见 deactivate），不收面板：用户回来能接着操作。
+    //   代价：body 上不能加 transform / filter / will-change，否则这两个浮窗的
+    //     position:fixed 会被劫持到 body 上（祖先链已缩短到只剩 body）。
     // ============================================================
 
     // 展开 / 收起。展开时锁住背景滚动（否则面板后面还能橡皮筋滚）。
@@ -3079,6 +3173,8 @@
             document.body.style.overflow = mpExpanded ? 'hidden' : '';
         }
         if (mpExpanded) {
+            // 清掉上次"拖到一半"留下的位移，否则这次展开会停在中途
+            if (els && els.mpSheet) els.mpSheet.style.removeProperty('--mp-sheet-y');
             mpPaintCover();
             mpSyncPlayIcon();
             if (mpStageView === 'sheet') requestAnimationFrame(fitSheetPage);
@@ -3132,13 +3228,55 @@
         if (mpExpanded) mpPaintCover();
     }
 
+    // 收起条那 14 根竖条 = 真实音频的走势图（不再是一条假的 CSS 起伏动画）。
+    //   窗口以**当前播放位置为中心**：左边是刚放过的、右边是将要放的，
+    //   所以它真的在"跟着音乐走"—— 柱式的每拍一击、分解的滚音、单音的长衰减
+    //   都能在条子上看出来。
+    //   只改行内 transform，不增删节点（HTML 里的 <i> 数量固定 = ENV_BARS）。
+    function mpPaintWaveFromAudio() {
+        if (!els || !els.mpWave || !envFor || !chordAudioEl) return;
+        // 只有"真的在放这段渲染好的音频"才画：
+        //   渲染期间为了解锁 <audio> 会先塞一段静音占位 WAV，那种不算。
+        if (!blobUrl || chordAudioEl.getAttribute('src') !== blobUrl) return;
+        const bars = els.mpWave.children;
+        const n = bars.length;
+        if (!n) return;
+        els.mpWave.classList.add('is-live');   // 关掉 CSS 的假起伏动画（见 index.html 同名规则）
+        const win = envFor.winMs || ENV_WIN_MS;
+        const total = envFor.bars.length;
+        const tMs = (chordAudioEl.currentTime || 0) * 1000;
+        const half = Math.max(1, (n - 1) / 2);
+        for (let i = 0; i < n; i++) {
+            const idx = Math.round((tMs + (i - half) * ENV_BAR_SPAN_MS) / win);
+            const v = (idx >= 0 && idx < total) ? envFor.bars[idx] : 0;
+            // 越靠窗口两端越压一点 → 像一扇滑动窗口，边界不生硬
+            const fall = 1 - Math.pow(Math.abs(i - half) / half, 2) * 0.5;
+            const h = 0.14 + Math.min(1, v * fall) * 0.86;    // 0.14…1
+            bars[i].style.transform = 'scaleY(' + (0.42 + h * 1.75).toFixed(3) + ')';
+        }
+    }
+
+    // 回到"没有真实波形"的状态：撤掉行内 transform 与 .is-live。
+    //   之后竖条恢复成 CSS 里的中性高度；若此时在播放，则退回那条假起伏动画
+    //   （兜底：还没渲染过音频、或在渲染中时，收起条不该是一片死板的直线）。
+    function mpResetWave() {
+        if (!els || !els.mpWave) return;
+        els.mpWave.classList.remove('is-live');
+        const bars = els.mpWave.children;
+        for (let i = 0; i < bars.length; i++) bars[i].style.transform = '';
+    }
+
     // 收起条播放键的进度环：第 m+1 / total 小节 → (m+1)/total（conic-gradient 角度）。
     //   收起条不再显示「第 X / Y 小节」文字（用户 2026-10-06 拍板），进度只剩这根环。
     function mpPaintProgress() {
         if (!els || !els.mpPlayPauseMin) return;
         const total = (data && data.chords.length) ? data.chords.length : 0;
         const p = total ? ((mpMeasure + 1) / total) : 0;
-        els.mpPlayPauseMin.style.setProperty('--mp-prog', String(Math.max(0, Math.min(1, p))));
+        const v = Math.max(0, Math.min(1, p));
+        els.mpPlayPauseMin.style.setProperty('--mp-prog', String(v));
+        // 方案 B：键外圈那根描边就是进度条。SVG 矩形配 pathLength="1" + dasharray "1 1"，
+        //   所以 dashoffset = 1 − 进度 时，露出来的弧长正好等于进度。
+        if (els.mpRingBar) els.mpRingBar.style.strokeDashoffset = String(1 - v);
     }
 
     // （「开始播放⇄下一首」动态文案已废——用户 2026-10-06 拍板：两个键固定功能，
@@ -3172,6 +3310,8 @@
             els.mpCoverHidden.style.width = side + 'px';
             els.mpCoverHidden.style.height = side + 'px';
         }
+        // 占位卡里那张"被雾盖住的波形"跟着一起重画（尺寸/小节变了都要跟上）
+        mpPaintHiddenWave(side);
         // 遮住时：**连画都不画**，还把画布像素抹掉。
         //   以前是"照画 + 盖一层 blur/grayscale"，但底色色相会透过毛玻璃漏出来
         //   （黄=Ⅴ、红=Ⅲ、蓝=Ⅳ…一眼就能猜），罗马数字的轮廓也没盖住。
@@ -3187,6 +3327,76 @@
         try {
             drawCover(els.mpCover.getContext('2d'), px, info, false);
         } catch (e) {}
+    }
+
+    // 圆角矩形路径（Canvas2D 的 roundRect 在旧 Safari 上没有，自己画一遍最保险）
+    function roundRectPath(c, x, y, w, h, r) {
+        r = Math.max(0, Math.min(r, w / 2, h / 2));
+        c.beginPath();
+        c.moveTo(x + r, y);
+        c.lineTo(x + w - r, y);
+        c.arcTo(x + w, y, x + w, y + r, r);
+        c.lineTo(x + w, y + h - r);
+        c.arcTo(x + w, y + h, x + w - r, y + h, r);
+        c.lineTo(x + r, y + h);
+        c.arcTo(x, y + h, x, y + h - r, r);
+        c.lineTo(x, y + r);
+        c.arcTo(x, y, x + r, y, r);
+        c.closePath();
+    }
+
+    // 遮住态卡片上的波形：真实包络画的**静态缩略图**（不是动画）。
+    //   取"当前小节"这一段包络压成 ENV_BARS 根竖条，上下对称居中 → 一眼像音频。
+    //   随后由 index.html 里那层"中间浓、上下渐隐"的雾把它盖成磨砂感：
+    //   中段被雾吃掉、两端透出来，看得出有内容却读不出内容。
+    //   还没渲染过音频时退回一条固定形状的装饰波形（固定 → 不泄露任何信息）。
+    function mpPaintHiddenWave(side) {
+        if (!els || !els.mpHiddenWave) return;
+        const dpr = (typeof window !== 'undefined' && window.devicePixelRatio) ? window.devicePixelRatio : 1;
+        const px = Math.max(1, Math.round((side || 300) * dpr));
+        if (els.mpHiddenWave.width !== px || els.mpHiddenWave.height !== px) {
+            els.mpHiddenWave.width = px;
+            els.mpHiddenWave.height = px;
+        }
+        let ctx = null;
+        try { ctx = els.mpHiddenWave.getContext('2d'); } catch (e) {}
+        if (!ctx) return;
+        ctx.clearRect(0, 0, px, px);
+
+        const n = ENV_BARS;
+        const dur = measureDuration() || 2;             // 一小节几秒
+        const win = (envFor ? (envFor.winMs || ENV_WIN_MS) : ENV_WIN_MS) / 1000;
+        const t0 = Math.max(0, mpMeasure) * dur;
+        const step = dur / n;
+        const vals = [];
+        for (let i = 0; i < n; i++) {
+            let v = 0;
+            if (envFor) {
+                const a = Math.floor((t0 + i * step) / win);
+                const b = Math.max(a, Math.ceil((t0 + (i + 1) * step) / win) - 1);
+                for (let k = a; k <= b; k++) {
+                    if (k >= 0 && k < envFor.bars.length && envFor.bars[k] > v) v = envFor.bars[k];
+                }
+            } else {
+                v = 0.34 + 0.42 * Math.abs(Math.sin(i * 1.7));   // 装饰波形（恒定）
+            }
+            vals.push(v);
+        }
+
+        const padX = px * 0.11;
+        const usable = px - padX * 2;
+        const gap = Math.max(1.5, px * 0.017);
+        const bw = Math.max(1.5, (usable - gap * (n - 1)) / n);
+        const cy = px / 2;
+        const maxH = px * 0.60;          // 半高不超过 30% → 两端正好落在雾最薄的地方
+        ctx.fillStyle = 'rgba(17, 24, 39, 0.22)';
+        for (let i = 0; i < n; i++) {
+            const amp = Math.min(1, Math.max(0.16, vals[i]));
+            const h = Math.max(px * 0.035, maxH * amp);
+            const x = padX + i * (bw + gap);
+            roundRectPath(ctx, x, cy - h / 2, bw, h, Math.min(bw / 2, h / 2));
+            ctx.fill();
+        }
     }
 
     // 揭示开关（瞬时）：按住 = true，松手 = false。
@@ -3318,19 +3528,26 @@
     // ---- 卡片对水平滑动的手感反馈：跟手位移 + 每格轻推 ----
     //   风格要求：克制。所以位移比例只有 0.15、上限 14px，轻推只 ±6px / 0.17s。
     const MP_DRAG_RATIO = 0.15;   // 手指走 1px，卡片走 0.15px
-    const MP_DRAG_MAX = 14;       // 跟手位移上限（px）
-    const MP_NUDGE_PX = 6;        // 每切一格的轻推幅度（px）
+    const MP_DRAG_MAX_X = 14;     // 横向跟手位移上限（px）
+    const MP_DRAG_MAX_Y = 10;     // 纵向更克制一点（px）
+    const MP_NUDGE_PX = 8;        // 每切一格的轻推幅度（px，横向）
+    const MP_NUDGE_PX_Y = 6;      // 纵向轻推幅度（px）
+    const MP_NUDGE_MS = 190;      // 轻推动画时长（ms）
 
     // 跟手位移走 CSS 独立属性 translate（与 transform:scale 互不覆盖），
     //   写到舞台的 --mp-drag-x 上，.mp-cover 引用它。
-    function mpSetDragOffset(dx) {
+    function clampDrag(v, lim) {
+        return (v > lim) ? lim : ((v < -lim) ? -lim : v);
+    }
+
+    function mpSetDragOffset(dx, dy) {
         const stage = els && els.mpStage;
         if (!stage) return;
-        let v = dx * MP_DRAG_RATIO;
-        if (v > MP_DRAG_MAX) v = MP_DRAG_MAX;
-        else if (v < -MP_DRAG_MAX) v = -MP_DRAG_MAX;
+        // 谱表页只认纵向滚动，卡片不跟手
+        if (mpStageView === 'sheet') { mpClearDragOffset(); return; }
         stage.classList.add('is-dragging');       // 拖动期间关掉 translate 的过渡 → 跟手
-        stage.style.setProperty('--mp-drag-x', v.toFixed(1) + 'px');
+        stage.style.setProperty('--mp-drag-x', clampDrag(dx * MP_DRAG_RATIO, MP_DRAG_MAX_X).toFixed(1) + 'px');
+        stage.style.setProperty('--mp-drag-y', clampDrag(dy * MP_DRAG_RATIO, MP_DRAG_MAX_Y).toFixed(1) + 'px');
     }
 
     function mpClearDragOffset() {
@@ -3338,6 +3555,7 @@
         if (!stage) return;
         stage.classList.remove('is-dragging');    // 松手后恢复过渡 → 自动弹回
         stage.style.removeProperty('--mp-drag-x');
+        stage.style.removeProperty('--mp-drag-y');
     }
 
     // 每切一格轻推一下（'left' 往左、'right' 往右）。
@@ -3347,15 +3565,18 @@
         const cover = els && els.mpCover;
         if (!cover || typeof cover.animate !== 'function') return;
         if (mpNudgeAnim) { try { mpNudgeAnim.cancel(); } catch (e) {} mpNudgeAnim = null; }
-        const dx = (dir === 'right') ? MP_NUDGE_PX : -MP_NUDGE_PX;
+        const vertical = (dir === 'up' || dir === 'down');
+        const p = vertical ? MP_NUDGE_PX_Y : MP_NUDGE_PX;
+        const sign = (dir === 'right' || dir === 'down') ? 1 : -1;
+        const axis = vertical ? 'translateY' : 'translateX';
         // 只动 transform（不动 translate），所以跟手位移不会被覆盖掉
         mpNudgeAnim = cover.animate(
             [
-                { transform: 'scale(1) translateX(0px)' },
-                { transform: 'scale(1) translateX(' + dx + 'px)' },
-                { transform: 'scale(1) translateX(0px)' }
+                { transform: 'scale(1) ' + axis + '(0px)' },
+                { transform: 'scale(1) ' + axis + '(' + (sign * p) + 'px)' },
+                { transform: 'scale(1) ' + axis + '(0px)' }
             ],
-            { duration: 170, easing: 'ease-out' }
+            { duration: MP_NUDGE_MS, easing: 'ease-out' }
         );
         mpNudgeAnim.onfinish = () => { mpNudgeAnim = null; };
     }
@@ -3373,6 +3594,63 @@
         doPlay(lastPlayMode, next);
     }
 
+    // 展开面板：从顶行往下拖 = 收起。
+    //   防误触三件套：① 起始 8px 内不动就不算拖（点按钮的位移远小于此）；
+    //   ② 必须纵向主导（|dy| > |dx| * 1.4）且只认向下；③ 松手要过 100px，或甩得够快。
+    //   没够阈值就原样弹回去 —— 等于什么都没发生。
+    const SHEET_SLOP_PX = 8;
+    const SHEET_CLOSE_PX = 100;
+    const SHEET_FLING_PX_MS = 0.5;    // 甩动速度阈值（px/ms）
+
+    function bindSheetCollapseGesture() {
+        const top = els && els.mpSheetTop;
+        const sheet = els && els.mpSheet;
+        if (!top || !sheet) return;
+
+        let g = null;
+
+        top.addEventListener('pointerdown', (e) => {
+            if (!mpExpanded || g) return;
+            if (e.isPrimary === false) return;
+            g = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: Date.now(), dy: 0, dragging: false, captured: false };
+            try { top.setPointerCapture(e.pointerId); g.captured = true; } catch (err) {}
+        });
+
+        top.addEventListener('pointermove', (e) => {
+            if (!g || e.pointerId !== g.id) return;
+            const dx = e.clientX - g.x0;
+            const dy = e.clientY - g.y0;
+            if (!g.dragging) {
+                if (Math.abs(dy) < SHEET_SLOP_PX && Math.abs(dx) < SHEET_SLOP_PX) return;
+                // 只认"明确向下"的拖动；横向 / 向上都放行给原来的点击
+                if (dy <= 0 || Math.abs(dy) <= Math.abs(dx) * 1.4) { g = null; return; }
+                g.dragging = true;
+                sheet.classList.add('is-collapsing');    // 拖动期间关过渡 → 严格跟手
+            }
+            g.dy = Math.max(0, dy);
+            sheet.style.setProperty('--mp-sheet-y', g.dy + 'px');
+            if (e.cancelable) e.preventDefault();
+        });
+
+        const finish = (e) => {
+            if (!g || (e && e.pointerId !== undefined && e.pointerId !== g.id)) return;
+            const cur = g;
+            g = null;
+            if (cur.captured) { try { top.releasePointerCapture(cur.id); } catch (err) {} }
+            if (!cur.dragging) return;
+            sheet.classList.remove('is-collapsing');     // 恢复过渡
+            const ms = Math.max(1, Date.now() - cur.t0);
+            const flung = (cur.dy / ms) > SHEET_FLING_PX_MS && cur.dy > SHEET_SLOP_PX * 3;
+            if (cur.dy > SHEET_CLOSE_PX || flung) {
+                mpSetExpanded(false);                    // 从"当前拖到哪"继续滑出去
+            } else {
+                sheet.style.setProperty('--mp-sheet-y', '0px');   // 没够阈值 → 平滑回弹
+            }
+        };
+        top.addEventListener('pointerup', finish);
+        top.addEventListener('pointercancel', finish);
+    }
+
     function bindStageGesture() {
         const stage = els && els.mpStage;
         if (!stage) return;
@@ -3388,8 +3666,7 @@
                 pointerId: e.pointerId,
                 x0: e.clientX,
                 y0: e.clientY,
-                anchorX: e.clientX,        // 左滑台阶锚点（每次 -MP_LEFT_PX）
-                anchorRightX: e.clientX,   // 右滑台阶锚点（每次 +MP_RIGHT_PX）
+                anchorX: e.clientX,        // 水平台阶锚点（左右共用：往左 -MP_STEP_PX / 往右 +MP_STEP_PX）
                 phase: 'pending',
                 axis: null,
                 viewOnly: mpStageView === 'sheet',   // 谱表页：没有长按揭示（点击小节跳转另有处理）
@@ -3424,25 +3701,25 @@
             }
             if (g.phase !== 'armed') return;
 
-            // 跟手位移：横向主导时卡片随手指小幅平移（纵向手势不动卡片）。
-            //   轴一旦锁定就按轴走，避免斜滑时来回抖。
+            // 跟手位移：按当前轴走 —— 横向就跟横、纵向就跟竖（斜滑按主导轴，避免来回抖）。
             const horizontal = g.axis
-                ? (g.axis === 'left' || g.axis === 'right')
+                ? (g.axis === 'h')
                 : (Math.abs(dx) > Math.abs(dy));
-            if (horizontal) mpSetDragOffset(dx); else mpClearDragOffset();
+            if (horizontal) mpSetDragOffset(dx, 0); else mpSetDragOffset(0, dy);
 
             // 先定轴：斜滑按主导轴，绝不双触发；轴一旦锁定，另一方向就不再触发。
             //   错题练习不设报错 → 不认"下滑"这个轴（上滑辅助/左右滑平移照常）。
             if (!g.axis) {
                 if (!practiceMode && dy > MP_DOWN_PX && dy > Math.abs(dx) * 1.2) g.axis = 'down';
                 else if (dy < -MP_UP_PX && Math.abs(dy) > Math.abs(dx) * 1.2) g.axis = 'up';
-                else if (dx < -MP_LEFT_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'left';
-                else if (dx > MP_RIGHT_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'right';
+                // 左右合并成一个水平轴 'h'：具体往左还是往右，由 move 里相对锚点的位移决定
+                else if (Math.abs(dx) > MP_STEP_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'h';
             }
 
             if (g.axis === 'down') {
                 if (dy > MP_DOWN_PX) {
                     g.phase = 'done';                 // 一次性动作，之后忽略 move
+                    mpNudge('down');                  // 触发那一下的纵向轻推（与左右切格同族）
                     mpOpenError(mpFreeze);            // 目标 = 冻结快照；音乐不停
                 }
                 return;
@@ -3452,27 +3729,22 @@
                 if (dy < -MP_UP_PX) {
                     g.phase = 'done';                 // 一次性动作，之后忽略 move
                     g.consumed = true;                // 手势交给辅助窗接管：松手不解冻、不关门
+                    mpNudge('up');
                     mpOpenAid(mpFreeze);              // 暂停 + 播冻结和弦的琶音 + 弹辅助窗
                 }
                 return;
             }
 
-            if (g.axis === 'left') {
-                // 每再左滑一格就退一个小节（re-arm）；已经在第一小节就只重置锚点、不动作
+            if (g.axis === 'h') {
+                // 水平轴只有一个锚点，每滑够一格就走一步、锚点跟着走。
+                //   左右因此是互通的：左滑两格后手指折返，只要相对"停下那一点"再滑够
+                //   一格就前进 —— 不需要先把手指拉回起点。
                 let guard = 0;
-                while (g.anchorX - e.clientX >= MP_LEFT_PX && guard < 20) {
-                    g.anchorX -= MP_LEFT_PX;
-                    mpStepBackWhileHolding();
-                    guard++;
-                }
-            }
-
-            if (g.axis === 'right') {
-                // 每再右滑一格就进一个小节（re-arm）；已经在最后一小节就只重置锚点、不动作
-                let guard = 0;
-                while (e.clientX - g.anchorRightX >= MP_RIGHT_PX && guard < 20) {
-                    g.anchorRightX += MP_RIGHT_PX;
-                    mpStepForwardWhileHolding();
+                while (guard < 20) {
+                    const d = e.clientX - g.anchorX;
+                    if (d >= MP_STEP_PX) { g.anchorX += MP_STEP_PX; mpStepForwardWhileHolding(); }
+                    else if (d <= -MP_STEP_PX) { g.anchorX -= MP_STEP_PX; mpStepBackWhileHolding(); }
+                    else break;
                     guard++;
                 }
             }
@@ -3508,15 +3780,20 @@
         if (!els) return;
         const playing = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
         // 纯符号播放键（无文字、键又小）→ 实心，一眼可辨
-        const icon = iconSvg(playing ? 'i-pause-solid' : 'i-play-solid', true);
-        if (els.mpPlayPause) {
-            els.mpPlayPause.innerHTML = icon;
-            els.mpPlayPause.classList.toggle('is-playing', playing);
-        }
-        if (els.mpPlayPauseMin) {
-            els.mpPlayPauseMin.innerHTML = icon;
-            els.mpPlayPauseMin.classList.toggle('is-playing', playing);
-        }
+        const iconId = playing ? 'i-pause-solid' : 'i-play-solid';
+        // ★ 只改 <use> 的引用，**不要**写 innerHTML：
+        //   收起条那颗播放键里除了图标，还有外圈那根进度环（方案 B），
+        //   整块 innerHTML 重写会把环一起抹掉 —— 环还在 DOM 引用里、却已脱离文档，
+        //   表现为"进度一直在写、画面上却没有"。踩过一次。
+        const sync = (btn) => {
+            if (!btn) return;
+            const use = btn.querySelector('use');
+            if (use) use.setAttribute('href', '#' + iconId);
+            else btn.innerHTML = iconSvg(iconId, true);   // 兜底：万一按钮里没有 <use>
+            btn.classList.toggle('is-playing', playing);
+        };
+        sync(els.mpPlayPause);
+        sync(els.mpPlayPauseMin);
         // 收起条波形动画的开关
         if (els.mpExpand) els.mpExpand.classList.toggle('is-playing', playing);
     }
@@ -3660,8 +3937,25 @@
         if (chordAudioEl && wasPlaying) { try { chordAudioEl.pause(); } catch (e) {} }
         mpSyncPlayIcon();                                  // pause 事件会同步，这里兜底
         mpAid = { measure: frozen.measure, midis: midis.slice(), sources: [], wasPlaying };
+        mpPaintAidTones(frozen.measure);
         if (els && els.mpAid) els.mpAid.hidden = false;
         try { await playInstantChord(midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
+    }
+
+    // 辅助窗右侧那一列音名：**按音高自下而上**（最低音在最下），如 C G C E。
+    //   和卡片上的写法完全一致（同 pitchName，不带八度），免得两处对不上。
+    //   DOM 里按"低音在前"追加，CSS 用 column-reverse 把它翻成自下而上 —— 顺序只有一处定义。
+    function mpPaintAidTones(measure) {
+        if (!els || !els.mpAidTones) return;
+        els.mpAidTones.innerHTML = '';
+        const c = (data && data.chords) ? data.chords[measure] : null;
+        if (!c || !c.notes || !c.notes.length) return;
+        c.notes.forEach((n) => {                      // notes 已按 MIDI 升序（低 → 高）
+            const d = document.createElement('div');
+            d.className = 'mp-aid__tone';
+            d.textContent = pitchName(n.letter, n.acc);
+            els.mpAidTones.appendChild(d);
+        });
     }
 
     function mpStopAidVoices() {
@@ -4001,9 +4295,10 @@
     }
 
     function deactivate() {
+        // 播放器是常驻的（切到数据库页也在）→ **不收起面板**，用户随时能接着操作。
+        //   但要停住声音：既避免"看不见控制却还在响"，也免得在数据库页被自动连播换了段。
+        cancelAutoNext();
         stopChordPlayback();
-        // 离开和弦页：把迷你播放器复位成收起态（否则切回来面板还开着），浮窗也关掉
-        mpSetExpanded(false);
         mpCancelGesture();
         mpCloseError();
         if (statsFlushTimer) flushStats();   // 离开时把统计补一次盘（debounce 可能还没到）
@@ -4116,6 +4411,19 @@
             aidOpen: !!(els && els.mpAid && !els.mpAid.hidden),
             reportCount: mpReports.length
         }),
+        // ---- 真实音频包络 / 收起条波形 / 遮住态波形（调试 / 自测用）----
+        _getEnv: () => {
+            if (!envFor) return null;
+            let peak = 0;
+            for (let i = 0; i < envFor.bars.length; i++) if (envFor.bars[i] > peak) peak = envFor.bars[i];
+            return { bins: envFor.bars.length, winMs: envFor.winMs, durSec: envFor.durSec, peak: peak };
+        },
+        _getWaveBars: () => {
+            if (!els || !els.mpWave) return null;
+            return Array.from(els.mpWave.children).map((n) => n.style.transform || '');
+        },
+        _isWaveLive: () => !!(els && els.mpWave && els.mpWave.classList.contains('is-live')),
+        _paintHiddenWave: (side) => mpPaintHiddenWave(side || 300),
         _setMpExpanded: mpSetExpanded,
         _setMpStageView: mpSetStageView,
         _getMpStageView: () => mpStageView,
@@ -4124,7 +4432,26 @@
         _openMpError: mpOpenError,
         _closeMpError: mpCloseError,
         _openMpAid: mpOpenAid,
+        // 直接对第 m 小节开辅助窗（跳过"长按+上滑"手势，供自测用）
+        _openMpAidAt: (m) => {
+            if (!data || !data.chords[m]) return null;
+            const chord = data.chords[m];
+            return mpOpenAid({
+                seg: mpSeg, measure: m,
+                midis: chord.midis || [],
+                info: buildCoverInfo(m)
+            });
+        },
         _closeMpAid: mpCloseAid,
+        // 辅助窗右侧那一列音名（DOM 顺序 = 低音在前；画面上靠 column-reverse 自下而上）
+        _getAidTones: () => (els && els.mpAidTones
+            ? Array.from(els.mpAidTones.children).map((n) => n.textContent)
+            : null),
+        _getAidToneLayout: () => (els && els.mpAidTones
+            ? getComputedStyle(els.mpAidTones).flexDirection
+            : null),
+        // 收起条播放键的外圈进度（方案 B）
+        _getRingDashoffset: () => (els && els.mpRingBar ? els.mpRingBar.style.strokeDashoffset : null),
         // ---- 听辨统计 / 数据库页（调试 / 自测用）----
         renderStats: renderStats,
         _getStats: () => ({ all: statsAll, session: statsSession, scope: statsScope }),
