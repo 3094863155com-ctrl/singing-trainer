@@ -2186,17 +2186,21 @@
             //
             // 1) 可拖动进度条（seekto + positionState 实时更新）
             // 2) 当前页若给了 skip 钩子（和弦页 = 上一小节/下一小节），
-            //    锁屏上的「上一首/下一首」与「±10 秒」**四颗键统一都走它**
-            // 3) 没有钩子时退回原生行为：previoustrack/nexttrack 各 ±5 秒，
-            //    seekbackward/seekforward 按系统给的 seekOffset（通常 10 秒）
+            //    锁屏上的「上一首/下一首」两颗键就都走它
+            // 3) 没有钩子时退回原生行为：previoustrack/nexttrack 各 ±5 秒
             //
-            // ★ 为什么必须补注册 seekbackward / seekforward
-            //   （用户 2026-10-06 反馈："锁屏的左右键变成前进后退 10s 了，之前是一个和弦"）：
-            //   iPhone 锁屏现在露出的是系统自绘的那对 ±10 秒键 —— 它们对应的是
-            //   seekbackward / seekforward 两个动作。只注册 previoustrack / nexttrack
-            //   已经不够用了：iOS 不再为它们回调我们的 handler，点下去便落回系统默认的
-            //   "跳 10 秒"。把这两个动作也注册上，同一对键就会走到 skip 钩子 = 跳一个和弦。
-            //   （图标由系统绘制，可能仍显示 ±10 的样子；那只是外观，行为已经是一个和弦。）
+            // ★ 千万不要注册 seekbackward / seekforward（2026-10-06 实测 + 订正）
+            //   现象：锁屏左右键显示成系统的「±10 秒」。
+            //   真因：iOS 一旦看到网页接管了 seek（即注册了 seekbackward/seekforward），
+            //         就会把本该显示的 ⏮⏭（上一首/下一首）换成它自己画的 ±10 秒键，
+            //         而且这个「10」图标是系统固定画的，与我们设的步长无关。
+            //         反之，把这两个动作取消注册，⏮⏭ 就会回来。
+            //         （参考 overdevs《Nailing the MediaSession API on iOS》、
+            //          以及 dbushell 做播客 PWA 时的实测记录。）
+            //   走过的弯路：曾补注册这两个动作，想让 ±10 键也走 skip 钩子 ——
+            //         行为确实变成了"跳一个和弦"，但 iOS 从此只画 ±10，⏮⏭ 再也没出现。
+            //   正确做法：只注册 play / pause / previoustrack / nexttrack，⏮⏭ 才会出现；
+            //         两颗键按下都经 mediaSkip() → 和弦页跳一个和弦。
             const reg = (action, fn) => {
                 try {
                     navigator.mediaSession.setActionHandler(action, fn);
@@ -2228,19 +2232,8 @@
                 }
                 mediaUpdatePosition(activeMediaEl);
             });
-            // ±10 秒那对键：有 skip 钩子（和弦页 = 上一/下一小节）就走钩子，
-            //   否则按系统给的步长跳 —— 与系统原生行为一致，不改变其它页面的手感。
-            const seekBy = (dir, details) => {
-                if (mediaSkip(dir)) return;
-                if (!activeMediaEl) return;
-                const off = (details && details.seekOffset) ? details.seekOffset : 10;
-                const dur = activeMediaEl.duration || 0;
-                const max = (isFinite(dur) && dur > 0) ? dur : Infinity;
-                activeMediaEl.currentTime = Math.max(0, Math.min(max, activeMediaEl.currentTime + dir * off));
-                mediaUpdatePosition(activeMediaEl);
-            };
-            reg('seekbackward', (details) => seekBy(-1, details));
-            reg('seekforward', (details) => seekBy(1, details));
+            // 注意：这里**只**处理锁屏进度条的拖动（Android Chrome / 桌面），
+            //   绝不注册 seekbackward / seekforward（原因见上）。
             reg('seekto', (details) => {
                 if (!activeMediaEl) return;
                 if (details.fastSeek && 'fastSeek' in activeMediaEl) {
