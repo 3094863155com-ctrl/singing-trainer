@@ -3317,7 +3317,13 @@
         // 方案 B：键外圈那根描边就是进度条。pathLength="1" + dasharray "1 1"，
         //   所以 dashoffset = 1 − 进度 时，露出来的弧长正好等于进度，
         //   路径起点在 12 点钟方向（见 index.html 的 <path d>），亮起来的那段从 12 点顺时针长。
-        if (els.mpRingBar) els.mpRingBar.style.strokeDashoffset = String(1 - v);
+        if (els.mpRingBar) {
+            els.mpRingBar.style.strokeDashoffset = String(1 - v);
+            // ★ v = 0 时那根描边还会在 12 点钟留一个 1.5px 的小圆点 ——
+            //   它是 round linecap 对"零长度 dash"的渲染（Chrome/Safari 都会画），
+            //   看着仍然像"已经有一点点进度了"。进度为 0 就干脆整根藏掉，播起来再显示。
+            els.mpRingBar.style.visibility = (v <= 0) ? 'hidden' : '';
+        }
     }
 
     // （「开始播放⇄下一首」动态文案已废——用户 2026-10-06 拍板：两个键固定功能，
