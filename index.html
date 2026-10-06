@@ -1502,9 +1502,17 @@
             gap: 4px;
         }
 
+        /* 音名是**可点**的（点一下就发这个音高，用户 2026-10-06）：
+           所以它是个 <button> —— 手指落点给足（min-height 38px），字体/光标要 reset，
+           并给按下反馈。视觉上只比原来的方块高 5px 左右，列宽与顺序都不动。 */
         .mp-aid__tone {
+            display: flex;
+            align-items: center;
+            justify-content: center;
             min-width: 46px;
+            min-height: 38px;
             padding: 3px 10px;
+            font-family: inherit;
             text-align: center;
             font-size: 19px;
             font-weight: 700;
@@ -1513,6 +1521,14 @@
             background: var(--surface-hover);
             border: 1px solid var(--border);
             border-radius: var(--r-md);
+            cursor: pointer;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .mp-aid__tone:active {
+            filter: brightness(0.94);
+            border-color: var(--accent);
         }
 
         .mp-aid__hint {
@@ -2029,7 +2045,9 @@
 
     <!-- 听辨辅助浮窗：按住上滑 → 暂停并播冻结和弦的琶音；点窗外关闭并恢复播放。
          版式（用户 2026-10-06 定）：左列两个按钮（上=琶音 / 下=柱式，图标即示意），
-         右列一列音名，**按音高自下而上**排（最低音在最下），如 C G C E —— 和卡片写法一致。 -->
+         右列一列音名，**按音高自下而上**排（最低音在最下），如 C G C E —— 和卡片写法一致。
+         音名是可点的（用户 2026-10-06）：点一下发这个音高，连点会叠着响；
+         所以它们是 <button data-midi>，音高靠 data-midi 认（音名不带八度，两个 C 会重名）。 -->
     <div id="chord-mp-aid" class="mp-aid" role="dialog" aria-modal="true" hidden>
         <div class="mp-aid__panel" role="group" aria-label="听辨辅助">
             <div class="mp-aid__title">听辨辅助</div>
@@ -2040,7 +2058,7 @@
                 </div>
                 <div class="mp-aid__tones" id="chord-mp-aid-tones"></div>
             </div>
-            <div class="mp-aid__hint">点窗外任意处关闭并继续播放</div>
+            <div class="mp-aid__hint">点音名试听 · 点窗外关闭并继续播放</div>
         </div>
     </div>
 

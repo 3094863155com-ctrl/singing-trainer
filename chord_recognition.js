@@ -1609,26 +1609,41 @@
     //   style 'arp'   上行分解琶音：三和弦 [低,中,高,低+12]（与分解模式同构）、四音原序，
     //                 每音间隔 0.325s（4 音 ≈ 1.3 秒）
     //   style 'block' 柱式：全音同时、只弹一下
-    //   音源全部登记进 mpAid.sources，关窗/重放前可随时 stop()。
-    //   必须在手势调用栈内触发（iOS 自动播放策略）；采样缺失只 warn 不抛。
+    //   style 'note'  单音（点辅助窗右侧的音名试听）：包络同柱式，只响一个音
+    //   音源全部登记进 mpAid.sources，关窗/重放前可随时 stop()。采样缺失只 warn 不抛。
+    //
+    //   ★ 解锁必须"同步"发生（2026-10-06 修「上滑与窗里按钮都没声」）：
+    //     ① initAudio() 与 resume() 都**不要 await** —— 它们内部本身是同步的
+    //        （new AudioContext() / resume() 都是同步调用），一旦 await 就跳出用户手势的
+    //        同步调用栈，iOS 会拒绝这次 resume → "看着在排程、其实一个音都不响"。
+    //     ② 状态判断用 `!== 'running'`：iOS 除 'suspended' 还有 Safari 私有的
+    //        'interrupted'（主 <audio> 播放/暂停之后常落到这个态），只认前者就永远不解锁。
+    //     ③ audioContext 的判空要放在 initAudio() **之后**（旧版写在前面，顺序反了）。
+    //   ★ 这里只是"尽力解锁"。真正稳的解锁点在真·激活事件里：
+    //     见 bindStageGesture 的 pointerdown（unlockAudioNow）与 finish() 的 pointerup 补放。
+    //   返回 { ok, ctxState, scheduled } 供验收断言（"有没有真的排上程"）。
     async function playInstantChord(midis, style) {
         const host = global.ChordHost;
-        if (!host || !host.audioContext) return;
-        try { await host.initAudio(); } catch (e) {}
+        if (!host) return { ok: false, reason: 'no-host', scheduled: 0 };
+        if (!host.audioContext) { try { host.initAudio(); } catch (e) {} }   // 不 await（保住手势）
         const ctx = host.audioContext;
-        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch (e) {} }
+        if (!ctx) return { ok: false, reason: 'no-ctx', scheduled: 0 };
+        if (ctx.state !== 'running') { try { ctx.resume(); } catch (e) {} }   // 不 await（保住手势）
 
-        const pattern = (style === 'block')
+        const isBlock = (style === 'block' || style === 'note');
+        const pattern = isBlock
             ? null
             : (midis.length === 3 ? [midis[0], midis[1], midis[2], midis[0] + 12] : midis.slice());
         const GAP = 0.325;                 // 琶音每音间隔
-        const notes = (style === 'block')
+        const notes = isBlock
             ? midis.map((m) => ({ midi: m, at: 0, hold: Math.min(0.8, 60 / settings.tempo), gain: 0.45 }))
             : pattern.map((m, i) => ({ midi: m, at: i * GAP, hold: 0.3, gain: 0.5 }));
 
+        let scheduled = 0;
+        let missing = 0;
         for (const n of notes) {
             const s = resolveSample(n.midi);
-            if (!s) { console.warn('听辩辅助：midi ' + n.midi + ' 无采样'); continue; }
+            if (!s) { missing++; continue; }
             const src = ctx.createBufferSource();
             src.buffer = s.buffer;
             src.playbackRate.value = s.rate;
@@ -1643,7 +1658,37 @@
             src.start(t);
             src.stop(t + n.hold + CHORD_RELEASE + 0.05);
             if (mpAid) mpAid.sources.push(src);
+            scheduled++;
         }
+        if (missing > 0) {
+            console.warn('听辩辅助：有 ' + missing + ' 个音找不到采样（音源/和弦钢琴/ 是否已加载？）');
+        }
+        // 点音名可以连点（用户要"叠着响，像弹琴"）→ 声源会累积，偶尔剪掉最老的几个
+        if (mpAid && mpAid.sources.length > 40) {
+            const old = mpAid.sources.splice(0, 16);
+            old.forEach((s) => { try { s.stop(); } catch (e) {} });
+        }
+        const ok = (ctx.state === 'running' && scheduled > 0);
+        // 记下这一声的音高（验收要断言"点哪个音名就发哪个音高"，光看 scheduled 不够）
+        mpAidLast = { style: style, ok: ok, ctxState: ctx.state,
+                      scheduled: scheduled, midis: midis.slice() };
+        return { ok: ok, ctxState: ctx.state, scheduled: scheduled };
+    }
+
+    // 在**真·用户激活事件**里把 AudioContext 解锁好（同步，不 await）。
+    //   为什么要单独有这么一手：上滑那声琶音是在 `pointermove` 里播的，而 pointermove
+    //   **不是**用户激活事件（pointerdown / pointerup / touchend / click / keydown 才是），
+    //   在那里调 resume() 会被 iOS 拒绝。长按上滑的开头必有一个 pointerdown —— 在那一刻
+    //   就把上下文唤醒，等 160ms 后手指滑上去时它已经是 running，直接排程就出声。
+    //   initAudio()/resume() 都是同步完成幂等的，重复调用无副作用。
+    function unlockAudioNow() {
+        const host = global.ChordHost;
+        if (!host) return;
+        try {
+            if (!host.audioContext) host.initAudio();
+            const ctx = host.audioContext;
+            if (ctx && ctx.state !== 'running') ctx.resume();
+        } catch (e) {}
     }
 
     // ------------------------------------------------------------
@@ -2826,11 +2871,12 @@
         updateSegActive();     // 从播放器 / 锁屏发起的播放也要让页面上的滑块跟上
 
         // ★ 移动端必需：在用户手势内解锁音频上下文
+        //   initAudio() 内部是同步的 → **不 await** 才能留在手势的同步栈里（await 一交出去，
+        //   iOS 就可能拒绝这次 resume）。状态判断用 !== 'running'：iOS 除 'suspended' 之外
+        //   还有 Safari 私有的 'interrupted'（主 <audio> 播放/暂停后常落到这个态），
+        //   只认前者会一直不解锁 —— 主播放不受影响（它走 <audio>），但听辩辅助窗那声会哑。
         try {
-            await host.initAudio();
-            if (host.audioContext && host.audioContext.state === 'suspended') {
-                host.audioContext.resume();
-            }
+            unlockAudioNow();
         } catch (e) {}
 
         // ★ 在用户手势内创建并解锁 <audio> 元素（后续复用）
@@ -3089,11 +3135,23 @@
             }, { capture: true });
         }
 
-        // 听辨辅助窗：琶音 / 柱式（切换即试听一遍）/ 点窗外关闭并恢复播放
+        // 听辨辅助窗：琶音 / 柱式（切换即试听一遍）/ 点右侧音名试听 / 点窗外关闭并恢复播放
         if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
         if (els.mpAidArp) els.mpAidArp.addEventListener('click', () => mpReplayAid('arp'));
+        // 音名列做事件委托（内容是每次开窗重画的，不能逐个挂）。
+        //   ★ 按 data-midi 认音，不按音名 —— "C G C E" 里两个 C 是不同音高。
+        if (els.mpAidTones) {
+            els.mpAidTones.addEventListener('click', (e) => {
+                const b = (e.target && e.target.closest) ? e.target.closest('[data-midi]') : null;
+                if (!b) return;
+                const midi = parseInt(b.dataset.midi, 10);
+                if (isFinite(midi)) mpPlayAidTone(midi);
+            });
+        }
         if (els.mpAid) {
             els.mpAid.addEventListener('pointerdown', (e) => {
+                // 窗内任何按下（含点音名）也顺手解锁一次音频上下文 —— 它是真激活事件
+                unlockAudioNow();
                 if (!e.target.closest || !e.target.closest('.mp-aid__panel')) mpCloseAid();
             }, { capture: true });
         }
@@ -3239,8 +3297,10 @@
     //
     //   ★ 进度是**连续**的：用「音频当前播放位置 / 整段时长」算，而不是「第几小节 / 总小节数」。
     //     用户 2026-10-06：「进度条应该无极挪动，而不是现在一小节前进一格」。
-    //     拿不到时长时（还没渲染出整段音频、或音频未 loadedmetadata）退回按小节算 ——
-    //     保证任何时刻环上都有个合理读数，不会是 0。
+    //   ★ 时长拿不到时（还没渲染出音频元素 / 还没 loadedmetadata）就是 **0**，环一点都不亮。
+    //     绝不要退回"按小节算"：`chordAudioEl` 只在 doPlay 里才创建，页面刚刷新、一次都没播过时
+    //     它还是 null，那时按小节算会给出 (0+1)/8 = 1/8 —— 于是"没播放，进度条却已经有一截了"
+    //     （用户 2026-10-06 反馈第 3 条）。没开始播就该是 0。
     function mpProgressTime() {
         // 冻结（长按看答案）期间：环停在冻结那一刻，跟着播放走下去会和"面板停住"自相矛盾
         if (mpFreeze && mpFreeze.t != null) return mpFreeze.t;
@@ -3249,15 +3309,9 @@
 
     function mpPaintProgress() {
         if (!els || !els.mpPlayPauseMin) return;
-        const total = (data && data.chords.length) ? data.chords.length : 0;
         const dur = chordAudioEl ? chordAudioEl.duration : 0;
         const t = mpProgressTime();
-        let p;
-        if (isFinite(dur) && dur > 0) {
-            p = t / dur;                                  // 无极：跟真实时间走
-        } else {
-            p = total ? ((mpMeasure + 1) / total) : 0;    // 兜底：还没整段音频时按小节
-        }
+        const p = (isFinite(dur) && dur > 0) ? (t / dur) : 0;   // 无极：跟真实时间走；没开始播 = 0
         const v = Math.max(0, Math.min(1, p));
         els.mpPlayPauseMin.style.setProperty('--mp-prog', String(v));
         // 方案 B：键外圈那根描边就是进度条。pathLength="1" + dasharray "1 1"，
@@ -3418,6 +3472,7 @@
             if (els && els.mpAid) els.mpAid.hidden = true;
             if (mpAid.wasPlaying && chordAudioEl) { try { chordAudioEl.play().catch(() => {}); } catch (e) {} }
             mpAid = null;
+            mpAidLast = null;
             mpSyncPlayIcon();
         }
         if (mpGesture) {
@@ -3536,6 +3591,10 @@
         stage.addEventListener('contextmenu', (e) => { e.preventDefault(); });
 
         stage.addEventListener('pointerdown', (e) => {
+            // ★ 趁"真·用户激活事件"把音频上下文解锁（同步）。
+            //   上滑那声琶音稍后在 pointermove 里播，而 pointermove 不是激活事件 ——
+            //   不在这里提前解锁，iOS 会拒绝 resume，于是"有窗没声"。
+            unlockAudioNow();
             if (!mpExpanded || !data || !data.chords.length) return;
             if (e.isPrimary === false) return;      // 只认主指针，防双指误触
             if (mpGesture) return;
@@ -3633,6 +3692,12 @@
             if (g.consumed) {
                 // 听辩辅助窗已接管：只回收指针。解冻/恢复播放由"关辅助窗"那一侧负责。
                 if (g.captured) { try { stage.releasePointerCapture(g.pointerId); } catch (err) {} }
+                // ★ 兜底补放：上滑那声琶音是在 pointermove（非激活事件）里播的，若当时没能解锁
+                //   （mpAidLast.ok 为假），这里补一次 —— pointerup 是激活事件，这一下一定解锁。
+                //   守卫用"上一次 ok 为假才补"，所以第一次真排上程了绝不会出现双声。
+                if (mpAid && mpAidLast && !mpAidLast.ok) {
+                    try { mpReplayAid('arp'); } catch (err) {}
+                }
                 mpGesture = null;
                 return;
             }
@@ -3803,6 +3868,9 @@
     //   浮窗里可重听柱式/再放琶音；点窗外关闭并恢复播放。
     //   辅助窗不写任何统计（与报错浮窗的 practiceMode 闸门无关，错题模式也可用）。
     let mpAid = null;   // { measure, midis, sources: [], wasPlaying }
+    // 最近一次 playInstantChord 的结果 { style, ok, ctxState, scheduled }。
+    //   ok 为假 = 那一声"没能真正排上程/上下文没在跑"，pointerup 会拿它决定要不要补放。
+    let mpAidLast = null;
 
     async function mpOpenAid(frozen) {
         if (!frozen || frozen.seg !== mpSeg) return;      // 跨段快照作废
@@ -3822,16 +3890,26 @@
     // 辅助窗右侧那一列音名：**按音高自下而上**（最低音在最下），如 C G C E。
     //   和卡片上的写法完全一致（同 pitchName，不带八度），免得两处对不上。
     //   DOM 里按"低音在前"追加，CSS 用 column-reverse 把它翻成自下而上 —— 顺序只有一处定义。
+    //   ★ 每个音名可点：点一下就发这个音高（用户 2026-10-06）。
+    //     音名不带八度（两个 C 会一模一样），所以**只能按 data-midi 认音** ——
+    //     notes 是 chords[m].midis.map(midiToSpelled) 来的（同序同长），下标一一对应，
+    //     而 midiToSpelled 的结果里**不含 midi**，所以要按下标回到 midis 里取。
     function mpPaintAidTones(measure) {
         if (!els || !els.mpAidTones) return;
         els.mpAidTones.innerHTML = '';
         const c = (data && data.chords) ? data.chords[measure] : null;
         if (!c || !c.notes || !c.notes.length) return;
-        c.notes.forEach((n) => {                      // notes 已按 MIDI 升序（低 → 高）
-            const d = document.createElement('div');
-            d.className = 'mp-aid__tone';
-            d.textContent = pitchName(n.letter, n.acc);
-            els.mpAidTones.appendChild(d);
+        const midis = (mpAid && mpAid.midis && mpAid.midis.length === c.notes.length)
+            ? mpAid.midis
+            : (c.midis || []);
+        c.notes.forEach((n, i) => {                   // notes 已按 MIDI 升序（低 → 高）
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'mp-aid__tone';
+            b.textContent = pitchName(n.letter, n.acc);
+            b.dataset.midi = String(midis[i]);        // ★ 点它发这个音（不能按音名 —— 两个 C 音高不同）
+            b.setAttribute('aria-label', b.textContent + ' 试听');
+            els.mpAidTones.appendChild(b);
         });
     }
 
@@ -3848,6 +3926,7 @@
         if (els && els.mpAid) els.mpAid.hidden = true;
         const was = mpAid.wasPlaying;
         mpAid = null;
+        mpAidLast = null;
         if (was && chordAudioEl) { try { chordAudioEl.play().catch(() => {}); } catch (e) {} }
         mpSyncPlayIcon();
         mpCancelGesture();            // 解冻 + 收揭示态（mpCancelGesture 开头有 mpAid 兜底，不会递归）
@@ -3857,6 +3936,15 @@
         if (!mpAid) return;
         mpStopAidVoices();
         playInstantChord(mpAid.midis, style).catch(() => {});
+    }
+
+    // 点辅助窗右侧的某个音名 → 只发这一个音高。
+    //   ★ 刻意**不**先 mpStopAidVoices()：用户要的是"可以叠着响，像弹琴"——
+    //     连着点几个音，声音自然叠起来，能听见和弦一点点被堆出来。
+    //   （声源仍登记在 mpAid.sources 里，关窗时一次收干净；playInstantChord 内部有上限剪枝。）
+    function mpPlayAidTone(midi) {
+        if (!mpAid || !isFinite(midi)) return;
+        playInstantChord([midi], 'note').catch(() => {});
     }
 
     // 上报「我听成了哪个级数」。guessed = null 表示"没听出来"。
@@ -4331,6 +4419,19 @@
         _getAidToneLayout: () => (els && els.mpAidTones
             ? getComputedStyle(els.mpAidTones).flexDirection
             : null),
+        // 音名各自绑的 midi（点它发哪个音）—— 用于断言"音高是按 data-midi 认的，不是按音名"
+        _getAidToneMidis: () => (els && els.mpAidTones
+            ? Array.from(els.mpAidTones.children).map((n) => n.dataset.midi)
+            : null),
+        // 辅助窗音频状态：上下文跑没跑起来、这一声排上程没有（"有声"最接近的可断言代理）
+        _getAidAudio: () => ({
+            open: !!mpAid,
+            midis: mpAid ? mpAid.midis.slice() : null,
+            voices: mpAid ? mpAid.sources.length : 0,
+            ctx: (global.ChordHost && global.ChordHost.audioContext)
+                ? global.ChordHost.audioContext.state : null,
+            last: mpAidLast ? Object.assign({}, mpAidLast) : null
+        }),
         // 收起条播放键的外圈进度（方案 B）
         _getRingDashoffset: () => (els && els.mpRingBar ? els.mpRingBar.style.strokeDashoffset : null),
         // 自测用：整段音频的播放位置 / 总时长（证明进度环是"按时间连续"的，而不是按小节跳的）。
