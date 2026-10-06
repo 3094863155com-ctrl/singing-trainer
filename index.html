@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>视唱旋律生成器</title>
+    <title>和弦听辨训练</title>
     <script src="vexflow.js"></script>
 <script src="chord_recognition.js"></script>
     <style>
@@ -60,7 +60,7 @@
             --mp-btn: clamp(48px, 15vw, 64px);
             --mp-gap: 12px;
             --mp-bar-h: 56px;
-            --nav-h: 44px;        /* 顶部常驻导航高度（按钮行高 + 下缘线） */
+            --nav-h: 54px;        /* 顶部常驻导航高度（两个 tab 平分整行 + 下缘线） */
             --mp-safe: max(12px, env(safe-area-inset-bottom, 0px));
         }
 
@@ -169,19 +169,21 @@
             display: none;
         }
 
-        .more-settings > summary::before {
-            content: '▶';
-            font-size: 11px;
-            color: var(--accent);
-            transition: transform 0.3s ease, color 0.25s ease;
-            display: inline-block;
+        /* 展开指示箭头 + 分区图标（原来是 content:'▶' 文本三角 + ⚙️ emoji） */
+        .more-settings > summary .ic {
+            --ic: 15px;
         }
 
-        .more-settings > summary:hover::before {
+        .more-settings > summary .ic-tri {
+            color: var(--accent);
+            transition: transform 0.3s ease, color 0.25s ease;
+        }
+
+        .more-settings > summary:hover .ic-tri {
             color: var(--accent-hover);
         }
 
-        .more-settings[open] > summary::before {
+        .more-settings[open] > summary .ic-tri {
             transform: rotate(90deg);
         }
 
@@ -482,6 +484,54 @@
         }
 
         /* ============================================================
+           线性图标系统（用户 2026-10-06：全站去 emoji，换统一线性图标）
+           ------------------------------------------------------------
+           ★ 为什么不用 emoji：emoji 是"拟物彩色小插画"，和这套克制、扁平、
+             单色的界面语言格格不入；而且各家系统渲染的样子都不一样。
+           ★ 全部图标集中定义在 body 开头那一个隐藏的 icon sprite（svg.ic-sprite），
+             用 symbol 存，页面里只写 svg.ic + use[href="#i-play"] 这样的引用。
+           ★ 只用 24 网格 + 1.7 描边 + 圆头圆角。颜色一律 currentColor，
+             所以按钮 hover / 选中态改 color 就够了，图标自动跟着变。
+           ★ 靠"继承"着色（fill/stroke 是 SVG 继承属性）—— 不要去给 <use>
+             定影子树的子元素写选择器，各家浏览器行为不一致。
+           ============================================================ */
+        .ic-sprite {
+            position: absolute;
+            width: 0;
+            height: 0;
+            overflow: hidden;
+        }
+
+        .ic {
+            flex: 0 0 auto;
+            width: var(--ic, 18px);
+            height: var(--ic, 18px);
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 1.7;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            vertical-align: -0.16em;   /* 和文字放到一条线上时不架空行高 */
+            pointer-events: none;
+        }
+
+        /* 实心组：播放/暂停/停止/下一首这四个"媒体传输"符号。
+           实心几何形是播放器的通例（参考网易云/iOS），和 emoji 不是一回事。 */
+        .ic--solid {
+            fill: currentColor;
+            stroke: none;
+        }
+
+        /* 各处图标的尺寸（父级定 --ic，.ic 读它） */
+        .btn .ic            { --ic: 17px; }
+        .app-tab .ic        { --ic: 17px; }
+        .mp-icon-btn .ic    { --ic: 16px; }
+        .mp-action-btn .ic  { --ic: 16px; }
+        .mp-bar__play .ic   { --ic: 15px; }
+        .mp-play-main .ic   { --ic: 18px; }
+        .key-hint .ic       { --ic: 14px; }
+
+        /* ============================================================
            顶部导航：页面级路由（主页 = 和弦听辨 / 数据库 = 听辨统计）
            ============================================================ */
         /* ------------------------------------------------------------
@@ -500,16 +550,27 @@
             display: flex;
             justify-content: center;
             align-items: stretch;
-            gap: 28px;
-            padding: 0 16px;
+            gap: 0;
+            height: var(--nav-h);
+            /* 两个 tab 平分整行；左右留白跟正文对齐（正文最大 640px 居中） */
+            padding: 0 max(16px, calc((100% - 640px) / 2));
             background: var(--bg-page);
             border-bottom: 1px solid var(--border-strong);
+        }
+
+        /* 两个 tab 各占一半宽度，文字居中 —— 顶部不再局促 */
+        .app-nav .app-tab {
+            flex: 1 1 0;
+            justify-content: center;
+            padding: 0;
         }
 
         .app-tab {
             position: relative;
             display: flex;
             align-items: center;
+            justify-content: center;
+            gap: 7px;
             padding: 0 4px;
             font-size: 15px;
             font-weight: 600;
@@ -534,12 +595,12 @@
             box-shadow: none;
         }
 
-        /* 选中指示条：贴着导航的下缘线，加粗文字 + 短横线，固定感 */
+        /* 选中指示条：贴着导航的下缘线。tab 已平分整行，指示条随之铺满半行 */
         .app-tab.active::after {
             content: '';
             position: absolute;
-            left: 6px;
-            right: 6px;
+            left: 0;
+            right: 0;
             bottom: 0;
             height: 3px;
             border-radius: 3px 3px 0 0;
@@ -708,15 +769,6 @@
             background: var(--surface-hover);
         }
 
-        /* 上滑小横条：暗示「这里能往上展开」 */
-        .mp-bar__grip {
-            flex: 0 0 auto;
-            width: 34px;
-            height: 4px;
-            border-radius: 2px;
-            background: var(--border-strong);
-        }
-
         /* 波形动画：播放时起伏，暂停时静止（替代原来的「第 X / Y 小节」文字） */
         .mp-wave {
             flex: 1 1 auto;
@@ -754,8 +806,13 @@
 
         .mp-bar__chevron {
             flex: 0 0 auto;
-            font-size: 12px;
+            display: flex;
+            align-items: center;
             color: var(--accent);
+        }
+
+        .mp-bar__chevron .ic {
+            --ic: 12px;
         }
 
         .mp-bar__btn {
@@ -831,6 +888,7 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
+            gap: 6px;
             min-width: 48px;
             height: 44px;
             padding: 0 14px;
@@ -886,9 +944,9 @@
         }
 
         /* ------------------------------------------------------------
-           舞台第二页：谱表（卡片 ⇄ 谱表，未长按左右滑切换）
+           舞台第二页：谱表（卡片 ⇄ 谱表，走顶行按钮，不是滑页手势）
            写在上一条之后就是为了覆盖它的 touch-action —— 谱表页要上下
-           滚动，滚动手势得还给浏览器；水平切换仍由 JS 手势处理。
+           滚动，滚动手势得还给浏览器；水平手势（长按后左右滑=上一个/下一个）由 JS 处理。
            ------------------------------------------------------------ */
         .mp-page--sheet {
             position: absolute;
@@ -942,8 +1000,16 @@
                千万别在这里过渡 filter / box-shadow / 宽高。 */
             opacity: 0;
             transform: scale(0.96);
-            transition: opacity 0.12s ease, transform 0.14s cubic-bezier(0.34, 1.4, 0.5, 1);
+            /* 跟手位移走独立属性 translate（与 transform:scale 互不覆盖）。
+               常态是 0px；拖动时由 JS 往舞台写 --mp-drag-x。 */
+            translate: var(--mp-drag-x, 0px) 0;
+            transition: opacity 0.12s ease, transform 0.14s cubic-bezier(0.34, 1.4, 0.5, 1), translate 0.18s ease;
             pointer-events: none;      /* 手势统一由舞台收，canvas 不单独吃事件 */
+        }
+
+        /* 拖动中：关掉 translate 的过渡 → 卡片严格跟手，不拖泥带水 */
+        .mp-sheet__stage.is-dragging .mp-cover {
+            transition: opacity 0.12s ease, transform 0.14s cubic-bezier(0.34, 1.4, 0.5, 1);
         }
 
         /* 遮住态：像素已被 clearRect 抹掉，再叠一层 visibility 双保险。
@@ -1041,6 +1107,10 @@
         }
 
         .mp-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
             min-height: var(--mp-btn);
             padding: 0 12px;
             font-family: inherit;
@@ -1066,6 +1136,9 @@
         }
 
         .mp-play-main {
+            display: flex;
+            align-items: center;
+            justify-content: center;
             min-height: calc(var(--mp-btn) + 10px);
             padding: 0 12px;
             font-family: inherit;
@@ -1377,12 +1450,114 @@
     </style>
 </head>
 <body>
+    <!-- ============================================================
+         图标精灵（用户 2026-10-06：全站去掉 emoji，统一成线性 SVG）
+         ------------------------------------------------------------
+         全部 24 网格、1.7 描边、圆头圆角；颜色一律 currentColor（靠继承）。
+         用法：<svg class="ic"><use href="#i-play"/></svg>
+               实心组加一个类：<svg class="ic ic--solid">…</svg>
+         增删图标只动这里，页面里不会出现第二个定义点。
+         ============================================================ -->
+    <svg class="ic-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+        <!-- ---------- 描边组：界面 / 设置 ---------- -->
+        <symbol id="i-gear" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+        </symbol>
+        <symbol id="i-database" viewBox="0 0 24 24">
+            <ellipse cx="12" cy="5.8" rx="7.2" ry="2.9"/>
+            <path d="M4.8 5.8v12.4c0 1.6 3.22 2.9 7.2 2.9s7.2-1.3 7.2-2.9V5.8"/>
+            <path d="M4.8 12c0 1.6 3.22 2.9 7.2 2.9s7.2-1.3 7.2-2.9"/>
+        </symbol>
+        <symbol id="i-sliders" viewBox="0 0 24 24">
+            <path d="M4 7h16M4 12h16M4 17h16"/>
+            <circle cx="9" cy="7" r="2.1"/>
+            <circle cx="15" cy="12" r="2.1"/>
+            <circle cx="8" cy="17" r="2.1"/>
+        </symbol>
+        <symbol id="i-arpeggio" viewBox="0 0 24 24">
+            <circle cx="5.6" cy="17.8" r="2.1"/>
+            <path d="M7.7 17.8V10.2"/>
+            <circle cx="12" cy="15.2" r="2.1"/>
+            <path d="M14.1 15.2V7.6"/>
+            <circle cx="18.4" cy="12.6" r="2.1"/>
+            <path d="M20.5 12.6V5"/>
+        </symbol>
+        <symbol id="i-note" viewBox="0 0 24 24">
+            <circle cx="9" cy="17.4" r="2.7"/>
+            <path d="M11.7 17.4V4.4c2.6.8 4.8 2.2 4.8 4.6"/>
+        </symbol>
+        <symbol id="i-repeat" viewBox="0 0 24 24">
+            <path d="M4.5 9V8a3 3 0 0 1 3-3h9"/>
+            <path d="M14 2.6 16.9 5l-2.9 2.4"/>
+            <path d="M19.5 15v1a3 3 0 0 1-3 3h-9"/>
+            <path d="M10 16.6 7.1 19l2.9 2.4"/>
+        </symbol>
+        <symbol id="i-staff" viewBox="0 0 24 24">
+            <path d="M3.5 5.5h17M3.5 10.5h17M3.5 15.5h17"/>
+            <circle cx="9.2" cy="15.5" r="2.1"/>
+            <path d="M11.3 15.5V5.2"/>
+        </symbol>
+        <symbol id="i-card" viewBox="0 0 24 24">
+            <rect x="3.5" y="5.5" width="17" height="13" rx="3"/>
+            <path d="M7 15h5.5"/>
+        </symbol>
+        <symbol id="i-bulb" viewBox="0 0 24 24">
+            <path d="M9.2 18h5.6"/>
+            <path d="M10.2 21h3.6"/>
+            <path d="M12 3a6 6 0 0 0-3.6 10.8c.5.4.8 1 .8 1.6v.6h5.6v-.6c0-.6.3-1.2.8-1.6A6 6 0 0 0 12 3z"/>
+        </symbol>
+        <symbol id="i-target" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="8.5"/>
+            <circle cx="12" cy="12" r="4.5"/>
+            <circle cx="12" cy="12" r="1.1"/>
+        </symbol>
+        <symbol id="i-x" viewBox="0 0 24 24">
+            <path d="M6 6l12 12M18 6 6 18"/>
+        </symbol>
+        <symbol id="i-chevron-up" viewBox="0 0 24 24">
+            <path d="M6.4 14.8 12 9.2l5.6 5.6"/>
+        </symbol>
+        <symbol id="i-chevron-down" viewBox="0 0 24 24">
+            <path d="M6.4 9.2 12 14.8l5.6-5.6"/>
+        </symbol>
+        <symbol id="i-chevron-left" viewBox="0 0 24 24">
+            <path d="M14.8 6.4 9.2 12l5.6 5.6"/>
+        </symbol>
+        <symbol id="i-chevron-right" viewBox="0 0 24 24">
+            <path d="M9.2 6.4 14.8 12l-5.6 5.6"/>
+        </symbol>
+
+        <!-- ---------- 播放类：线性版（用在带文字的按钮上，和整排线性图标统一） ---------- -->
+        <symbol id="i-play" viewBox="0 0 24 24">
+            <path d="M6.2 6.5a1.5 1.5 0 0 1 2.24-1.26l9.3 5.46a1.5 1.5 0 0 1 0 2.6l-9.3 5.46A1.5 1.5 0 0 1 6.2 17.5z"/>
+        </symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24">
+            <rect x="6.2" y="6.2" width="11.6" height="11.6" rx="2.8"/>
+        </symbol>
+        <symbol id="i-skip-next" viewBox="0 0 24 24">
+            <path d="M4.7 7.06a1.4 1.4 0 0 1 2.09-1.18l8.4 4.94a1.4 1.4 0 0 1 0 2.36l-8.4 4.94A1.4 1.4 0 0 1 4.7 16.94z"/>
+            <rect x="16.5" y="5.6" width="2.6" height="12.8" rx="1.3"/>
+        </symbol>
+
+        <!-- ---------- 播放类：实心版（只用在"纯符号的播放/暂停键"上） ----------
+             规则：这两个键没有文字、又小，实心一眼可辨（网易云/iOS 的播放键就是这么做的）；
+             其余带文字的按钮一律用上面的线性版，整页风格不劈叉。 -->
+        <symbol id="i-play-solid" viewBox="0 0 24 24">
+            <path d="M6 6.1a1.6 1.6 0 0 1 2.39-1.35l10 5.85a1.6 1.6 0 0 1 0 2.75l-10 5.85A1.6 1.6 0 0 1 6 17.85z"/>
+        </symbol>
+        <symbol id="i-pause-solid" viewBox="0 0 24 24">
+            <rect x="6.4" y="4.8" width="4" height="14.4" rx="1.7"/>
+            <rect x="13.6" y="4.8" width="4" height="14.4" rx="1.7"/>
+        </symbol>
+    </svg>
+
     <div class="container">
         <!-- 顶部页面级路由：主页（和弦听辨）/ 数据库（听辨统计）。
              视唱旋律生成已拆到独立站点，不再出现在这个应用里。 -->
         <nav class="app-nav">
-            <button class="app-tab active" data-root="home">⚙️ 设置</button>
-            <button class="app-tab" data-root="db">📊 数据库</button>
+            <button class="app-tab active" data-root="home"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg>设置</button>
+            <button class="app-tab" data-root="db"><svg class="ic" aria-hidden="true"><use href="#i-database"/></svg>数据库</button>
         </nav>
 
 
@@ -1390,7 +1565,7 @@
         <div id="view-chord">
             <div class="controls">
                 <div class="control-group">
-                    <label>📏 长度：</label>
+                    <label>长度：</label>
                     <select id="chord-length">
                         <option value="8" selected>8 小节</option>
                         <option value="16">16 小节</option>
@@ -1398,7 +1573,7 @@
                 </div>
 
                 <div class="control-group">
-                    <label>🧩 配声模式：</label>
+                    <label>配声模式：</label>
                     <select id="chord-voicing-mode">
                         <option value="triad">三和弦（单行谱 · 3 音）</option>
                         <option value="fourpart" selected>四部和声（大谱表 · 4 音）</option>
@@ -1406,14 +1581,14 @@
                 </div>
 
                 <div class="tempo-control">
-                    <label>⚡ 速度：</label>
+                    <label>速度：</label>
                     <input type="range" id="chord-tempo" min="40" max="120" value="70">
                     <span class="tempo-value" id="chord-tempo-val">70</span>
                     <span style="color: var(--text-tertiary);">BPM</span>
                 </div>
 
                 <div class="tempo-control">
-                    <label>🎹 连奏：</label>
+                    <label>连奏：</label>
                     <input type="range" id="chord-legato" min="35" max="140" value="100">
                     <span class="tempo-value" id="chord-legato-val">1.0</span>
                     <span style="color: var(--text-tertiary); font-size: 12px;">
@@ -1421,14 +1596,14 @@
                     </span>
                 </div>
 
-                <button class="btn btn-primary" id="chord-generate">⏭ 下一首</button>
-                <button class="btn btn-secondary" id="chord-play" disabled>🎧 播放</button>
-                <button class="btn btn-secondary" id="chord-play-arpeggio" disabled>🎶 分解和弦</button>
-                <button class="btn btn-secondary" id="chord-play-bass" disabled>🎵 单音</button>
-                <button class="btn btn-secondary" id="chord-stop">⏹ 停止</button>
+                <button class="btn btn-primary" id="chord-generate"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
+                <button class="btn btn-secondary" id="chord-play" disabled><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>播放</button>
+                <button class="btn btn-secondary" id="chord-play-arpeggio" disabled><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>分解和弦</button>
+                <button class="btn btn-secondary" id="chord-play-bass" disabled><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>单音</button>
+                <button class="btn btn-secondary" id="chord-stop"><svg class="ic" aria-hidden="true"><use href="#i-stop"/></svg>停止</button>
 
                 <div class="control-group">
-                    <label>🔁 自动连播：</label>
+                    <label>自动连播：</label>
                     <input type="checkbox" id="chord-auto-continue" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
                     <span style="color: var(--text-tertiary); font-size: 12px;">
                         一段播完停约 1.5 秒，自动换新的一段接着播（调性重新随机）
@@ -1437,16 +1612,16 @@
             </div>
 
             <details class="more-settings" open>
-                <summary>⚙️ 和弦设置</summary>
+                <summary><svg class="ic ic-tri" aria-hidden="true"><use href="#i-chevron-right"/></svg><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>和弦设置</summary>
                 <div class="more-settings-grid">
                     <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>🎼 参与的级数 / 各级出现七和弦的概率：</label>
+                        <label>参与的级数 / 各级出现七和弦的概率：</label>
                     </div>
 
                     <div class="degree-grid" id="degree-grid"></div>
 
                     <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>🔀 转位：</label>
+                        <label>转位：</label>
                         <input type="checkbox" id="chord-inversion" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
                         <span style="color: var(--text-tertiary); font-size: 12px;">
                             关闭＝全部原位；开启＝有概率转位，并做和弦间平稳连接
@@ -1454,7 +1629,7 @@
                     </div>
 
                     <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>🚫 6₄ 和弦（四六和弦）：</label>
+                        <label>6₄ 和弦（四六和弦）：</label>
                         <input type="checkbox" id="chord-second-inv" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
                         <span style="color: var(--text-tertiary); font-size: 12px;">
                             不勾选＝所有级数都不出现 6₄；勾选＝允许 6₄（需先开启转位）
@@ -1462,7 +1637,7 @@
                     </div>
 
                     <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>📈 使用用户数据优化题库：</label>
+                        <label>使用用户数据优化题库：</label>
                         <input type="checkbox" id="chord-adaptive" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
                         <span style="color: var(--text-tertiary); font-size: 12px;">
                             关闭＝每个级数等概率；开启＝按你的历史错误率调整出题概率（错得多的多出一点，正确率回升就自动降回来）。数据在底部「数据库」页里看
@@ -1481,7 +1656,8 @@
                  底部迷你播放器（手持练习用）：收起是一颗胶囊，点开展成全屏
                  ------------------------------------------------------------
                  逻辑全在 chord_recognition.js 里（它要实时读模块内部状态）。
-                 收起态的按钮只有「下一首」；收起条上**故意不显示罗马数字**，
+                 收起态的按钮是「播放/暂停」+「下一首」两个固定键（不再动态改名）；
+                 收起条上**故意不显示罗马数字**，
                  不然答案直接剧透了。
                  ============================================================ -->
             <div id="chord-mp" class="mp" data-state="collapsed">
@@ -1489,26 +1665,25 @@
                      播放/暂停（小圆键+进度环）与「下一首」。没有动态改名的逻辑。 -->
                 <div class="mp-bar" id="chord-mp-bar">
                     <button class="mp-bar__open" id="chord-mp-expand" aria-label="展开播放器">
-                        <span class="mp-bar__grip" aria-hidden="true"></span>
                         <span class="mp-wave" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
-                        <span class="mp-bar__chevron" aria-hidden="true">▲</span>
+                        <span class="mp-bar__chevron" aria-hidden="true"><svg class="ic"><use href="#i-chevron-up"/></svg></span>
                     </button>
-                    <button class="mp-bar__play" id="chord-mp-playpause-min" aria-label="播放或暂停">▶</button>
-                    <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min">⏭ 下一首</button>
+                    <button class="mp-bar__play" id="chord-mp-playpause-min" aria-label="播放或暂停"><svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg></button>
+                    <button class="btn btn-primary mp-bar__btn" id="chord-mp-generate-min"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
                 </div>
 
                 <!-- 展开态：全屏面板 -->
                 <div class="mp-sheet" id="chord-mp-sheet" role="dialog" aria-modal="true" aria-label="练习播放器">
                     <div class="mp-sheet__top">
-                        <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器">▼ 收起</button>
+                        <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器"><svg class="ic" aria-hidden="true"><use href="#i-chevron-down"/></svg>收起</button>
                         <!-- 卡片⇄谱表 切换键（占原来中央播放键的位置；播放键已挪到底部） -->
-                        <button class="mp-icon-btn" id="chord-mp-sheet-toggle" aria-label="切换卡片与谱表">🎼 谱表</button>
+                        <button class="mp-icon-btn" id="chord-mp-sheet-toggle" aria-label="切换卡片与谱表"><svg class="ic" aria-hidden="true"><use href="#i-staff"/></svg>谱表</button>
                         <!-- 错题练习开关：关=点进入（重新生成覆盖当前），开=点退出（同样重新生成） -->
-                        <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="错题练习开关">错题练习</button>
+                        <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="错题练习开关"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg>错题练习</button>
                     </div>
 
                     <!-- 长按热区：整个舞台。按住=揭示答案；按住下滑=报错；按住上滑=听辩辅助；
-                         按住左滑=上一个和弦。卡片⇄谱表切换走顶行中央的按钮（滑页手势已废）。
+                         按住左/右滑=上一个/下一个和弦（可连滑）。卡片⇄谱表切换走顶行中央的按钮。
                          手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
                     <div class="mp-sheet__stage" id="chord-mp-stage">
                         <canvas class="mp-cover" id="chord-mp-cover"></canvas>
@@ -1519,20 +1694,20 @@
                                 <div id="chord-sheet-music"></div>
                             </div>
                             <div class="key-hint" id="chord-key-hint"></div>
-                            <div class="key-hint" style="margin-top:4px;">💡 点击谱面上的任意小节，可从该小节开始播放</div>
+                            <div class="key-hint" style="margin-top:4px;"><svg class="ic" aria-hidden="true"><use href="#i-bulb"/></svg> 点击谱面上的任意小节，可从该小节开始播放</div>
                         </div>
                     </div>
 
-                    <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住左滑上一个</div>
+                    <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表</div>
 
                     <div class="mp-sheet__actions">
-                        <button class="mp-action-btn" id="chord-mp-prev">◀ 上一个</button>
-                        <button class="mp-action-btn" id="chord-mp-next">下一个 ▶</button>
+                        <button class="mp-action-btn" id="chord-mp-prev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg>上一个</button>
+                        <button class="mp-action-btn" id="chord-mp-next">下一个<svg class="ic" aria-hidden="true"><use href="#i-chevron-right"/></svg></button>
                     </div>
 
                     <div class="mp-sheet__footer">
-                        <button class="mp-play-main" id="chord-mp-playpause" aria-label="播放或暂停">▶</button>
-                        <button class="btn btn-primary mp-generate" id="chord-mp-generate">⏭ 下一首</button>
+                        <button class="mp-play-main" id="chord-mp-playpause" aria-label="播放或暂停"><svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg></button>
+                        <button class="btn btn-primary mp-generate" id="chord-mp-generate"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
                     </div>
                 </div>
             </div>
@@ -1599,7 +1774,7 @@
             <div class="db-card">
                 <div class="db-card__title">错题练习<span class="db-card__sub">把常错的组合用 Ⅰ 级和弦串起来连着练 · 不计入统计 · 无报错键</span></div>
                 <div id="db-practice-status" class="db-empty"></div>
-                <button class="btn btn-primary" id="db-practice" style="width:100%;margin-top:10px;" disabled>🎯 开始错题练习</button>
+                <button class="btn btn-primary" id="db-practice" style="width:100%;margin-top:10px;" disabled><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg>开始错题练习</button>
             </div>
 
             <div class="db-foot">

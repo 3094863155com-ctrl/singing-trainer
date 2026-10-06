@@ -1051,7 +1051,8 @@
         // 大谱表要竖着放两个五线谱，行高约为单行谱的 1.7 倍
         const lineHeight = fourPart ? 260 : 150;
         const topPad = 50;
-        const lastRowHeight = fourPart ? 220 : 130;
+        // 高亮带整行高 = lineHeight，最后一行需容下 bandTop + lineHeight（238 / 132），留 2px 余量
+        const lastRowHeight = fourPart ? 240 : 136;
         const GRAND_GAP = 90;                       // 高音谱表 y → 低音谱表 y
         const CLEF_KEY_WIDTH = fourPart ? 85 : 80;
 
@@ -1317,9 +1318,10 @@
             measureRects = [];
             const hitSvg = container.querySelector('svg');
             if (hitSvg) {
-                // 带高 = 覆盖该行谱表 + 罗马数字标注；约束 < lineHeight 以免相邻行重叠
+                // 带高 = 整整一行（= lineHeight）：上一行带底 = 下一行带顶，相邻行严丝合缝，
+                // 与每小节外面的黑色细框底边对齐；判定区就是这个 rect 本身，自动同步。
                 const bandTop = fourPart ? -22 : -18;
-                const bandH = fourPart ? 200 : 116;
+                const bandH = lineHeight;
                 for (let m = 0; m < totalMeasures; m++) {
                     const r = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
                     r.setAttribute('x', String(geom[m].x));
@@ -1995,7 +1997,7 @@
     let mpReports = [];           // 报错明细（内存，上限 MP_REPORTS_MAX；聚合统计另有持久化）
     let mpErrorCtx = null;        // 报错浮窗那一刻的快照，防作答时小节已漂移
     // 「换一段」之后要不要顺手接着播？迷你播放器的定位是连续刷题 → 默认接着播。
-    // 想让它跟页面上那颗「🎲 换一段」一样"只生成不播"，把这个常量改成 false 即可。
+    // 想让它跟页面上那颗「下一首」一样"只生成不播"，把这个常量改成 false 即可。
     const MP_AUTOPLAY_AFTER_GENERATE = true;
 
     // ---- 长按手势的旋钮（手感全靠这几个数）----
@@ -2004,6 +2006,7 @@
     const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要报错"
     const MP_UP_PX = 56;          // 按住之后往上滑多少算"要听辩辅助"（与下滑对称）
     const MP_LEFT_PX = 48;        // 按住之后往左滑多少算"回上一个和弦"（可连滑多次）
+    const MP_RIGHT_PX = 48;       // 按住之后往右滑多少算"进下一个和弦"（与左滑对称，可连滑）
     const MP_REPORTS_MAX = 500;   // 内存里留存的明细上限
 
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
@@ -2250,7 +2253,7 @@
         if (!settings.autoContinue) return;
         cancelAutoNext();                        // 清掉可能残留的上一次接力（同时抬高代数）
         const brk = autoBreak;
-        showAutoInfo('🔁 自动连播：马上换新的一段…');
+        showAutoInfo('自动连播：马上换新的一段…', 'i-repeat');
         autoTimer = setTimeout(() => {
             autoTimer = null;
             if (brk !== autoBreak) return;
@@ -2275,10 +2278,11 @@
         await doPlay(mode, 0, true);
     }
 
-    function showAutoInfo(text) {
+    function showAutoInfo(text, iconId) {
         if (!els.renderInfo) return;
         els.renderInfo.style.display = 'block';
-        els.renderInfo.textContent = text;
+        if (iconId) els.renderInfo.innerHTML = iconSvg(iconId) + text;
+        else els.renderInfo.textContent = text;
     }
 
     function bindAudioProgress() {
@@ -3094,8 +3098,12 @@
             els.mpSheetPage.hidden = (v !== 'sheet');
             if (v === 'sheet') requestAnimationFrame(fitSheetPage);
         }
-        // 切换键文案 = 点下去会去的那一页
-        if (els && els.mpSheetToggle) els.mpSheetToggle.textContent = (v === 'sheet') ? '🎵 卡片' : '🎼 谱表';
+        // 切换键文案 = 点下去会去的那一页（图标 + 文字一起换）
+        if (els && els.mpSheetToggle) {
+            els.mpSheetToggle.innerHTML = (v === 'sheet')
+                ? iconSvg('i-card') + '卡片'
+                : iconSvg('i-staff') + '谱表';
+        }
         // 切回卡片页时，若之前是揭示态，封面已在 canvas 里，无需重画
     }
 
@@ -3278,6 +3286,7 @@
         if (els && els.mpStage) {
             els.mpStage.classList.remove('is-pressing', 'is-revealed');
         }
+        mpClearDragOffset();          // 跟手位移归零（有过渡 → 卡片自己弹回原位）
         mpSetRevealed(false);
         mpUnfreeze();
     }
@@ -3302,6 +3311,65 @@
         if (next === cur) return;          // 已经在第一小节
         mpFreezeAt(next);
         mpSetRevealed(true);
+        mpNudge('left');
+        doPlay(lastPlayMode, next);
+    }
+
+    // ---- 卡片对水平滑动的手感反馈：跟手位移 + 每格轻推 ----
+    //   风格要求：克制。所以位移比例只有 0.15、上限 14px，轻推只 ±6px / 0.17s。
+    const MP_DRAG_RATIO = 0.15;   // 手指走 1px，卡片走 0.15px
+    const MP_DRAG_MAX = 14;       // 跟手位移上限（px）
+    const MP_NUDGE_PX = 6;        // 每切一格的轻推幅度（px）
+
+    // 跟手位移走 CSS 独立属性 translate（与 transform:scale 互不覆盖），
+    //   写到舞台的 --mp-drag-x 上，.mp-cover 引用它。
+    function mpSetDragOffset(dx) {
+        const stage = els && els.mpStage;
+        if (!stage) return;
+        let v = dx * MP_DRAG_RATIO;
+        if (v > MP_DRAG_MAX) v = MP_DRAG_MAX;
+        else if (v < -MP_DRAG_MAX) v = -MP_DRAG_MAX;
+        stage.classList.add('is-dragging');       // 拖动期间关掉 translate 的过渡 → 跟手
+        stage.style.setProperty('--mp-drag-x', v.toFixed(1) + 'px');
+    }
+
+    function mpClearDragOffset() {
+        const stage = els && els.mpStage;
+        if (!stage) return;
+        stage.classList.remove('is-dragging');    // 松手后恢复过渡 → 自动弹回
+        stage.style.removeProperty('--mp-drag-x');
+    }
+
+    // 每切一格轻推一下（'left' 往左、'right' 往右）。
+    //   用 Web Animations 而不是切 class：连滑时能可靠地"每一步重放"，且不需要强制重排。
+    let mpNudgeAnim = null;
+    function mpNudge(dir) {
+        const cover = els && els.mpCover;
+        if (!cover || typeof cover.animate !== 'function') return;
+        if (mpNudgeAnim) { try { mpNudgeAnim.cancel(); } catch (e) {} mpNudgeAnim = null; }
+        const dx = (dir === 'right') ? MP_NUDGE_PX : -MP_NUDGE_PX;
+        // 只动 transform（不动 translate），所以跟手位移不会被覆盖掉
+        mpNudgeAnim = cover.animate(
+            [
+                { transform: 'scale(1) translateX(0px)' },
+                { transform: 'scale(1) translateX(' + dx + 'px)' },
+                { transform: 'scale(1) translateX(0px)' }
+            ],
+            { duration: 170, easing: 'ease-out' }
+        );
+        mpNudgeAnim.onfinish = () => { mpNudgeAnim = null; };
+    }
+
+    // 按住右滑：进到下一个和弦（与左滑对称，可连滑；到最后一个就停住不动）
+    function mpStepForwardWhileHolding() {
+        if (!data || !data.chords.length) return;
+        const last = data.chords.length - 1;
+        const cur = mpFreeze ? mpFreeze.measure : mpMeasure;
+        const next = Math.min(last, cur + 1);
+        if (next === cur) return;          // 已经在最后一小节
+        mpFreezeAt(next);
+        mpSetRevealed(true);
+        mpNudge('right');
         doPlay(lastPlayMode, next);
     }
 
@@ -3320,7 +3388,8 @@
                 pointerId: e.pointerId,
                 x0: e.clientX,
                 y0: e.clientY,
-                anchorX: e.clientX,
+                anchorX: e.clientX,        // 左滑台阶锚点（每次 -MP_LEFT_PX）
+                anchorRightX: e.clientX,   // 右滑台阶锚点（每次 +MP_RIGHT_PX）
                 phase: 'pending',
                 axis: null,
                 viewOnly: mpStageView === 'sheet',   // 谱表页：没有长按揭示（点击小节跳转另有处理）
@@ -3355,12 +3424,20 @@
             }
             if (g.phase !== 'armed') return;
 
+            // 跟手位移：横向主导时卡片随手指小幅平移（纵向手势不动卡片）。
+            //   轴一旦锁定就按轴走，避免斜滑时来回抖。
+            const horizontal = g.axis
+                ? (g.axis === 'left' || g.axis === 'right')
+                : (Math.abs(dx) > Math.abs(dy));
+            if (horizontal) mpSetDragOffset(dx); else mpClearDragOffset();
+
             // 先定轴：斜滑按主导轴，绝不双触发；轴一旦锁定，另一方向就不再触发。
-            //   错题练习不设报错 → 不认"下滑"这个轴（上滑辅助/左滑回退照常）。
+            //   错题练习不设报错 → 不认"下滑"这个轴（上滑辅助/左右滑平移照常）。
             if (!g.axis) {
                 if (!practiceMode && dy > MP_DOWN_PX && dy > Math.abs(dx) * 1.2) g.axis = 'down';
                 else if (dy < -MP_UP_PX && Math.abs(dy) > Math.abs(dx) * 1.2) g.axis = 'up';
                 else if (dx < -MP_LEFT_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'left';
+                else if (dx > MP_RIGHT_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'right';
             }
 
             if (g.axis === 'down') {
@@ -3389,6 +3466,16 @@
                     guard++;
                 }
             }
+
+            if (g.axis === 'right') {
+                // 每再右滑一格就进一个小节（re-arm）；已经在最后一小节就只重置锚点、不动作
+                let guard = 0;
+                while (e.clientX - g.anchorRightX >= MP_RIGHT_PX && guard < 20) {
+                    g.anchorRightX += MP_RIGHT_PX;
+                    mpStepForwardWhileHolding();
+                    guard++;
+                }
+            }
         });
 
         const finish = (e) => {
@@ -3407,16 +3494,27 @@
         stage.addEventListener('lostpointercapture', finish);
     }
 
+    // ============================================================
+    // 图标（用户 2026-10-06：全站去 emoji，统一线性 SVG）
+    //   —— 图标本体全部定义在 index.html 顶部那个隐藏的 <svg class="ic-sprite"> 里，
+    //      这里只负责拼出引用片段。同文档 <use href="#id"> 引用，file:// 打开也能用。
+    //   —— 只有"纯符号的播放/暂停键"用实心版（solid=true），其余一律线性。
+    // ============================================================
+    function iconSvg(id, solid) {
+        return '<svg class="ic' + (solid ? ' ic--solid' : '') + '" aria-hidden="true"><use href="#' + id + '"/></svg>';
+    }
+
     function mpSyncPlayIcon() {
         if (!els) return;
         const playing = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
-        const sym = playing ? '⏸' : '▶';   // 纯符号（像网易云）——键小，不放文字
+        // 纯符号播放键（无文字、键又小）→ 实心，一眼可辨
+        const icon = iconSvg(playing ? 'i-pause-solid' : 'i-play-solid', true);
         if (els.mpPlayPause) {
-            els.mpPlayPause.textContent = sym;
+            els.mpPlayPause.innerHTML = icon;
             els.mpPlayPause.classList.toggle('is-playing', playing);
         }
         if (els.mpPlayPauseMin) {
-            els.mpPlayPauseMin.textContent = sym;
+            els.mpPlayPauseMin.innerHTML = icon;
             els.mpPlayPauseMin.classList.toggle('is-playing', playing);
         }
         // 收起条波形动画的开关
@@ -3624,15 +3722,16 @@
     // 错题练习模式（复用迷你播放器，正确率不计入数据库，不设报错）
     // ============================================================
 
-    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左滑上一个 · 顶行按钮切换谱表';
-    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住上滑辅助 · 按住左滑上一个 · 顶行按钮切换谱表（不计统计 · 无报错）';
+    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表';
+    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表（不计统计 · 无报错）';
 
     // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 提示文案 / 收起条前缀 / 退出按钮
     function applyPracticeUi(on) {
         // 错题练习开关：恒显，靠 is-on 高亮 + 文案区分开/关
         if (els && els.mpExitPractice) {
             els.mpExitPractice.hidden = false;
-            els.mpExitPractice.textContent = on ? '✕ 退出错题' : '错题练习';
+            els.mpExitPractice.innerHTML = (on ? iconSvg('i-x') : iconSvg('i-target'))
+                + (on ? '退出错题' : '错题练习');
             els.mpExitPractice.classList.toggle('is-on', !!on);
         }
         if (els && els.dbPractice) els.dbPractice.disabled = !!on;   // 错题中禁用数据库页入口（已在错题里）
