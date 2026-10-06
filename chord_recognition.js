@@ -80,7 +80,14 @@
         // 「使用用户数据优化题库」：按历史错误率给级数加权出题。
         //   默认 false —— 关着的时候出题路径与以前**逐字节一致**（回归脚本靠这条）。
         //   打开后错得多的级数出现概率更高，正确率回升就自动降回基线。见 degreeWeight()。
-        adaptiveFromStats: false
+        adaptiveFromStats: false,
+        // 按住卡片时显示什么（用户 2026-10-06 拍板，两档切换）：
+        //   'roman' = 现状：罗马数字和弦标记（含转位数字）+ 和弦音名 + 调性底行 + 左上角第几小节
+        //   'bass'  = 只给「这个和弦的低音在调内的简谱级数」+ 左上角第几小节，底色换中性灰
+        //  ★ 这个开关**只影响页面迷你播放器里那张 canvas**（按住卡片看到的那张）。
+        //    锁屏 / 控制中心 / 灵动岛的封面走 coverBlobUrl → drawCover(不带 opts)，
+        //    恒为 'roman'，不受这里影响（用户明确要求）。
+        revealMode: 'roman'
     };
 
     // ------------------------------------------------------------
@@ -1606,10 +1613,12 @@
     }
 
     // 现场起 BufferSource 播一小撮音（不走离线渲染），供听辩辅助窗用。
-    //   style 'arp'   上行分解琶音：三和弦 [低,中,高,低+12]（与分解模式同构）、四音原序，
-    //                 每音间隔 0.325s（4 音 ≈ 1.3 秒）
+    //   style 'arp'   上行「和弦分解」：**如实按和弦里的音个数**、原序（低 → 高）——
+    //                 三和弦 3 个音、七和弦 4 个音，**不再把低音翻高八度重复一遍**
+    //                 （用户 2026-10-06：三和弦模式下不需要重复低音），每音间隔 0.325s。
+    //                 ★ 只改这里；主播放的「分解和弦」排程（buildChordSchedule）保持原样。
     //   style 'block' 柱式：全音同时、只弹一下
-    //   style 'note'  单音（点辅助窗右侧的音名试听）：包络同柱式，只响一个音
+    //   style 'note'  单音（点辅助窗右侧的简谱数字试听）：包络同柱式，只响一个音
     //   音源全部登记进 mpAid.sources，关窗/重放前可随时 stop()。采样缺失只 warn 不抛。
     //
     //   ★ 解锁必须"同步"发生（2026-10-06 修「上滑与窗里按钮都没声」）：
@@ -1625,16 +1634,16 @@
     async function playInstantChord(midis, style) {
         const host = global.ChordHost;
         if (!host) return { ok: false, reason: 'no-host', scheduled: 0 };
-        if (!host.audioContext) { try { host.initAudio(); } catch (e) {} }   // 不 await（保住手势）
+        // 同步解锁（绝不 await）：initAudio + resume 都在用户手势的同步栈里跑。
+        //   走 unlockAudioNow 是为了复用「宿主有自愈版就用自愈版」这条逻辑。
+        unlockAudioNow();
         const ctx = host.audioContext;
         if (!ctx) return { ok: false, reason: 'no-ctx', scheduled: 0 };
-        if (ctx.state !== 'running') { try { ctx.resume(); } catch (e) {} }   // 不 await（保住手势）
 
         const isBlock = (style === 'block' || style === 'note');
-        const pattern = isBlock
-            ? null
-            : (midis.length === 3 ? [midis[0], midis[1], midis[2], midis[0] + 12] : midis.slice());
-        const GAP = 0.325;                 // 琶音每音间隔
+        // 和弦分解 = 原序播放和弦里的每个音，有几个响几个（三和弦 3 个、七和弦 4 个）。
+        const pattern = isBlock ? null : midis.slice();
+        const GAP = 0.325;                 // 和弦分解每音间隔
         const notes = isBlock
             ? midis.map((m) => ({ midi: m, at: 0, hold: Math.min(0.8, 60 / settings.tempo), gain: 0.45 }))
             : pattern.map((m, i) => ({ midi: m, at: i * GAP, hold: 0.3, gain: 0.5 }));
@@ -1681,13 +1690,20 @@
     //   在那里调 resume() 会被 iOS 拒绝。长按上滑的开头必有一个 pointerdown —— 在那一刻
     //   就把上下文唤醒，等 160ms 后手指滑上去时它已经是 running，直接排程就出声。
     //   initAudio()/resume() 都是同步完成幂等的，重复调用无副作用。
+    //   ★ 第十六轮追加：如果宿主提供了 ensureAudioLive（自愈版），优先用它 ——
+    //     它在 resume 之后还会异步复核，实在起不来就原地重建上下文（切后台回来没声的解法）。
     function unlockAudioNow() {
         const host = global.ChordHost;
         if (!host) return;
         try {
+            if (typeof host.ensureAudioLive === 'function') { host.ensureAudioLive(); return; }
             if (!host.audioContext) host.initAudio();
             const ctx = host.audioContext;
-            if (ctx && ctx.state !== 'running') ctx.resume();
+            // ★ resume() 返回 Promise，失败时**必须** catch —— 否则会产生未捕获 rejection
+            //   （验收里有"无未捕获异常"这一条，也会污染控制台）。
+            if (ctx && ctx.state !== 'running') {
+                try { ctx.resume().catch(() => {}); } catch (e) {}
+            }
         } catch (e) {}
     }
 
@@ -1713,6 +1729,8 @@
         if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
         if (typeof s.portable === 'boolean') settings.portable = s.portable;
         if (typeof s.adaptiveFromStats === 'boolean') settings.adaptiveFromStats = s.adaptiveFromStats;
+        // ★ 白名单登记：枚举值一定要显式收，否则 localStorage 里存着也会被悄悄丢掉。
+        if (s.revealMode === 'roman' || s.revealMode === 'bass') settings.revealMode = s.revealMode;
         // 连奏已固定 1.0（用户 2026-10-06 拍板，滑块已删）：localStorage 里的旧值一律忽略
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
@@ -2080,6 +2098,9 @@
     //   暂停后依然保留（页面上那条高亮会被清掉，但面板还停在原处，方便作答）。
     let mpMeasure = 0;            // 面板当前**显示**的小节（冻结时停在冻结点）
     let mpLiveMeasure = 0;        // 实时小节：永远跟随播放（冻结期间照常更新）
+    // ★ 第十六轮：暂停态用「上一个 / 下一个」切过和弦之后，下次按播放键要**从这个新小节起播**。
+    //   记的就是"待重定位到的小节"，-1 = 没有待重定位（正常原地续播）。
+    let mpPauseJumpTo = -1;
     let mpExpanded = false;       // 展开中？
     let mpRevealing = false;      // 是否处于"按住揭示"（默认遮住，按住才显示）
     let mpFreeze = null;          // 长按那一刻的冻结快照（null = 未冻结）
@@ -2116,6 +2137,8 @@
             voicingMode: document.getElementById('chord-voicing-mode'),
             // 播放方式改成了连体椭圆滑块（原 generate / play / playArp / playBass / stop 五个键已删）
             playSeg: document.getElementById('chord-play-seg'),
+            // 按住卡片显示什么：两档连体椭圆滑块（roman / bass）
+            revealSeg: document.getElementById('chord-reveal-seg'),
             // 两颗椭圆开关（都是 button[role=switch]，不是 checkbox —— 用户 2026-10-06 拍板）
             autoContinue: document.getElementById('chord-auto-continue'),
             portable: document.getElementById('chord-portable'),
@@ -2289,6 +2312,9 @@
     // ------------------------------------------------------------
     function updateProgress(force) {
         if (!data || !chordAudioEl) return;
+        // ★ 第十六轮：暂停态用「上一个/下一个」手动切过和弦 → 面板位置由用户说了算，
+        //   别让这条按 currentTime 的回调把显示拉回暂停点（那会让"切过去又自己跳回来"）。
+        if (mpPauseJumpTo >= 0 && !mpIsPlaying()) return;
         const dur = measureDuration();
         const last = data.chords.length - 1;
         // 页面高亮：精确跟随（不提前）
@@ -2494,6 +2520,11 @@
     const ART_SERIF = '"Songti SC", "STSong", "Times New Roman", Georgia, serif';
     const ART_SANS = '-apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", Arial, sans-serif';
 
+    // 「按住卡片只显示低音级数」那一档专用底色：**故意不放进 ART_PALETTE**。
+    //   ART_PALETTE[6]（Ⅶ）是冷蓝灰 #f7f9fc→#e3e9f1，跟灰阶太接近 —— 若不换成真中性灰，
+    //   遮住之后光看底色就能猜出"这不是 Ⅶ 就是没级数"，等于没遮干净。这里是去色相的中性灰。
+    const COVER_NEUTRAL = { top: '#f4f4f5', bottom: '#e2e4e9', ink: '#3f4854' };
+
     let artCache = [];     // 小节索引 -> MediaMetadata.artwork 数组
     let artUrls = [];      // 已生成的全部 blob URL（换一段时统一回收）
     let artImages = [];    // 已"读进内存并解码"的图。钉住引用，保证系统取图时命中暖缓存
@@ -2559,13 +2590,45 @@
     }
 
     // 画一张方形封面。compact = true 时只留级数基号（96px 的缩略图上别的都是糊的）。
-    function drawCover(g, size, info, compact) {
-        const pal = ART_PALETTE[(info.degree - 1) % ART_PALETTE.length];
+    //
+    //   opts（可选，**不传 = 与以前逐字节一致**）：
+    //     { bassOnly: true } = 设置页「按住卡片显示的内容 → 低音级数」那一档：
+    //        底色换中性灰，只画大号简谱数字 + 左上角"第几小节"；
+    //        罗马数字（含转位）、和弦音名、调性底行**全跳过**。
+    //   ★ 锁屏封面走 coverBlobUrl → drawCover(不带 opts)，所以恒为罗马数字那档。
+    function drawCover(g, size, info, compact, opts) {
+        const bassOnly = !!(opts && opts.bassOnly);
+        const pal = bassOnly ? COVER_NEUTRAL : ART_PALETTE[(info.degree - 1) % ART_PALETTE.length];
         const grad = g.createLinearGradient(0, 0, 0, size);
         grad.addColorStop(0, pal.top);
         grad.addColorStop(1, pal.bottom);
         g.fillStyle = grad;
         g.fillRect(0, 0, size, size);
+
+        // ---------------- 低音级数档 ----------------
+        if (bassOnly) {
+            const txt = (info.bassDegree == null || info.bassDegree === '') ? '?' : String(info.bassDegree);
+            const maxW = size * 0.66;
+            let bfs = size * 0.62;
+            while (bfs > size * 0.16) {
+                g.font = '700 ' + bfs + 'px ' + ART_SERIF;
+                if (g.measureText(txt).width <= maxW) break;
+                bfs -= size * 0.02;
+            }
+            g.textAlign = 'center';
+            g.textBaseline = 'middle';
+            g.fillStyle = COVER_NEUTRAL.ink;
+            g.font = '700 ' + bfs + 'px ' + ART_SERIF;
+            g.fillText(txt, size / 2, size * 0.5);
+
+            // 左上角：听到第几小节了（位置 / 字号与原档完全一致，两档切换时它不跳）
+            g.textAlign = 'left';
+            g.globalAlpha = 0.85;
+            g.font = '600 ' + (size * 0.06) + 'px ' + ART_SANS;
+            g.fillText(info.pos, size * 0.065, size * 0.088);
+            g.globalAlpha = 1;
+            return;
+        }
 
         // 中央罗马数字：基号大字，转位数字排在基号右侧的右上 / 右下角
         const parts = compact ? { base: info.base, sup: '', sub: '' } : info.parts;
@@ -2688,6 +2751,12 @@
         if (!data || m < 0 || m >= data.chords.length) return null;
         const c = data.chords[m];
         const parts = romanParts(c.degree, c.seventh, c.inversion);
+        // 「按住卡片只显示低音级数」那一档要用：这个和弦**低音**在调内的简谱数字。
+        //   低音 = midis[0]（转位时就是那个转位音）。和弦音全来自调内音级 → 一定能在
+        //   data.scale 里查到；真查不到（理论上不会）退回音名兜底，别把 'undefined' 画上屏。
+        const bassPc = ((c.midis && c.midis.length ? c.midis[0] : 0) % 12 + 12) % 12;
+        const bassScale = (data.scale || []).find((s) => s.pc === bassPc);
+        const bassNote = (c.notes && c.notes.length) ? c.notes[0] : null;
         return {
             degree: c.degree,
             roman: c.roman,
@@ -2695,7 +2764,10 @@
             parts: parts,
             tones: c.notes.map((n) => pitchName(n.letter, n.acc)).join('  '),
             footer: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
-            pos: (m + 1) + ' / ' + data.chords.length
+            pos: (m + 1) + ' / ' + data.chords.length,
+            // 低音在调内的级数（简谱数字，字符串；查不到时是音名）
+            bassDegree: bassScale ? String(bassScale.degree)
+                : (bassNote ? pitchName(bassNote.letter, bassNote.acc) : '?')
         };
     }
 
@@ -2752,14 +2824,22 @@
     }
 
     // 锁屏的「上一首 / 下一首」对和弦页 = 上一小节 / 下一小节（点小节跳转的自然延伸）
+    //   ★ 第十六轮：锁屏这两个键也是"前进/后退键"，所以暂停态下与页面按钮同一规则 ——
+    //     只切 + 试听，不接着播。基准也统一成 mpMeasure（在播时才用 currentTime）。
     const chordMediaHooks = {
         skip: (dir) => {
             if (!data || !chordAudioEl) return false;
             mpCancelGesture();              // 显式导航 = 手势结束（含解冻）
-            const cur = Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()));
+            const playing = mpIsPlaying();
+            const cur = playing
+                ? Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()))
+                : mpMeasure;
             const next = Math.min(data.chords.length - 1, Math.max(0, cur + dir));
             if (next === cur) return true;      // 已在头/尾，照样吃掉这次点击
-            doPlay(lastPlayMode, next);
+            if (playing) { doPlay(lastPlayMode, next); return true; }
+            mpShowMeasureOnly(next);
+            mpPauseJumpTo = next;
+            mpPreviewChord(next);
             return true;
         }
     };
@@ -2800,6 +2880,30 @@
         requestAnimationFrame(place);
     }
 
+    // 把滑块挪到「按住卡片显示的内容」那一项上（roman / bass）。
+    //   与 updateSegActive 同款：两遍量几何，首帧 display 刚切出来时 offsetWidth 还不稳。
+    function updateRevealSeg() {
+        if (!els || !els.revealSeg) return;
+        const opts = els.revealSeg.querySelectorAll('.seg__opt');
+        if (!opts.length) return;
+        const cur = (settings.revealMode === 'bass') ? 'bass' : 'roman';
+        let active = null;
+        for (let i = 0; i < opts.length; i++) {
+            const on = (opts[i].dataset.reveal === cur);
+            opts[i].classList.toggle('active', on);
+            opts[i].setAttribute('aria-checked', on ? 'true' : 'false');
+            if (on) active = opts[i];
+        }
+        const thumb = els.revealSeg.querySelector('.seg__thumb');
+        if (!active || !thumb) return;
+        const place = () => {
+            thumb.style.left = active.offsetLeft + 'px';
+            thumb.style.width = active.offsetWidth + 'px';
+        };
+        place();
+        requestAnimationFrame(place);
+    }
+
     function updateHint() {
         if (!els.hint || !data) return;
         if (practiceMode) {
@@ -2817,6 +2921,7 @@
 
     async function doGenerate(auto) {
         stopChordPlayback();
+        mpPauseJumpTo = -1;             // 换了新的一段 → "暂停态切过和弦"的待重定位作废
         // 错题练习：出题换成"错误组合 + Ⅰ 胶水"的固定序列（每次进入重洗一次顺序）
         data = practiceMode ? practiceProgression() : generateChordProgression(settings);
         renderChordSheet(data);
@@ -2862,6 +2967,7 @@
     async function doPlay(mode, fromMeasure, auto) {
         mode = mode || lastPlayMode || 'block';
         fromMeasure = fromMeasure || 0;
+        mpPauseJumpTo = -1;             // 真开始播了 → 待重定位消费掉（避免下次按播放又跳一次）
         if (!data || !data.chords.length || isRendering) return;
         if (!auto) cancelAutoNext();   // 用户手动播放 / 点小节 → 作废在途的自动接力
         const host = global.ChordHost;
@@ -3061,6 +3167,21 @@
             updateSegActive();
         }
 
+        // 按住卡片显示什么（连体椭圆滑块，两档）：只改"画什么"，
+        //   ★ 不重放声音、不作废已渲染的音频（用户在听的时候切换不该被打断）。
+        //   按住卡片时如果面板正开着 → 立刻按新档重画一次，所见即所得。
+        if (els.revealSeg) {
+            els.revealSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.reveal) return;
+                settings.revealMode = (opt.dataset.reveal === 'bass') ? 'bass' : 'roman';
+                saveSettings();
+                updateRevealSeg();
+                if (mpExpanded) mpPaintCover();
+            });
+            updateRevealSeg();
+        }
+
         // 🔁 连续播放（原「自动连播」，界面 2026-10-06 改名）：一段播完 → 停一下 → 自动换新的一段接着播
         //   ★ 现在是 button[role=switch]，必须用 click 切 aria-checked ——
         //     对 button 来说 'change' 事件根本不会触发（那是 input 的），
@@ -3135,17 +3256,35 @@
             }, { capture: true });
         }
 
-        // 听辨辅助窗：琶音 / 柱式（切换即试听一遍）/ 点右侧音名试听 / 点窗外关闭并恢复播放
+        // 听辨辅助窗：和弦分解 / 柱式（点一下即试听一遍）/ 点右侧数字试听 / 点窗外关闭并恢复播放
         if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
         if (els.mpAidArp) els.mpAidArp.addEventListener('click', () => mpReplayAid('arp'));
-        // 音名列做事件委托（内容是每次开窗重画的，不能逐个挂）。
-        //   ★ 按 data-midi 认音，不按音名 —— "C G C E" 里两个 C 是不同音高。
+        // 数字列做事件委托（内容是每次开窗重画的，不能逐个挂）。
+        //   ★ 按 data-midi 认音，不按数字 —— 两个 1 是不同音高。
+        //   ★ 第十六轮：**从 click 改成 pointerdown**。三个理由：
+        //     ① 用户反馈"快速连点两个音，会重复上一个音而不是新点的音"——
+        //        iOS 上合成 click 在快速连点时会延迟/合并、目标解析到上一个按钮；
+        //        而 pointerdown 在手指落下的那一刻就带着**当时**的 target 派发，不会错位。
+        //     ② 需求：两指同时按两个音要同时出声 —— click 是按"最后一次触摸"合成的，
+        //        多指时根本不成立；pointerdown 是每根手指各来一次。
+        //     ③ 触感：指下即响，比等 click 更跟手。
+        //   preventDefault 用来压掉紧随其后的合成 click（避免万一的双触发）+ 抑制长按选择。
         if (els.mpAidTones) {
-            els.mpAidTones.addEventListener('click', (e) => {
+            els.mpAidTones.addEventListener('pointerdown', (e) => {
                 const b = (e.target && e.target.closest) ? e.target.closest('[data-midi]') : null;
                 if (!b) return;
+                try { e.preventDefault(); } catch (err) {}
                 const midi = parseInt(b.dataset.midi, 10);
-                if (isFinite(midi)) mpPlayAidTone(midi);
+                if (!isFinite(midi)) return;
+                // 记一笔（真机上复现"连点重复上一个音"时读 _getAidTapLog() 就能判定）
+                try {
+                    mpAidTapLog.push({
+                        midi: midi, pointerId: e.pointerId, ts: Date.now(),
+                        x: Math.round(e.clientX), y: Math.round(e.clientY)
+                    });
+                    if (mpAidTapLog.length > 12) mpAidTapLog.shift();
+                } catch (err) {}
+                mpPlayAidTone(midi);
             });
         }
         if (els.mpAid) {
@@ -3174,6 +3313,20 @@
 
         // 长按看的答案：按住揭示、按住下滑报错、按住左/右滑上一个/下一个（左右互通）
         bindStageGesture();
+
+        // ★ 第十六轮：任意一次点击都顺手"续一下"音频上下文。
+        //   为什么挂在 document 的 capture 阶段：它比所有目标处理器都早跑，
+        //   所以「用户点哪都行，排程之前上下文已经被唤醒过一次」——
+        //   这是"浏览器放一会儿再切回来就没声音"的兜底（真正的自愈在宿主的
+        //   ensureAudioLive 里：resume 起不来就原地重建 AudioContext）。
+        //   passive:true 不拦任何默认行为；重复调用是幂等的。
+        document.addEventListener('pointerdown', () => {
+            try {
+                const host = global.ChordHost;
+                if (host && typeof host.ensureAudioLive === 'function') host.ensureAudioLive();
+                else unlockAudioNow();
+            } catch (e) {}
+        }, { capture: true, passive: true });
 
         // 连按两次卡片不该把页面放大、也不该选中面板里的文字。
         //   CSS 那边已经用 user-select:none + touch-action:manipulation + viewport
@@ -3370,7 +3523,10 @@
             return;
         }
         try {
-            drawCover(els.mpCover.getContext('2d'), px, info, false);
+            // ★ 第 5 参只在设置页选了「低音级数」时给 —— 不给就是现状（罗马数字档）。
+            //   锁屏封面不走这里（它走 coverBlobUrl），所以那边恒为罗马数字，不受设置影响。
+            drawCover(els.mpCover.getContext('2d'), px, info, false,
+                (settings.revealMode === 'bass') ? { bassOnly: true } : null);
         } catch (e) {}
     }
 
@@ -3509,6 +3665,7 @@
     }
 
     // 按住左滑：退到上一个和弦（冻结目标与小节一起退，音乐也跟着 seek 过去）
+    //   ★ 第十六轮：**暂停态**下套用与「上一个」按钮同一规则 —— 只切 + 试听，不接着播。
     function mpStepBackWhileHolding() {
         if (!data || !data.chords.length) return;
         const cur = mpFreeze ? mpFreeze.measure : mpMeasure;
@@ -3517,7 +3674,10 @@
         mpFreezeAt(next);
         mpSetRevealed(true);
         mpNudge('left');
-        doPlay(lastPlayMode, next);
+        if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }
+        mpShowMeasureOnly(next);
+        mpPauseJumpTo = next;
+        mpPreviewChord(next);
     }
 
     // ---- 卡片对水平滑动的手感反馈：跟手位移 + 每格轻推 ----
@@ -3577,6 +3737,7 @@
     }
 
     // 按住右滑：进到下一个和弦（与左滑对称，可连滑；到最后一个就停住不动）
+    //   ★ 第十六轮：暂停态同样只切 + 试听，不接着播。
     function mpStepForwardWhileHolding() {
         if (!data || !data.chords.length) return;
         const last = data.chords.length - 1;
@@ -3586,7 +3747,10 @@
         mpFreezeAt(next);
         mpSetRevealed(true);
         mpNudge('right');
-        doPlay(lastPlayMode, next);
+        if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }
+        mpShowMeasureOnly(next);
+        mpPauseJumpTo = next;
+        mpPreviewChord(next);
     }
 
     function bindStageGesture() {
@@ -3757,6 +3921,14 @@
             try { chordAudioEl.pause(); } catch (e) {}
             return;
         }
+        // ★ 第十六轮：暂停期间用「上一个/下一个」切过和弦 → 这里要**从新切到的那一小节起播**，
+        //   而不是回到暂停点原地续播（否则"看着在第 5 小节、一播又从第 2 小节响"）。
+        if (mpPauseJumpTo >= 0) {
+            const t = mpPauseJumpTo;
+            mpPauseJumpTo = -1;
+            await doPlay(lastPlayMode, t);
+            return;
+        }
         if (chordAudioEl && blobData === data && blobUrl) {
             try {
                 await chordAudioEl.play();
@@ -3764,6 +3936,46 @@
             } catch (e) { /* 被拦或被换过 → 往下重渲染 */ }
         }
         await doPlay(lastPlayMode, mpMeasure);
+    }
+
+    // ------------------------------------------------------------
+    // 第十六轮：暂停态下的「上一个 / 下一个」= 只切和弦 + 试听一下，**不接着播**
+    // ------------------------------------------------------------
+    //   用户要求：暂停时点前进/后退，不要开始播放；切到前/后一个和弦之后把这个和弦
+    //   播一下就行，进度环保持静止不流动。
+    //   进度环静止是**自然结果**：mpPaintProgress 算的是 currentTime / duration，
+    //   这里全程不碰 chordAudioEl.currentTime，所以环停在原处。
+    function mpIsPlaying() {
+        return !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
+    }
+
+    // 当前"播放方式" → 试听用的实时奏法。
+    //   约定：沿用用户当下选的播放方式（柱式→同时响 / 分解→逐个音 / 单音→只响低音那一个）。
+    function mpPreviewStyleFor(mode) {
+        if (mode === 'arpeggio') return 'arp';
+        if (mode === 'bass') return 'note';
+        return 'block';
+    }
+
+    // 试听一个小节的和弦（实时 Web Audio，不走主 <audio> → 天然不动进度）
+    function mpPreviewChord(next) {
+        const c = (data && data.chords) ? data.chords[next] : null;
+        if (!c || !c.midis || !c.midis.length) return;
+        const mode = lastPlayMode;
+        if (mode === 'bass') playInstantChord([c.midis[0]], 'note').catch(() => {});
+        else playInstantChord(c.midis, mpPreviewStyleFor(mode)).catch(() => {});
+    }
+
+    // 只把"面板显示"挪到第 next 小节，不碰音频。
+    //   ★ mpLiveMeasure 也要一起写：mpUnfreeze() 收尾时会执行 `mpMeasure = mpLiveMeasure`，
+    //     只写 mpMeasure 的话，手指一松就被拉回原处（表现为"滑完又跳回去"）。
+    function mpShowMeasureOnly(next) {
+        mpLiveMeasure = next;
+        mpMeasure = next;
+        mpPaintProgress();
+        if (mpExpanded) mpPaintCover();
+        setMeasureHighlight(next);
+        setCoverMeasure(next);
     }
 
     // 上一个 / 下一个和弦。
@@ -3774,7 +3986,10 @@
         mpCancelGesture();                   // 显式导航 = 手势结束（含解冻）
         const next = Math.max(0, Math.min(data.chords.length - 1, mpMeasure + dir));
         if (next === mpMeasure) return;      // 已在头 / 尾
-        doPlay(lastPlayMode, next);
+        if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }   // 正在播：维持原行为（seek + 接着播）
+        mpShowMeasureOnly(next);             // 暂停：只切显示
+        mpPauseJumpTo = next;                // 记住"下次按播放要从这里起"
+        mpPreviewChord(next);                // 把这个和弦试听一下
     }
 
     // 换一段（生成键恒为「⏭ 下一首」——固定功能，不再管"开始播放"分流；
@@ -3870,13 +4085,19 @@
     }
 
     // ---------------- 听辩辅助窗（长按 + 上滑） ----------------
-    //   触发即暂停主音频 → 播冻结和弦的上行琶音 → 弹浮窗；
-    //   浮窗里可重听柱式/再放琶音；点窗外关闭并恢复播放。
+    //   触发即暂停主音频 → 播冻结和弦的「和弦分解」→ 弹浮窗；
+    //   浮窗里可重听柱式 / 再放一遍和弦分解；点窗外关闭并恢复播放。
     //   辅助窗不写任何统计（与报错浮窗的 practiceMode 闸门无关，错题模式也可用）。
     let mpAid = null;   // { measure, midis, sources: [], wasPlaying }
     // 最近一次 playInstantChord 的结果 { style, ok, ctxState, scheduled }。
     //   ok 为假 = 那一声"没能真正排上程/上下文没在跑"，pointerup 会拿它决定要不要补放。
     let mpAidLast = null;
+    // 第十六轮：最近几次"点数字试听"的记录（环形，最多 12 条）。
+    //   起因是用户反馈"快速连点两个音，会重复上一个音而不是新点的音"——
+    //   无头浏览器里复现不了真机的触摸合成行为，所以留这个口子：
+    //   真机上复现时读 ChordRecognition._getAidTapLog()，
+    //   就能看清"到底收到了几个 pointerdown、midi 对不对、两次间隔多少毫秒"。
+    let mpAidTapLog = [];
 
     async function mpOpenAid(frozen) {
         if (!frozen || frozen.seg !== mpSeg) return;      // 跨段快照作废
@@ -3893,11 +4114,17 @@
         try { await playInstantChord(midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
     }
 
-    // 辅助窗右侧那一列音名：**按音高自下而上**（最低音在最下），如 C G C E。
-    //   和卡片上的写法完全一致（同 pitchName，不带八度），免得两处对不上。
+    // 和弦音角色 → 中文标注（chordToneSpelled 返回的是英文 role）
+    const AID_ROLE_LABEL = { root: '根音', third: '三音', fifth: '五音', seventh: '七音' };
+
+    // 辅助窗右侧那一列：**按音高自下而上**（最低音在最下）。
+    //   ★ 第十六轮改（用户 2026-10-06）：
+    //     主文字 = 该音在**调式内的级数**（简谱数字 1..7，**不带八度点** ——
+    //              同一个音名的两个 C 都显示 1，这是用户明确要的）；
+    //     副标注 = 它是**和弦的几音**（根音 / 三音 / 五音 / 七音）。
     //   DOM 里按"低音在前"追加，CSS 用 column-reverse 把它翻成自下而上 —— 顺序只有一处定义。
-    //   ★ 每个音名可点：点一下就发这个音高（用户 2026-10-06）。
-    //     音名不带八度（两个 C 会一模一样），所以**只能按 data-midi 认音** ——
+    //   ★ 每个音可点：点一下就发这个音高。
+    //     数字不带八度（两个 1 音高不同），所以**只能按 data-midi 认音** ——
     //     notes 是 chords[m].midis.map(midiToSpelled) 来的（同序同长），下标一一对应，
     //     而 midiToSpelled 的结果里**不含 midi**，所以要按下标回到 midis 里取。
     function mpPaintAidTones(measure) {
@@ -3908,13 +4135,37 @@
         const midis = (mpAid && mpAid.midis && mpAid.midis.length === c.notes.length)
             ? mpAid.midis
             : (c.midis || []);
+        // 和弦各音的"角色"：直接复用 chordToneSpelled —— 它按调内级数推出和弦音，
+        //   **转位天然正确**（角色由根音定义，跟哪个音落在低音无关）；四部重复音时
+        //   同一个角色会出现两枚，这也是对的（和声学上就是重复了那个音）。
+        const ct = (data && data.scale)
+            ? chordToneSpelled(data.scale, c.degree, !!c.seventh)
+            : [];
         c.notes.forEach((n, i) => {                   // notes 已按 MIDI 升序（低 → 高）
+            const midi = midis[i];
+            const pc = ((midi % 12) + 12) % 12;
+            const k = (data && data.scale) ? data.scale.findIndex((s) => s.pc === pc) : -1;
+            // 调内级数；万一碰上变化音（理论上不会），退回显示音名，不显示空白
+            const digit = (k >= 0) ? String(k + 1) : pitchName(n.letter, n.acc);
+            const t = ct.find((x) => x.pc === pc);
+            const role = t ? (AID_ROLE_LABEL[t.role] || '') : '';
+
             const b = document.createElement('button');
             b.type = 'button';
             b.className = 'mp-aid__tone';
-            b.textContent = pitchName(n.letter, n.acc);
-            b.dataset.midi = String(midis[i]);        // ★ 点它发这个音（不能按音名 —— 两个 C 音高不同）
-            b.setAttribute('aria-label', b.textContent + ' 试听');
+            b.dataset.midi = String(midi);            // ★ 点它发这个音（不能按数字 —— 两个 1 音高不同）
+            b.dataset.digit = digit;
+            b.dataset.role = role;
+            const num = document.createElement('span');
+            num.className = 'mp-aid__tone-num';
+            num.textContent = digit;
+            const label = document.createElement('span');
+            label.className = 'mp-aid__tone-role';
+            label.textContent = role;
+            b.appendChild(num);
+            b.appendChild(label);
+            b.setAttribute('aria-label',
+                pitchName(n.letter, n.acc) + ' · 第 ' + digit + ' 级 · ' + role + ' · 试听');
             els.mpAidTones.appendChild(b);
         });
     }
@@ -3944,9 +4195,9 @@
         playInstantChord(mpAid.midis, style).catch(() => {});
     }
 
-    // 点辅助窗右侧的某个音名 → 只发这一个音高。
+    // 点辅助窗右侧的某个简谱数字 → 只发这一个音高。
     //   ★ 刻意**不**先 mpStopAidVoices()：用户要的是"可以叠着响，像弹琴"——
-    //     连着点几个音，声音自然叠起来，能听见和弦一点点被堆出来。
+    //     连着点几个音、或者两指同时按两个音，声音自然叠起来。
     //   （声源仍登记在 mpAid.sources 里，关窗时一次收干净；playInstantChord 内部有上限剪枝。）
     function mpPlayAidTone(midi) {
         if (!mpAid || !isFinite(midi)) return;
@@ -4395,6 +4646,8 @@
             gesturePhase: mpGesture ? mpGesture.phase : null,
             gestureAxis: mpGesture ? mpGesture.axis : null,
             playing: !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended),
+            // 第十六轮：暂停态切过和弦后"待重定位到的小节"（-1 = 没有）
+            pauseJumpTo: mpPauseJumpTo,
             errorOpen: !!(els && els.mpError && !els.mpError.hidden),
             aidOpen: !!(els && els.mpAid && !els.mpAid.hidden),
             reportCount: mpReports.length
@@ -4429,6 +4682,15 @@
         _getAidToneMidis: () => (els && els.mpAidTones
             ? Array.from(els.mpAidTones.children).map((n) => n.dataset.midi)
             : null),
+        // 第十六轮：每个按钮的「简谱数字 + 几音标注」全貌
+        _getAidToneInfo: () => (els && els.mpAidTones
+            ? Array.from(els.mpAidTones.children).map((n) => ({
+                midi: n.dataset.midi, digit: n.dataset.digit, role: n.dataset.role,
+                text: n.textContent, aria: n.getAttribute('aria-label')
+            }))
+            : null),
+        // 第十六轮：最近几次"点数字试听"的记录（真机上复现"连点重复上一个音"时读它）
+        _getAidTapLog: () => mpAidTapLog.slice(),
         // 辅助窗音频状态：上下文跑没跑起来、这一声排上程没有（"有声"最接近的可断言代理）
         _getAidAudio: () => ({
             open: !!mpAid,
@@ -4446,6 +4708,11 @@
         _getAudioClock: () => (chordAudioEl
             ? { t: chordAudioEl.currentTime, d: chordAudioEl.duration, paused: chordAudioEl.paused }
             : null),
+        // 第十六轮：音频自愈相关的两个口子
+        //   _unlockAudioNow：手动唤醒上下文（验收用；也可以在真机控制台里敲）
+        //   _reloadSamples：宿主重建 AudioContext 后，bufferCache 被清空 → 由这里重新解码
+        _unlockAudioNow: unlockAudioNow,
+        _reloadSamples: () => preloadChordSamples(() => {}),
         // ---- 听辨统计 / 数据库页（调试 / 自测用）----
         renderStats: renderStats,
         _getStats: () => ({ all: statsAll, session: statsSession, scope: statsScope }),
@@ -4483,6 +4750,9 @@
             return out;
         },
         _getCoverInfo: buildCoverInfo,
+        // 验收用：把"这个和弦的音各自是几音（root/third/fifth/seventh）"算出来对账
+        //   （辅助窗那个「根音/三音/五音/七音」小标签的来源就是它）
+        _chordToneSpelled: chordToneSpelled,
         _getArtPalette: () => ART_PALETTE.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
         // 报错浮窗的几何布局：每个色块的中心坐标 + 尺寸（用来客观验证"两列 + Ⅶ 横跨"）
         _getMpErrorLayout: () => {

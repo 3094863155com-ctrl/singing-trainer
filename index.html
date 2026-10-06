@@ -1443,6 +1443,9 @@
             background: var(--surface);
             border-radius: var(--r-lg);
             box-shadow: var(--shadow-lg);
+            /* 两指同时按两个数字时，别让长按变成"选中文字" */
+            -webkit-user-select: none;
+            user-select: none;
         }
 
         .mp-aid__title {
@@ -1452,21 +1455,30 @@
             text-align: center;
         }
 
-        /* 左列按钮 + 右列音名：底部对齐（音名自下而上长，和按钮下缘站齐最稳） */
+        /* 左列按钮 + 右列简谱数字：**两列等高对称**。
+           怎么做到"多少音都对齐"：父容器给定高 + 两列都 height:100% + justify-content:space-between
+           + 子项 flex:1 1 0 → 左列 2 份、右列 3 份或 4 份，两列总高严格相等。
+           （旧版是 align-items:flex-end，靠"底部对齐"，音数一变就不齐了。） */
         .mp-aid__body {
+            --mp-aid-body-h: clamp(190px, 40vh, 260px);
             display: flex;
-            align-items: flex-end;
+            align-items: stretch;
             justify-content: center;
             gap: 18px;
+            height: var(--mp-aid-body-h);
         }
 
         .mp-aid__btns {
             display: flex;
             flex-direction: column;
             gap: var(--mp-gap);
+            height: 100%;
+            justify-content: space-between;
         }
 
         .mp-aid__opt {
+            flex: 1 1 0;              /* 左列两颗按键等分整列高度（与右列同高） */
+            touch-action: none;       /* 与右列一致：两指分别按两列也不会被当成捏合缩放 */
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -1493,37 +1505,60 @@
             filter: brightness(0.94);
         }
 
-        /* 音名一列：DOM 里是"低音在前"，靠 column-reverse 让它**自下而上**长。
-           这样最低音永远贴在底部，读起来就是从下往上 C G C E。 */
+        /* 简谱数字一列：DOM 里仍是"低音在前"，靠 column-reverse 让它**自下而上**长。
+           最低音永远贴在底部，读起来就是从下往上（如 1 5 1 3）。 */
         .mp-aid__tones {
             display: flex;
             flex-direction: column-reverse;
-            align-items: center;
-            gap: 4px;
+            align-items: stretch;
+            gap: 6px;
+            height: 100%;
+            justify-content: space-between;
+            /* ★ 两指同时按两个数字时，不要让浏览器把手势判成缩放 */
+            touch-action: none;
         }
 
-        /* 音名是**可点**的（点一下就发这个音高，用户 2026-10-06）：
-           所以它是个 <button> —— 手指落点给足（min-height 38px），字体/光标要 reset，
-           并给按下反馈。视觉上只比原来的方块高 5px 左右，列宽与顺序都不动。 */
+        /* 每个音是**可点**的（点一下就发这个音高，用户 2026-10-06）：
+           所以它是个 <button>。第十六轮改版：
+             · 内容 = 简谱数字（主）+ 和弦几音标注（副）→ 改成竖排两行、加宽到 64px；
+             · 高度交给 flex 拉伸（与左列两键同高）；
+             · touch-action:none + pointerdown 绑定 → 支持两指同时按、同时出声
+               （不用 manipulation：那只是去掉双击缩放，仍会被判成手势）。 */
         .mp-aid__tone {
+            flex: 1 1 0;
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
-            min-width: 46px;
-            min-height: 38px;
-            padding: 3px 10px;
+            gap: 2px;
+            min-width: 64px;
+            min-height: 46px;
+            padding: 4px 12px;
             font-family: inherit;
             text-align: center;
-            font-size: 19px;
             font-weight: 700;
-            font-variant-numeric: tabular-nums;
             color: var(--text-primary);
             background: var(--surface-hover);
             border: 1px solid var(--border);
             border-radius: var(--r-md);
             cursor: pointer;
-            touch-action: manipulation;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
             -webkit-tap-highlight-color: transparent;
+        }
+
+        .mp-aid__tone-num {
+            font-size: 22px;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .mp-aid__tone-role {
+            font-size: 11px;
+            line-height: 1;
+            font-weight: 600;
+            color: var(--text-tertiary);
         }
 
         .mp-aid__tone:active {
@@ -1847,6 +1882,21 @@
                     <button type="button" class="seg__opt" data-mode="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>单音</button>
                 </div>
 
+                <!-- 按住卡片时显示什么：两档二选一（用户 2026-10-06 拍板）。
+                       roman = 现状（罗马数字和弦标记 + 和弦音名 + 调性底行）
+                       bass  = 只给这个和弦低音在调内的简谱级数 + 左上角第几小节，底色中性灰
+                     ★ 只管页面里「按住卡片」看到的那张画；**锁屏封面恒为 roman**，
+                       不受这个开关影响（这条是用户明确要求的）。
+                     复用 .seg 那套连体椭圆滑块，不加新 CSS。 -->
+                <div class="seg" id="chord-reveal-seg" role="radiogroup" aria-label="按住卡片显示的内容">
+                    <span class="seg__thumb" aria-hidden="true"></span>
+                    <button type="button" class="seg__opt" data-reveal="roman" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-card"/></svg>和弦标记</button>
+                    <button type="button" class="seg__opt" data-reveal="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>低音级数</button>
+                </div>
+                <div class="toggle-hint">
+                    按住卡片显示的内容：和弦标记＝罗马数字＋和弦音名；低音级数＝只给低音在调内的简谱数字（锁屏封面不受影响）
+                </div>
+
                 <!-- 两颗独立开关（椭圆可选项，选中点亮），可以同时开着：
                        连续播放 = 原「自动连播」（一段播完自动换新的一段）
                        随身听    = 每小节最后一拍只弹这个和弦的根音（听根音对级数，不用看屏幕）
@@ -2043,22 +2093,26 @@
         </div>
     </div>
 
-    <!-- 听辨辅助浮窗：按住上滑 → 暂停并播冻结和弦的琶音；点窗外关闭并恢复播放。
-         版式（用户 2026-10-06 定）：左列两个按钮（上=琶音 / 下=柱式，图标即示意），
-         右列一列音名，**按音高自下而上**排（最低音在最下），如 C G C E —— 和卡片写法一致。
-         音名是可点的（用户 2026-10-06）：点一下发这个音高，连点会叠着响；
-         所以它们是 <button data-midi>，音高靠 data-midi 认（音名不带八度，两个 C 会重名）。 -->
+    <!-- 听辨辅助浮窗：按住上滑 → 暂停并播冻结和弦的「和弦分解」；点窗外关闭并恢复播放。
+         版式（用户 2026-10-06 定）：左列两个按钮（上=和弦分解 / 下=柱式，图标即示意），
+         右列一列音，**按音高自下而上**排（最低音在最下）。
+         ★ 第十六轮改：右列从"音名（C G C E）"改成**简谱数字 + 和弦几音标注**——
+           主文字 = 该音在调式内的级数（1-7，不带八度点，两个 C 都显示 1），
+           副标注 = 它是和弦的几音（根音 / 三音 / 五音 / 七音）。
+           按钮仍带 data-midi：音高靠它认（数字不带八度，两个 1 音高不同）。
+           按钮改成**指下即响**（pointerdown），因此支持两指同时按两个音、同时出声；
+           所以两列都设了 touch-action:none，且左右两列等高对称。 -->
     <div id="chord-mp-aid" class="mp-aid" role="dialog" aria-modal="true" hidden>
         <div class="mp-aid__panel" role="group" aria-label="听辨辅助">
             <div class="mp-aid__title">听辨辅助</div>
             <div class="mp-aid__body">
                 <div class="mp-aid__btns">
-                    <button class="mp-aid__opt" id="chord-mp-aid-arp"><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>琶音</button>
+                    <button class="mp-aid__opt" id="chord-mp-aid-arp" aria-label="和弦分解"><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>和弦分解</button>
                     <button class="mp-aid__opt" id="chord-mp-aid-block"><svg class="ic" aria-hidden="true"><use href="#i-chord-block"/></svg>柱式</button>
                 </div>
                 <div class="mp-aid__tones" id="chord-mp-aid-tones"></div>
             </div>
-            <div class="mp-aid__hint">点音名试听 · 点窗外关闭并继续播放</div>
+            <div class="mp-aid__hint">点简谱数字试听（可多指同时按）· 点窗外关闭并继续播放</div>
         </div>
     </div>
 
@@ -2070,20 +2124,152 @@
         let audioContext = null;
         const bufferCache = new Map();  // filename → AudioBuffer
 
+        // ============================================================
+        // ★ 第十六轮：音频上下文「卡死」自愈
+        //   症状（用户 2026-10-06 反馈）：浏览器放一会儿再切回来，上滑 / 辅助窗按钮都没声音，
+        //   刷新页面才好。
+        //   原因：iOS 会把 AudioContext 打进**私有态 'interrupted'**（系统的播/停、来电、
+        //   页面进后台都会），而老的 initAudio() 只判 'suspended' → 永远不去解锁。
+        //   策略分五层，其中 L2/L3/L5 由 AUDIO_SELFHEAL 统一控管 —— 想整体摘除这个特性，
+        //   把下面这个常量改成 false 即可（L1 与各处 .catch 是纯修复，保留）。
+        //     L1 判据改成「不是 running 就 resume」
+        //     L2 挂 statechange 记日志（诊断用）
+        //     L3 页面重新可见 / pageshow / focus 时主动试一次解锁
+        //     L4 任意用户手势里同步试一次解锁（钩子在 chord_recognition.js 里挂）
+        //     L5 resume 之后仍不是 running → 原地重建 AudioContext（三重限流）
+        // ============================================================
+        const AUDIO_SELFHEAL = true;
+        const CTX_REBUILD_MIN_GAP_MS = 4000;   // 两次重建之间的最小间隔
+        const CTX_REBUILD_MAX = 6;             // 单次会话最多重建几次（防风暴）
+        let ctxGen = 0;                        // 上下文代数：每次重建 +1（验收用它证明真的重建过）
+        let ctxRebuilds = 0;
+        let rebuildingCtx = false;
+        let lastRebuildTs = 0;
+        const CTX_STATE_LOG = [];              // 环形日志 { t, state, gen }
+
+        function ctxLog(state) {
+            try {
+                CTX_STATE_LOG.push({ t: Date.now(), state: String(state), gen: ctxGen });
+                if (CTX_STATE_LOG.length > 50) CTX_STATE_LOG.shift();
+            } catch (e) {}
+        }
+
+        // 给一个 AudioContext 挂状态监听（诊断 + 卡死判定）
+        function wireCtxState(ctx) {
+            try {
+                let healTimer = 0;
+                ctx.addEventListener('statechange', () => {
+                    ctxLog(ctx.state);
+                    if (audioContext !== ctx) return;   // 已被换掉的旧上下文，迟到的状态事件，忽略
+                    if (!AUDIO_SELFHEAL) return;
+                    if (ctx.state === 'running') {
+                        // 回到 running：撤销还没到点的重建申请（短暂的 suspend 不值得拆上下文）
+                        if (healTimer) { clearTimeout(healTimer); healTimer = 0; }
+                        return;
+                    }
+                    // 掉出 running：**缓冲 1.5 秒再重建** —— 很多 suspend 是一瞬的（切应用又切回来），
+                    // 排个队等 1.5s 后还不 running 才真动手；期间 resume 成功就自动撤销。
+                    if (healTimer) return;
+                    if (typeof document === 'undefined'
+                        || document.visibilityState === 'hidden') return;
+                    healTimer = setTimeout(() => {
+                        healTimer = 0;
+                        if (audioContext === ctx && ctx.state !== 'running'
+                            && typeof document !== 'undefined'
+                            && document.visibilityState !== 'hidden') {
+                            scheduleCtxRebuild();
+                        }
+                    }, 1500);
+                });
+                ctxLog(ctx.state);
+            } catch (e) {}
+        }
+
         function initAudio() {
             // 初始化 Web Audio API 的 AudioContext（用于爆音修复）
             if (!audioContext) {
                 try {
                     audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    ctxGen++;
+                    wireCtxState(audioContext);
                 } catch (e) {
                     console.warn('AudioContext 初始化失败，回退到 Audio 对象:', e);
                 }
             }
-            if (audioContext && audioContext.state === 'suspended') {
-                // 无用户手势时 resume() 会拒绝（自动下一首场景），静默处理
-                audioContext.resume().catch(() => {});
+            // ★ 判据是「不是 running」，**不是**「=== suspended」——
+            //   iOS 的私有态 'interrupted' 只判 suspended 会漏掉，切后台回来就永远解锁不了。
+            //   无用户手势时 resume() 会拒绝（自动下一首场景），静默处理。
+            if (audioContext && audioContext.state !== 'running') {
+                try { audioContext.resume().catch(() => {}); } catch (e) {}
             }
             return Promise.resolve();
+        }
+
+        // 「尽力解锁」：resume() 是异步的，这里调完要**异步复核**；真起不来才交给
+        //   scheduleCtxRebuild（重建代价大，不能随便做）。
+        //   任何用户手势的同步栈里都能调它。
+        function ensureAudioLive() {
+            try {
+                if (!audioContext) initAudio();
+                const ctx = audioContext;
+                if (!ctx) return;
+                if (ctx.state === 'running') return;
+                let p = null;
+                try { p = ctx.resume(); } catch (e) {}
+                if (!p || typeof p.then !== 'function') return;
+                p.then(() => {
+                    if (audioContext !== ctx || ctx.state === 'running') return;
+                    setTimeout(() => {
+                        if (audioContext === ctx && ctx.state !== 'running') scheduleCtxRebuild();
+                    }, 300);
+                }).catch(() => {
+                    if (audioContext === ctx) scheduleCtxRebuild();
+                });
+            } catch (e) {}
+        }
+
+        // 原地重建 AudioContext —— 等价于用户说的「刷新页面就好了」，但不用真的刷新。
+        //   旧 bufferCache 里的 AudioBuffer 是旧上下文 decode 出来的，
+        //   「能不能给新上下文用」在 WebKit 上并不可靠 → 保守清空、让上层后台重新 decode。
+        function scheduleCtxRebuild() {
+            if (!AUDIO_SELFHEAL) return;
+            if (rebuildingCtx) return;                                   // 闸门①：并发锁
+            if (ctxRebuilds >= CTX_REBUILD_MAX) return;                  // 闸门②：单会话上限
+            if (Date.now() - lastRebuildTs < CTX_REBUILD_MIN_GAP_MS) return;   // 闸门③：最小间隔
+            if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+            rebuildingCtx = true;
+            lastRebuildTs = Date.now();
+            try {
+                const old = audioContext;
+                const next = new (window.AudioContext || window.webkitAudioContext)();
+                ctxGen++;
+                audioContext = next;      // 先换引用：旧 ctx 迟到的 statechange 就不会再触发重建
+                ctxRebuilds++;
+                wireCtxState(next);
+                try { next.resume().catch(() => {}); } catch (e) {}
+                try { if (old && old.close) old.close(); } catch (e) {}
+                bufferCache.clear();
+                if (window.ChordRecognition
+                    && typeof window.ChordRecognition._reloadSamples === 'function') {
+                    try { window.ChordRecognition._reloadSamples(); } catch (e) {}
+                }
+            } catch (e) {
+                console.warn('AudioContext 重建失败:', e);
+            } finally {
+                rebuildingCtx = false;
+            }
+        }
+
+        // L3：页面重新可见 / 从后退缓存恢复 / 窗口回焦 → 主动试一次解锁。
+        //   ★ 这三个事件在 iOS 上**不是**用户激活事件，resume() 多半会被拒；
+        //     它们的价值在于把「卡死」判定（→ L5 重建）在用户下一次点击**之前**触发掉，
+        //     这样重建 + 重新解码采样有时间跑完，用户点的时候通常已经好了。
+        if (AUDIO_SELFHEAL && typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') ensureAudioLive();
+            });
+            window.addEventListener('pageshow', () => ensureAudioLive());
+            window.addEventListener('focus', () => ensureAudioLive());
         }
 
         // 异步加载音频缓冲（带缓存）
@@ -2279,8 +2465,17 @@
             getAudioBuffer: getAudioBuffer,
             audioBufferToWav: audioBufferToWav,
             initAudio: initAudio,
+            // ★ 第十六轮：手势里调它 = "尽力解锁，实在不行就原地重建上下文"
+            ensureAudioLive: ensureAudioLive,
             bufferCache: bufferCache,
             get audioContext() { return audioContext; },
+            // 调试：上下文状态流转日志 / 重建代数 / 手动触发一次重建（自测用）
+            _ctxStateLog: () => CTX_STATE_LOG.slice(),
+            _getCtxGen: () => ctxGen,
+            _getCtxRebuilds: () => ctxRebuilds,
+            _rebuildAudioContext: () => { lastRebuildTs = 0; scheduleCtxRebuild(); },
+            // 不重置闸门时间戳的"守规矩"版本（验收防风暴闸用这个；手动兜底才用上面那个）
+            _scheduleRebuild: () => scheduleCtxRebuild(),
             // ---- 共享 MediaSession（锁屏封面 / 锁屏按钮）----
             //   和弦页不自己注册 actionHandler，而是通过这三个接口跟宿主共用同一个媒体会话。
             reclaimMedia: mediaReclaim,
