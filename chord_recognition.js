@@ -2252,6 +2252,9 @@
         // 锁屏封面：带一点提前量（见 ART_LEAD_MS），把系统侧那几十毫秒的滞后补回来
         const mc = Math.min(last, Math.floor((chordAudioEl.currentTime + coverLeadSeconds()) / dur));
         setCoverMeasure(mc);
+        // 收起条播放键的外圈进度：每帧重画一次 —— 它是连续值（currentTime / 整段时长），
+        //   所以看起来是"无极挪动"。不重画的话它会停在小节边界上（用户 2026-10-06 反馈）。
+        mpPaintProgress();
         // 锁屏进度条（可拖动）也要跟着走。但没必要每秒推 60 次，限流到 4 次/秒。
         const now = Date.now();
         if (force || now - lastPosPush >= 250) {
@@ -3231,16 +3234,35 @@
         if (mpExpanded) mpPaintCover();
     }
 
-    // 收起条播放键的进度环：第 m+1 / total 小节 → (m+1)/total（conic-gradient 角度）。
+    // 收起条播放键的进度环：整段进度 0…1（写入 --mp-prog，并落到 SVG 的 stroke-dashoffset）。
     //   收起条不再显示「第 X / Y 小节」文字（用户 2026-10-06 拍板），进度只剩这根环。
+    //
+    //   ★ 进度是**连续**的：用「音频当前播放位置 / 整段时长」算，而不是「第几小节 / 总小节数」。
+    //     用户 2026-10-06：「进度条应该无极挪动，而不是现在一小节前进一格」。
+    //     拿不到时长时（还没渲染出整段音频、或音频未 loadedmetadata）退回按小节算 ——
+    //     保证任何时刻环上都有个合理读数，不会是 0。
+    function mpProgressTime() {
+        // 冻结（长按看答案）期间：环停在冻结那一刻，跟着播放走下去会和"面板停住"自相矛盾
+        if (mpFreeze && mpFreeze.t != null) return mpFreeze.t;
+        return chordAudioEl ? chordAudioEl.currentTime : 0;
+    }
+
     function mpPaintProgress() {
         if (!els || !els.mpPlayPauseMin) return;
         const total = (data && data.chords.length) ? data.chords.length : 0;
-        const p = total ? ((mpMeasure + 1) / total) : 0;
+        const dur = chordAudioEl ? chordAudioEl.duration : 0;
+        const t = mpProgressTime();
+        let p;
+        if (isFinite(dur) && dur > 0) {
+            p = t / dur;                                  // 无极：跟真实时间走
+        } else {
+            p = total ? ((mpMeasure + 1) / total) : 0;    // 兜底：还没整段音频时按小节
+        }
         const v = Math.max(0, Math.min(1, p));
         els.mpPlayPauseMin.style.setProperty('--mp-prog', String(v));
-        // 方案 B：键外圈那根描边就是进度条。SVG 矩形配 pathLength="1" + dasharray "1 1"，
-        //   所以 dashoffset = 1 − 进度 时，露出来的弧长正好等于进度。
+        // 方案 B：键外圈那根描边就是进度条。pathLength="1" + dasharray "1 1"，
+        //   所以 dashoffset = 1 − 进度 时，露出来的弧长正好等于进度，
+        //   路径起点在 12 点钟方向（见 index.html 的 <path d>），亮起来的那段从 12 点顺时针长。
         if (els.mpRingBar) els.mpRingBar.style.strokeDashoffset = String(1 - v);
     }
 
@@ -3369,7 +3391,10 @@
             roman: info.roman,
             midis: data.chords[m].midis.slice(),   // 听辩辅助窗琶音/柱式要用（快照自带，跨段不串）
             prev2: mpPrevTwo(m),
-            prev3: mpPrevDegrees(m, 3)
+            prev3: mpPrevDegrees(m, 3),
+            // 冻结那一刻的播放位置：进度环是连续值，冻结期间得把它也钉住，
+            //   否则"面板停住、环还在走"会自相矛盾（见 mpProgressTime）。
+            t: (chordAudioEl ? chordAudioEl.currentTime : null)
         };
         mpMeasure = m;            // 面板（含收起条上的进度环）都停在冻结点
         mpPaintProgress();
@@ -4308,6 +4333,12 @@
             : null),
         // 收起条播放键的外圈进度（方案 B）
         _getRingDashoffset: () => (els && els.mpRingBar ? els.mpRingBar.style.strokeDashoffset : null),
+        // 自测用：整段音频的播放位置 / 总时长（证明进度环是"按时间连续"的，而不是按小节跳的）。
+        //   注意：**别**为了造样本去给 currentTime 赋值 —— 那会触发 timeupdate，
+        //   反过来把高亮改掉；要样本就让音频真播着，隔一会儿读两次。
+        _getAudioClock: () => (chordAudioEl
+            ? { t: chordAudioEl.currentTime, d: chordAudioEl.duration, paused: chordAudioEl.paused }
+            : null),
         // ---- 听辨统计 / 数据库页（调试 / 自测用）----
         renderStats: renderStats,
         _getStats: () => ({ all: statsAll, session: statsSession, scope: statsScope }),

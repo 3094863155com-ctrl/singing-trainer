@@ -957,9 +957,10 @@
 
         /* 收起条播放键（方案 B，用户 2026-10-06 拍板）：
            横向加宽的胶囊（64×40，不是正圆）+ 沿外圈走一根细描边 = 播放进度。
-           进度用 SVG 矩形的 stroke-dashoffset 画（dashoffset = 1 − 进度），
+           进度用 SVG <path> 的 stroke-dashoffset 画（dashoffset = 1 − 进度），
+           路径起点钉在**顶部中点（12 点钟）**且顺时针，所以进度从 12 点开始绕着长。
            旧的 conic-gradient + mask 圆环已删 —— 键一横向加宽，正圆环就不贴形了。
-           ★ --mp-prog 这个变量名保留（仍然是 0…1 的小节进度），只是现在只作对外读数。 */
+           ★ --mp-prog 这个变量名保留（仍然是 0…1 的整段进度），只作对外读数。 */
         .mp-bar__play {
             flex: 0 0 auto;
             position: relative;
@@ -999,7 +1000,8 @@
             stroke-width: 1.5;
             stroke-linecap: round;
             stroke-dasharray: 1 1;
-            /* 走到哪亮到哪：值由 mpPaintProgress() 写（1 − 进度） */
+            /* 走到哪亮到哪：值由 mpPaintProgress() 写（1 − 进度）。
+               进度是**连续**的（currentTime / 整段时长），不再按小节一格一格跳。 */
             stroke-dashoffset: 1;
         }
 
@@ -1964,7 +1966,12 @@
                      也不会在"横向加宽后"变成一个突兀的圆） -->
                 <svg class="mp-ring" viewBox="0 0 64 40" preserveAspectRatio="none" aria-hidden="true">
                     <rect class="mp-ring__track" x="0.75" y="0.75" width="62.5" height="38.5" rx="19.25"/>
-                    <rect class="mp-ring__bar" id="chord-mp-ring-bar" pathLength="1" x="0.75" y="0.75" width="62.5" height="38.5" rx="19.25"/>
+                    <!-- 进度条 = 同一个胶囊轮廓，但**用 <path> 手写**，把路径起点放在顶部中点（12 点钟）
+                         并顺时针走。原因：<rect> 的路径固定从左上角起笔，dashoffset 一递减，
+                         亮起来的那段就从左上角长出来（用户 2026-10-06：\"应该从 12 点钟方向开始\"）。
+                         几何与上面的 track 完全重合（外侧内缩 0.75 = 描边宽 1.5 的一半）。 -->
+                    <path class="mp-ring__bar" id="chord-mp-ring-bar" pathLength="1"
+                          d="M32 0.75 L44 0.75 A19.25 19.25 0 0 1 44 39.25 L20 39.25 A19.25 19.25 0 0 1 20 0.75 Z"/>
                 </svg>
                 <svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg>
             </button>
