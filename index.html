@@ -187,6 +187,57 @@
             pointer-events: none;
         }
 
+        /* 设置页那两颗开关（连续播放 / 随身听模式）：
+           与上面的「播放方式」共用同一套语言 —— 椭圆胶囊，选中亮起渐变色。
+           区别是它们各自独立，所以是两颗，可以同时亮（不是三选一的分段控件）。 */
+        .toggle-row {
+            width: 100%;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 10px;
+        }
+
+        .toggle-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 9px 16px;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--track);
+            border: 1px solid transparent;
+            border-radius: var(--r-pill);
+            cursor: pointer;
+            white-space: nowrap;
+            transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease, transform 0.12s ease;
+        }
+
+        .toggle-pill .ic {
+            --ic: 16px;
+        }
+
+        .toggle-pill:active {
+            transform: scale(0.97);
+        }
+
+        /* 选中态：渐变底 + 白字白图标（颜色与 .seg 的滑块一致） */
+        .toggle-pill[aria-checked="true"] {
+            color: #fff;
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+        }
+
+        .toggle-hint {
+            width: 100%;
+            margin-bottom: 4px;
+            text-align: center;
+            font-size: 12px;
+            line-height: 1.7;
+            color: var(--text-tertiary);
+        }
+
         .more-settings {
             margin-bottom: 30px;
             padding: 0 20px 20px;
@@ -1631,6 +1682,13 @@
             <circle cx="15" cy="12" r="2.1"/>
             <circle cx="8" cy="17" r="2.1"/>
         </symbol>
+        <!-- 随身听：头梁一条弧 + 左右两个耳罩（线性，与整页图标同一套笔触）。
+             耳罩用圆角矩形而不是圆弧 —— 16px 下"两个方块夹一根拱"比两个小圆弧更认得出是耳机。 -->
+        <symbol id="i-headphones" viewBox="0 0 24 24">
+            <path d="M4.2 14.6v-2.2a7.8 7.8 0 0 1 15.6 0v2.2"/>
+            <rect x="2.6" y="13.4" width="4.3" height="7.2" rx="2.15"/>
+            <rect x="17.1" y="13.4" width="4.3" height="7.2" rx="2.15"/>
+        </symbol>
         <symbol id="i-arpeggio" viewBox="0 0 24 24">
             <circle cx="5.9" cy="18" r="2.3"/>
             <path d="M8.2 18v-6.2"/>
@@ -1771,12 +1829,21 @@
                     <button type="button" class="seg__opt" data-mode="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>单音</button>
                 </div>
 
-                <div class="control-group">
-                    <label>自动连播：</label>
-                    <input type="checkbox" id="chord-auto-continue" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
-                    <span style="color: var(--text-tertiary); font-size: 12px;">
-                        一段播完停约 1.5 秒，自动换新的一段接着播（调性重新随机）
-                    </span>
+                <!-- 两颗独立开关（椭圆可选项，选中点亮），可以同时开着：
+                       连续播放 = 原「自动连播」（一段播完自动换新的一段）
+                       随身听    = 每小节最后一拍只弹这个和弦的根音（听根音对级数，不用看屏幕）
+                     role=switch + aria-checked：状态只在 JS 里改属性，样式全交给 CSS 的 [aria-checked="true"] -->
+                <div class="toggle-row">
+                    <button type="button" class="toggle-pill" id="chord-auto-continue" role="switch" aria-checked="false">
+                        <svg class="ic" aria-hidden="true"><use href="#i-repeat"/></svg>连续播放
+                    </button>
+                    <button type="button" class="toggle-pill" id="chord-portable" role="switch" aria-checked="false">
+                        <svg class="ic" aria-hidden="true"><use href="#i-headphones"/></svg>随身听模式
+                    </button>
+                </div>
+                <div class="toggle-hint">
+                    连续播放：一段播完停约 1.5 秒，自动换新的一段接着播（调性重新随机）<br>
+                    随身听模式：每小节的最后一拍只弹这个和弦的根音 —— 不用看屏幕，听根音就能对级数
                 </div>
             </div>
 
@@ -2099,6 +2166,16 @@
             } catch (e) { return false; }
         }
 
+        // 已经注册成功的动作名。浏览器读不回 setActionHandler 注册的 handler，
+        //   只能自己记账 —— 自测 / 验收脚本靠它证明"这两个动作真的挂上了"。
+        const mediaActions = [];
+
+        // 有 skip 钩子就交给它（返回 true = 已自行处理）；否则返回 false，调用方走原生行为。
+        function mediaSkip(dir) {
+            if (activeMediaHooks && activeMediaHooks.skip && activeMediaHooks.skip(dir)) return true;
+            return false;
+        }
+
         // 只注册一次。必须在任何播放之前调用 —— 和弦页可能比视唱页先播。
         function ensureMediaSession() {
             if (mediaSessionReady) return;
@@ -2106,35 +2183,65 @@
             mediaSessionReady = true;
 
             // Media Session API：iOS 锁屏显示播放控件
-            // 增强：1) 可拖动进度条（seekto + positionState 实时更新）
-            //       2) 上一首/下一首键默认「倒退5秒/前进5秒」（兼容 AirPods 双击耳机）；
-            //          当前页若给了 skip 钩子（和弦页 = 上一小节/下一小节），优先用它
-            //       3) 不注册 seekbackward/seekforward → 锁屏显示上一首/下一首图标（非倒退/快进）
-            navigator.mediaSession.setActionHandler('play', () => {
+            //
+            // 1) 可拖动进度条（seekto + positionState 实时更新）
+            // 2) 当前页若给了 skip 钩子（和弦页 = 上一小节/下一小节），
+            //    锁屏上的「上一首/下一首」与「±10 秒」**四颗键统一都走它**
+            // 3) 没有钩子时退回原生行为：previoustrack/nexttrack 各 ±5 秒，
+            //    seekbackward/seekforward 按系统给的 seekOffset（通常 10 秒）
+            //
+            // ★ 为什么必须补注册 seekbackward / seekforward
+            //   （用户 2026-10-06 反馈："锁屏的左右键变成前进后退 10s 了，之前是一个和弦"）：
+            //   iPhone 锁屏现在露出的是系统自绘的那对 ±10 秒键 —— 它们对应的是
+            //   seekbackward / seekforward 两个动作。只注册 previoustrack / nexttrack
+            //   已经不够用了：iOS 不再为它们回调我们的 handler，点下去便落回系统默认的
+            //   "跳 10 秒"。把这两个动作也注册上，同一对键就会走到 skip 钩子 = 跳一个和弦。
+            //   （图标由系统绘制，可能仍显示 ±10 的样子；那只是外观，行为已经是一个和弦。）
+            const reg = (action, fn) => {
+                try {
+                    navigator.mediaSession.setActionHandler(action, fn);
+                    mediaActions.push(action);
+                } catch (e) { /* 该动作在当前浏览器不支持 → 跳过，不影响其余 */ }
+            };
+
+            reg('play', () => {
                 if (activeMediaEl) activeMediaEl.play().catch(() => {});
                 navigator.mediaSession.playbackState = 'playing';
             });
-            navigator.mediaSession.setActionHandler('pause', () => {
+            reg('pause', () => {
                 if (activeMediaEl) activeMediaEl.pause();
                 navigator.mediaSession.playbackState = 'paused';
                 mediaUpdatePosition(activeMediaEl);
             });
-            navigator.mediaSession.setActionHandler('previoustrack', () => {
-                if (activeMediaHooks && activeMediaHooks.skip && activeMediaHooks.skip(-1)) return;
+            reg('previoustrack', () => {
+                if (mediaSkip(-1)) return;
                 if (activeMediaEl) {
                     activeMediaEl.currentTime = Math.max(0, activeMediaEl.currentTime - 5);
                 }
                 mediaUpdatePosition(activeMediaEl);
             });
-            navigator.mediaSession.setActionHandler('nexttrack', () => {
-                if (activeMediaHooks && activeMediaHooks.skip && activeMediaHooks.skip(1)) return;
+            reg('nexttrack', () => {
+                if (mediaSkip(1)) return;
                 if (activeMediaEl) {
                     const dur = activeMediaEl.duration || 0;
                     activeMediaEl.currentTime = Math.min(dur, activeMediaEl.currentTime + 5);
                 }
                 mediaUpdatePosition(activeMediaEl);
             });
-            navigator.mediaSession.setActionHandler('seekto', (details) => {
+            // ±10 秒那对键：有 skip 钩子（和弦页 = 上一/下一小节）就走钩子，
+            //   否则按系统给的步长跳 —— 与系统原生行为一致，不改变其它页面的手感。
+            const seekBy = (dir, details) => {
+                if (mediaSkip(dir)) return;
+                if (!activeMediaEl) return;
+                const off = (details && details.seekOffset) ? details.seekOffset : 10;
+                const dur = activeMediaEl.duration || 0;
+                const max = (isFinite(dur) && dur > 0) ? dur : Infinity;
+                activeMediaEl.currentTime = Math.max(0, Math.min(max, activeMediaEl.currentTime + dir * off));
+                mediaUpdatePosition(activeMediaEl);
+            };
+            reg('seekbackward', (details) => seekBy(-1, details));
+            reg('seekforward', (details) => seekBy(1, details));
+            reg('seekto', (details) => {
                 if (!activeMediaEl) return;
                 if (details.fastSeek && 'fastSeek' in activeMediaEl) {
                     activeMediaEl.fastSeek(details.seekTime);
@@ -2163,7 +2270,9 @@
             setNowPlaying: (meta) => mediaSetNowPlaying(meta),
             // 调试：看媒体会话现在归谁（自测用）
             getActiveMediaEl: () => activeMediaEl,
-            hasMediaHooks: () => !!activeMediaHooks
+            hasMediaHooks: () => !!activeMediaHooks,
+            // 调试：已经注册成功的锁屏动作名（浏览器里读不回 handler，只能这样证）
+            _mediaActions: () => mediaActions.slice()
         };
 
         // 媒体会话的 actionHandler 只注册一次，且必须早于任何播放（用户可能先点和弦页）

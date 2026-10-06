@@ -64,9 +64,15 @@
         //   'fourpart' = 四部和声（SATB，大谱表，每个和弦 4 个音，按和声学规则重复音）
         //   'triad'    = 原模式（单行高音谱表，三和弦 3 个音 / 七和弦 4 个音）
         voicingMode: 'fourpart',
-        // 自动连播：一段播完 → 停约 1.5 秒 → 自动换新的一段（调性重新随机）接着播，无限进行。
+        // 连续播放（原「自动连播」，界面 2026-10-06 改名）：
+        // 一段播完 → 停约 1.5 秒 → 自动换新的一段（调性重新随机）接着播，无限进行。
         // 任何手动操作（停止 / 播放 / 换一段 / 点小节 / 改参数 / 切视图）都会打断接力。
+        // ★ localStorage 里的键名仍叫 autoContinue —— 保存键一改，老用户的配置就丢了。
         autoContinue: false,
+        // 随身听模式（默认关）：**每小节的最后一拍不再弹柱式和弦，只弹这个和弦的根音**。
+        // 用途是"不看屏幕也能对答案"：最后一拍给根音，听出根音是几级 = 这个和弦是几级。
+        // 三种播放方式统一生效（柱式/分解/单音的末拍都换成根音单音）。
+        portable: false,
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
         // 各级出现七和弦的概率（%）
@@ -1307,9 +1313,9 @@
                     r.setAttribute('y', String(geom[m].y + bandTop));
                     r.setAttribute('width', String(geom[m].staveWidth));
                     r.setAttribute('height', String(bandH));
-                    // 微圆角 + 低不透明度（0.08）：高亮像一层薄薄的暖色，不再是"一个个硬方框"
+                    // 微圆角 + 低不透明度的中性灰：像一层极淡的阴影，不再是"一个个硬方框"
                     r.setAttribute('rx', '6');
-                    r.setAttribute('fill', '#d97706');
+                    r.setAttribute('fill', HL_FILL);
                     r.setAttribute('fill-opacity', '0');
                     r.setAttribute('pointer-events', 'all');
                     r.setAttribute('style', 'cursor:pointer');
@@ -1319,7 +1325,7 @@
                 }
                 // 重绘不丢状态：若正在播放，把高亮恢复回去
                 if (highlightedMeasure >= 0 && highlightedMeasure < measureRects.length) {
-                    measureRects[highlightedMeasure].setAttribute('fill-opacity', '0.08');
+                    measureRects[highlightedMeasure].setAttribute('fill-opacity', HL_OP);
                 }
             }
 
@@ -1354,20 +1360,46 @@
     // 音频：时间表 / 采样解析 / 离线混音
     // ------------------------------------------------------------
 
+    // 随身听模式要用的"这个和弦的根音"（单音）。
+    //   不能直接取 midis[0] —— 那是最低音，转位时它不是根音（比如 Ⅰ⁶ 的低音是 3）。
+    //   做法：该级数在调内的根音 pc（scale[degree-1].pc），取离和弦最低音最近的那个八度；
+    //   相差超过三全音（> 6 半音）就往下取一个八度，免得根音听着比整个和弦还高。
+    //   scale 拿不到时退回最低音（不会出错，只是转位时提示音不够精确）。
+    function chordRootMidi(chord, scale) {
+        const d = chord.degree;
+        if (!scale || !scale[d - 1] || !chord.midis || !chord.midis.length) return chord.midis[0];
+        const rootPc = scale[d - 1].pc;
+        const bass = chord.midis[0];
+        let off = (((rootPc - (bass % 12)) % 12) + 12) % 12;
+        if (off > 6) off -= 12;
+        return bass + off;
+    }
+
     // 一小节 1 个和弦，每拍弹 1 下（四分音符柱式）
     // 播放排程
     //   mode 'block'     柱式：一小节 4 拍，每拍 1 下（各声部同时发声）—— 原有行为，默认值
     //   mode 'arpeggio'  分解：一小节 16 个十六分音符，和弦音（低→高）循环滚动
     //   mode 'bass'      单音：每小节只弹一次最低音，长音铺满整小节
     // 事件结构 { time, midis, dur }；分解/单音会额外带 hold / gain，用来覆盖包络默认值。
-    function buildChordSchedule(chords, tempo, mode) {
+    //
+    // opts.portable（随身听模式，默认 false）：
+    //   **每小节的最后一拍只弹这个和弦的根音**，三种方式统一 ——
+    //   柱式换掉第 4 拍、分解换掉末拍那一组十六分、单音本来整小节就一颗（换成根音）。
+    //   用户 2026-10-06："不用看屏幕，听到最后一个根音就知道这个和弦是几级"。
+    //   ★ portable 为 false 时走的是与改造前**一模一样**的分支（逐字节不变），守和声回归基线。
+    function buildChordSchedule(chords, tempo, mode, opts) {
         mode = mode || 'block';
+        const o = opts || {};
+        const portable = !!o.portable;
+        const scale = o.scale || null;
         const beatDur = 60 / tempo;
         const events = [];
 
         for (let m = 0; m < chords.length; m++) {
             const chord = chords[m];
             const base = m * 4 * beatDur;
+            // 随身听模式要用的根音。关着的时候连算都不算，不引入任何数值差异。
+            const root = portable ? chordRootMidi(chord, scale) : 0;
 
             if (mode === 'arpeggio') {
                 const six = beatDur / 4;              // 十六分音符时长
@@ -1379,7 +1411,10 @@
                     ? [chord.midis[0], chord.midis[1], chord.midis[2], chord.midis[0] + 12]
                     : chord.midis;
                 const pn = pattern.length;
-                for (let k = 0; k < 16; k++) {
+                // 随身听：末拍那一组（k = 12..15）不排十六分，改成一颗根音按住一整拍 ——
+                //   前半小节照旧滚，最后一拍"落地"给根音，听感上就是一句收束。
+                const kb = portable ? 12 : 16;
+                for (let k = 0; k < kb; k++) {
                     events.push({
                         time: base + k * six,
                         midis: [pattern[k % pn]],     // 从低音起，逐音上行，循环
@@ -1391,19 +1426,30 @@
                         gain: 0.5
                     });
                 }
+                if (portable) {
+                    events.push({
+                        time: base + 3 * beatDur,
+                        midis: [root],
+                        dur: beatDur,
+                        hold: beatDur,
+                        gain: 0.5                  // 与分解的其余音同响度
+                    });
+                }
             } else if (mode === 'bass') {
                 events.push({
+                    // midis 升序 → [0] 就是最低音；随身听模式下换成根音
+                    midis: [portable ? root : chord.midis[0]],
                     time: base,
-                    midis: [chord.midis[0]],          // midis 升序 → [0] 就是最低音
                     dur: 4 * beatDur                  // 长音＝整小节；hold 交给 legato 决定
                 });
             } else {
                 for (let b = 0; b < 4; b++) {
                     // 保持原来的表达式写法（不做 base + b*beat 的等价重构）：
                     // 浮点下两者会有末位差异，这里是"原行为逐字节不变"的保险。
+                    const lastBeat = portable && b === 3;
                     events.push({
                         time: (m * 4 + b) * beatDur,
-                        midis: chord.midis,
+                        midis: lastBeat ? [root] : chord.midis,
                         dur: beatDur
                     });
                 }
@@ -1493,7 +1539,11 @@
         if (!host) throw new Error('音频桥接不可用');
 
         report('构建时间表…');
-        const events = buildChordSchedule(chords, tempo, mode);
+        // 随身听模式：末拍只给根音。scale 用来算"这个级数的根音是哪个音"。
+        const events = buildChordSchedule(chords, tempo, mode, {
+            scale: data && data.scale,
+            portable: !!settings.portable
+        });
 
         const legato = LEGATO;
         // 事件自带 hold 时用它（分解模式固定一拍），否则按连奏算 —— 柱式/单音行为不变
@@ -1614,6 +1664,7 @@
         if (typeof s.allowSecondInv === 'boolean') settings.allowSecondInv = s.allowSecondInv;
         if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
         if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
+        if (typeof s.portable === 'boolean') settings.portable = s.portable;
         if (typeof s.adaptiveFromStats === 'boolean') settings.adaptiveFromStats = s.adaptiveFromStats;
         // 连奏已固定 1.0（用户 2026-10-06 拍板，滑块已删）：localStorage 里的旧值一律忽略
         if (s.degrees && typeof s.degrees === 'object') {
@@ -1944,6 +1995,14 @@
     let sheetGeom = [];           // 每小节的几何（由 renderChordSheet 落盘）
     let measureRects = [];        // 每小节的命中/高亮 <rect>
     let highlightedMeasure = -1;  // 当前高亮的小节索引（-1 = 无）
+
+    // 判定高亮框的填充与不透明度（想再淡/再明显，只改这两个数）。
+    //   用户 2026-10-06 第一次把琥珀 #d97706 降到 0.08 仍觉得"太醒目"，
+    //   第二次拍板：**换成灰色、浅一点的那种，能分辨出就行** —— 于是改成中性冷灰。
+    //   为什么琥珀在米黄谱纸上那么跳：纸本身就偏暖，琥珀几乎同色系，0.08 也读得出轮廓；
+    //   中性灰与米黄有明度差但无色相差，看着就是"这一小节被轻轻圈了一下"。
+    const HL_FILL = '#8b93a1';
+    const HL_OP = '0.10';
     let lastPlayMode = 'block';   // 记住上次按的播放键（点小节时沿用它）
     let blobData = null;          // 已渲染音频对应的 data（判断能否直接 seek）
     let blobMode = null;          // 已渲染音频对应的播放方式（柱式/分解/单音）
@@ -2006,7 +2065,9 @@
             voicingMode: document.getElementById('chord-voicing-mode'),
             // 播放方式改成了连体椭圆滑块（原 generate / play / playArp / playBass / stop 五个键已删）
             playSeg: document.getElementById('chord-play-seg'),
+            // 两颗椭圆开关（都是 button[role=switch]，不是 checkbox —— 用户 2026-10-06 拍板）
             autoContinue: document.getElementById('chord-auto-continue'),
+            portable: document.getElementById('chord-portable'),
             grid: document.getElementById('degree-grid'),
             inversion: document.getElementById('chord-inversion'),
             secondInv: document.getElementById('chord-second-inv'),
@@ -2134,7 +2195,7 @@
         }
         highlightedMeasure = m;
         if (m >= 0 && measureRects[m]) {
-            measureRects[m].setAttribute('fill-opacity', '0.08');
+            measureRects[m].setAttribute('fill-opacity', HL_OP);
             // 播放器里的谱表页展开时，让当前小节自动滚进视野（克制：仅在小节变化时触发）
             if (mpStageView === 'sheet' && mpExpanded && els && els.mpSheetPage) {
                 const scroller = els.mpSheetPage;
@@ -2232,7 +2293,7 @@
         if (!settings.autoContinue) return;
         cancelAutoNext();                        // 清掉可能残留的上一次接力（同时抬高代数）
         const brk = autoBreak;
-        showAutoInfo('自动连播：马上换新的一段…', 'i-repeat');
+        showAutoInfo('连续播放：马上换新的一段…', 'i-repeat');
         autoTimer = setTimeout(() => {
             autoTimer = null;
             if (brk !== autoBreak) return;
@@ -2654,6 +2715,14 @@
         if (els.playSeg) els.playSeg.classList.toggle('is-disabled', !on);
     }
 
+    // 设置页那两颗椭圆开关（连续播放 / 随身听模式）的选中态。
+    //   只写 aria-checked，外观全交给 CSS 的 [aria-checked="true"] —— 状态与样式不打架。
+    function syncTogglePills() {
+        if (!els) return;
+        if (els.autoContinue) els.autoContinue.setAttribute('aria-checked', settings.autoContinue ? 'true' : 'false');
+        if (els.portable) els.portable.setAttribute('aria-checked', settings.portable ? 'true' : 'false');
+    }
+
     // 把滑块挪到「当前播放方式」那一项上。
     //   几何量两遍：首次调用时这块可能刚被 display 切出来，offsetWidth 还没稳。
     function updateSegActive() {
@@ -2937,18 +3006,37 @@
             updateSegActive();
         }
 
-        // 🔁 自动连播：一段播完 → 停一下 → 自动换新的一段接着播
+        // 🔁 连续播放（原「自动连播」，界面 2026-10-06 改名）：一段播完 → 停一下 → 自动换新的一段接着播
+        //   ★ 现在是 button[role=switch]，必须用 click 切 aria-checked ——
+        //     对 button 来说 'change' 事件根本不会触发（那是 input 的），
+        //     照旧写就会"点下去没反应"。
         if (els.autoContinue) {
-            els.autoContinue.checked = settings.autoContinue;
-            els.autoContinue.addEventListener('change', (e) => {
-                settings.autoContinue = e.target.checked;
+            els.autoContinue.addEventListener('click', () => {
+                settings.autoContinue = !settings.autoContinue;
                 saveSettings();
+                syncTogglePills();
                 if (!settings.autoContinue) {
                     cancelAutoNext();
-                    showAutoInfo('已关闭自动连播');
+                    showAutoInfo('已关闭连续播放');
                 }
             });
         }
+
+        // 🎧 随身听模式：每小节最后一拍只弹这个和弦的根音。
+        //   它改的是"播放排程"→ 当前这段渲染好的 WAV 立刻过期。
+        //   用户拍板"切完立刻能听到效果"，所以这里直接作废 + 从头重放一遍。
+        if (els.portable) {
+            els.portable.addEventListener('click', () => {
+                settings.portable = !settings.portable;
+                saveSettings();
+                syncTogglePills();
+                invalidateRenderedAudio(settings.portable
+                    ? '随身听模式已开启：每小节的最后一拍只给根音，正在重放…'
+                    : '随身听模式已关闭，正在重放…');
+                doPlay(lastPlayMode, 0);
+            });
+        }
+        syncTogglePills();
 
         // （原「停止」键已删：要停下来统一按底部播放器的暂停键，那一下同样会打断自动连播接力）
 
@@ -4109,6 +4197,22 @@
         }),
         _setMeasureHighlight: setMeasureHighlight,
         _measureDuration: measureDuration,
+        // 播放排程（调试 / 自测用）：随身听模式动到的就是它 —— 末拍该出现几个音、是哪个音。
+        //   第二个参数可传入一段 progression（Node 里没有 DOM，data 是空的，靠它测）。
+        _getSchedule: (mode, prog) => {
+            const p = prog || data;
+            if (!p) return [];
+            return buildChordSchedule(p.chords, settings.tempo, mode, {
+                scale: p.scale, portable: !!settings.portable
+            });
+        },
+        _chordRootMidi: (m) => ((data && data.chords[m]) ? chordRootMidi(data.chords[m], data.scale) : null),
+        // 当前这段的极简快照（调内各级 pc + 每小节的级数与音）：供自测独立验证"根音对不对"
+        _getDataBrief: () => (data ? {
+            key: data.key,
+            scalePc: data.scale.map((s) => s.pc),
+            chords: data.chords.map((c) => ({ degree: c.degree, inversion: c.inversion, midis: c.midis.slice() }))
+        } : null),
         _getAudioEl: () => chordAudioEl,
         _getBlobUrl: () => blobUrl,
         // 自动连播（调试 / 自测用）
@@ -4123,7 +4227,8 @@
         }),
         _cancelAutoNext: cancelAutoNext,
         _scheduleAutoNext: scheduleAutoNext,
-        _getCheckBox: () => els.autoContinue,
+        _getCheckBox: () => els.autoContinue,   // 名字沿用（老的验收脚本在用）；现在返回的是那颗 switch 按钮
+        _syncToggles: syncTogglePills,
         // 锁屏封面（调试 / 自测用）
         _artSupported: artSupported,
         _buildChordArtwork: buildChordArtwork,
