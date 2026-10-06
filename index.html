@@ -410,6 +410,13 @@
             gap: 15px;
         }
 
+        /* 标签一律不折行 —— 窄屏（390px）下宁可让滑块短一点，
+           也不要出现「速 / 度：」这种把一个词劈成两行的观感。 */
+        .control-group label,
+        .tempo-control label {
+            white-space: nowrap;
+        }
+
         .tempo-control input[type="range"] {
             width: 150px;
             height: 6px;
@@ -1476,12 +1483,12 @@
             <circle cx="8" cy="17" r="2.1"/>
         </symbol>
         <symbol id="i-arpeggio" viewBox="0 0 24 24">
-            <circle cx="5.6" cy="17.8" r="2.1"/>
-            <path d="M7.7 17.8V10.2"/>
-            <circle cx="12" cy="15.2" r="2.1"/>
-            <path d="M14.1 15.2V7.6"/>
-            <circle cx="18.4" cy="12.6" r="2.1"/>
-            <path d="M20.5 12.6V5"/>
+            <circle cx="5.9" cy="18" r="2.3"/>
+            <path d="M8.2 18v-6.2"/>
+            <circle cx="12" cy="15.4" r="2.3"/>
+            <path d="M14.3 15.4V9.2"/>
+            <circle cx="18.1" cy="12.8" r="2.3"/>
+            <path d="M20.4 12.8V6.6"/>
         </symbol>
         <symbol id="i-note" viewBox="0 0 24 24">
             <circle cx="9" cy="17.4" r="2.7"/>
