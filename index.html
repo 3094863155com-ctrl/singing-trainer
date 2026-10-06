@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>和弦听辨训练</title>
     <script src="vexflow.js"></script>
 <script src="chord_recognition.js"></script>
@@ -795,6 +795,18 @@
             pointer-events: auto;
         }
 
+        /* 连按两次卡片不该放大页面、也不该选中面板里的文字（提示行 / 按钮文案）：
+           面板整块禁选用；双击缩放另由 viewport 的 user-scalable=no 与
+           .mp-sheet 的 touch-action: manipulation 一起压掉。 */
+        .mp,
+        .mp *,
+        .mp-error,
+        .mp-aid {
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-touch-callout: none;
+        }
+
         /* ---------- 收起态：一条胶囊 ---------- */
         .mp-bar {
             height: var(--mp-bar-h);
@@ -875,20 +887,6 @@
             50% { transform: scaleY(2.1); }
         }
 
-        /* ★ 有真实音频包络时（JS 给 .mp-wave 加 .is-live，并逐条写行内 scaleY）：
-           必须把上面那条 keyframe 动画关掉 —— CSS 动画的优先级高于行内 style，
-           不关的话每帧写的 transform 会被动画原封不动盖掉，看着还是"假起伏"。
-           波形跟着真实音频走以后，高度就是这一段音乐的走势图：
-           左边是刚放过的、右边是将要放的（窗口以当前播放位置为中心）。 */
-        .mp-wave.is-live i {
-            background: var(--accent);
-            transition: transform 0.1s linear;
-        }
-
-        .mp-bar__open.is-playing .mp-wave.is-live i {
-            animation: none;
-        }
-
         .mp-bar__chevron {
             flex: 0 0 auto;
             display: flex;
@@ -941,13 +939,13 @@
         .mp-ring__track {
             fill: none;
             stroke: var(--border-strong);
-            stroke-width: 2.5;
+            stroke-width: 1.5;
         }
 
         .mp-ring__bar {
             fill: none;
             stroke: var(--accent);
-            stroke-width: 2.5;
+            stroke-width: 1.5;
             stroke-linecap: round;
             stroke-dasharray: 1 1;
             /* 走到哪亮到哪：值由 mpPaintProgress() 写（1 − 进度） */
@@ -978,21 +976,11 @@
             transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
             will-change: transform;
             overflow: hidden;
+            touch-action: manipulation;   /* 禁双击缩放；谱表页的 pan-y 仍在其上覆盖，滚动不受影响 */
         }
 
         .mp[data-state="expanded"] .mp-sheet {
-            /* 展开态由变量接管位移：从顶行往下拖时 JS 只改 --mp-sheet-y；
-               松手决定收起就把状态切回 collapsed，过渡便会从"当前拖到哪"平滑滑到 100% */
-            transform: translateY(var(--mp-sheet-y, 0px));
-        }
-
-        /* 从顶行往下拖＝收起：拖动中关掉过渡（严格跟手），松手没够阈值就回弹 */
-        .mp-sheet.is-collapsing {
-            transition: none;
-        }
-
-        .mp-sheet.is-settling {
-            transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+            transform: translateY(0);
         }
 
         .mp-sheet__top {
@@ -1002,9 +990,7 @@
             align-items: center;
             justify-content: space-between;
             gap: var(--mp-gap);
-            /* 顶行同时是「往下拖收起」的抓手：这行的触摸事件不交给浏览器，
-               才有机会在 pointermove 里读到纵向位移（面板其余区域照旧）。 */
-            touch-action: none;
+            touch-action: manipulation;
         }
 
         .mp-icon-btn {
@@ -1148,74 +1134,27 @@
             transform: scale(1);
         }
 
-        /* 遮住时代替它出现的中性卡片。尺寸由 JS 钉成和那张图一样的正方形。
-           刻意不带任何级数颜色。
-           设计（用户 2026-10-06 拍板：要"被遮盖的波形"，但不走拟物，要简洁现代）：
-             · 底 → 极浅的冷灰渐变（不是纯白，也不是灰塑料），一根 1px 实线细边收轮廓；
-             · 中 → 一列真实音频包络画的竖条（JS: mpPaintHiddenWave）；
-             · 上 → 一条"中间浓、上下渐隐"的雾带：波形中段被盖住，上下两端透出来
-                   → 一眼"这里有内容"，但读不出是什么；
-             · 顶 → 居中的胶囊提示（手指图标 + 按住看答案），自带半透明白底，压得住雾。 */
+        /* 遮住时代替它出现的中性灰卡片。尺寸由 JS 钉成和那张图一样的正方形。
+           刻意不带任何级数颜色，只写一句提示。 */
         .mp-cover-hidden {
             position: absolute;
             left: 50%;
             top: 50%;
             transform: translate(-50%, -50%);
-            display: block;
-            overflow: hidden;
-            background: linear-gradient(180deg, #f5f7fa 0%, #eaedf3 100%);
-            border: 1px solid rgba(16, 24, 40, 0.14);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            font-family: inherit;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--surface);
+            border: 1px dashed var(--border-strong);
             border-radius: var(--r-lg);
-            box-shadow: var(--shadow-md);
             cursor: pointer;
             transition: transform 0.14s ease, opacity 0.12s ease, border-color 0.14s ease, background-color 0.14s ease;
-        }
-
-        .mp-cover-hidden__wave {
-            position: absolute;
-            inset: 0;
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
-
-        /* 雾带：中段几乎全盖，上下渐隐 → 波形像沉在雾里 */
-        .mp-cover-hidden__veil {
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(180deg,
-                rgba(245, 247, 250, 0) 0%,
-                rgba(245, 247, 250, 0.44) 30%,
-                rgba(245, 247, 250, 0.88) 44%,
-                rgba(245, 247, 250, 0.88) 56%,
-                rgba(245, 247, 250, 0.44) 70%,
-                rgba(245, 247, 250, 0) 100%);
-            pointer-events: none;
-        }
-
-        .mp-cover-hidden__hint {
-            position: absolute;
-            left: 50%;
-            top: 50%;
-            transform: translate(-50%, -50%);
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            padding: 8px 16px;
-            font-family: inherit;
-            font-size: 14px;
-            font-weight: 600;
-            letter-spacing: 0.02em;
-            white-space: nowrap;
-            color: var(--text-tertiary);
-            background: rgba(255, 255, 255, 0.74);
-            border: 1px solid rgba(16, 24, 40, 0.08);
-            border-radius: var(--r-pill);
-        }
-
-        .mp-cover-hidden__hint .ic {
-            --ic: 15px;
-            color: var(--text-tertiary);
         }
 
         /* 阶段一：按下（还没到长按阈值）—— 卡片缩一下 + 边框加深 + 舞台底部进度条
@@ -1223,7 +1162,7 @@
         .mp-sheet__stage.is-pressing .mp-cover-hidden {
             transform: translate(-50%, -50%) scale(0.94);
             border-color: rgba(16, 24, 40, 0.34);
-            background: linear-gradient(180deg, #edf0f5 0%, #e3e7ee 100%);
+            background: #eef0f4;
         }
 
         .mp-sheet__stage::after {
@@ -1957,8 +1896,8 @@
                 <!-- 方案 B：胶囊 + 沿外圈走一根进度描边（比原来的圆环更贴键形，
                      也不会在"横向加宽后"变成一个突兀的圆） -->
                 <svg class="mp-ring" viewBox="0 0 64 40" preserveAspectRatio="none" aria-hidden="true">
-                    <rect class="mp-ring__track" x="1.5" y="1.5" width="61" height="37" rx="18.5"/>
-                    <rect class="mp-ring__bar" id="chord-mp-ring-bar" pathLength="1" x="1.5" y="1.5" width="61" height="37" rx="18.5"/>
+                    <rect class="mp-ring__track" x="0.75" y="0.75" width="62.5" height="38.5" rx="19.25"/>
+                    <rect class="mp-ring__bar" id="chord-mp-ring-bar" pathLength="1" x="0.75" y="0.75" width="62.5" height="38.5" rx="19.25"/>
                 </svg>
                 <svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg>
             </button>
@@ -1980,14 +1919,7 @@
                  手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
             <div class="mp-sheet__stage" id="chord-mp-stage">
                 <canvas class="mp-cover" id="chord-mp-cover"></canvas>
-                <!-- 遮住态：一张"被雾盖住的波形" + 居中的按住提示。
-                     波形用真实音频包络画的静态缩略图（JS: mpPaintHiddenWave），
-                     上面盖一层中间浓、上下渐隐的雾 —— 看得出有内容，读不出是哪个和弦。 -->
-                <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>
-                    <canvas class="mp-cover-hidden__wave" id="chord-mp-hidden-wave" aria-hidden="true"></canvas>
-                    <span class="mp-cover-hidden__veil" aria-hidden="true"></span>
-                    <span class="mp-cover-hidden__hint"><svg class="ic" aria-hidden="true"><use href="#i-tap"/></svg>按住看答案</span>
-                </div>
+                <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>按住看答案</div>
                 <!-- 谱表页：可读大小、上下滚动；点击小节跳转保留 -->
                 <div class="mp-page--sheet" id="chord-mp-sheet-page" hidden>
                     <div class="sheet-music-container">
