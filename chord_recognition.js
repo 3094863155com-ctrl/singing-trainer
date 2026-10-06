@@ -1313,10 +1313,12 @@
                     r.setAttribute('y', String(geom[m].y + bandTop));
                     r.setAttribute('width', String(geom[m].staveWidth));
                     r.setAttribute('height', String(bandH));
-                    // 微圆角 + 低不透明度的中性灰：像一层极淡的阴影，不再是"一个个硬方框"
+                    // 微圆角；描边=每小节外面那圈"包裹框"（浅灰细线），填充=点亮时的色块
                     r.setAttribute('rx', '6');
                     r.setAttribute('fill', HL_FILL);
                     r.setAttribute('fill-opacity', '0');
+                    r.setAttribute('stroke', HL_STROKE);
+                    r.setAttribute('stroke-width', HL_SW);
                     r.setAttribute('pointer-events', 'all');
                     r.setAttribute('style', 'cursor:pointer');
                     r.dataset.measure = String(m);
@@ -1996,13 +1998,17 @@
     let measureRects = [];        // 每小节的命中/高亮 <rect>
     let highlightedMeasure = -1;  // 当前高亮的小节索引（-1 = 无）
 
-    // 判定高亮框的填充与不透明度（想再淡/再明显，只改这两个数）。
-    //   用户 2026-10-06 第一次把琥珀 #d97706 降到 0.08 仍觉得"太醒目"，
-    //   第二次拍板：**换成灰色、浅一点的那种，能分辨出就行** —— 于是改成中性冷灰。
-    //   为什么琥珀在米黄谱纸上那么跳：纸本身就偏暖，琥珀几乎同色系，0.08 也读得出轮廓；
-    //   中性灰与米黄有明度差但无色相差，看着就是"这一小节被轻轻圈了一下"。
-    const HL_FILL = '#8b93a1';
-    const HL_OP = '0.10';
+    // 每小节热区 rect 上"两件互不相干的事"，别再混（用户 2026-10-06 纠正过一次）：
+    //   fill / fill-opacity   = 点亮时的**色块**（铺满整行的暖琥珀）
+    //   stroke / stroke-width = 每小节外面那圈**包裹框**（浅灰细线，淡到"能分辨出就行"）
+    //   ★ stroke 必须**显式**写在 rect 上：不写就会继承 VexFlow 根 <svg> 的
+    //     stroke=black / stroke-width=1（SVGContext 构造器把它写在根 <svg> 上，
+    //     而 stroke 是可继承属性）→ 每小节默认自带一圈黑框。
+    //     用户说的"每小节外面包裹的那个框（触发区的轮廓）"就是它。
+    const HL_FILL = '#d97706';    // 点亮填充：琥珀（恢复第十轮那版的颜色）
+    const HL_OP = '0.08';         // 填充深浅 ← 只改这一个数就能整体调浓淡
+    const HL_STROKE = '#c9ccd4';  // 包裹框描边：冷浅灰 ← 只改这一个数就能调框的深浅
+    const HL_SW = '1';            // 包裹框线宽（想更清楚可 1.2）
     let lastPlayMode = 'block';   // 记住上次按的播放键（点小节时沿用它）
     let blobData = null;          // 已渲染音频对应的 data（判断能否直接 seek）
     let blobMode = null;          // 已渲染音频对应的播放方式（柱式/分解/单音）
