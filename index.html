@@ -1187,6 +1187,16 @@
             transform: scale(1);
         }
 
+        /* ★ 谱表页：卡片（连同"按住看答案"占位卡）整体隐掉。
+           .mp-page--sheet 是 absolute inset:0 盖在卡片上，但它自己是透明底 ——
+           卡片那根 1px 描边 + 阴影会从谱面四周透出来，看着像"谱表浮在卡片上"。
+           这里按页把卡片整块藏掉（用户 2026-10-07 报的现象）。 */
+        .mp-sheet__stage.is-sheet .mp-cover,
+        .mp-sheet__stage.is-sheet .mp-cover-hidden {
+            visibility: hidden;
+            opacity: 0;
+        }
+
         /* 遮住时代替它出现的中性灰卡片。尺寸由 JS 钉成和那张图一样的正方形。
            刻意不带任何级数颜色，只写一句提示。 */
         .mp-cover-hidden {
@@ -1252,7 +1262,7 @@
             display: none;
         }
 
-        /* 手势提示行（发现性：不然没人知道能下滑/左滑） */
+        /* 手势提示行（发现性：不然没人知道能上下滑/左滑） */
         .mp-sheet__hint {
             flex: 0 0 auto;
             text-align: center;
@@ -1415,7 +1425,7 @@
             background: var(--surface);
         }
 
-        /* ---------- 听辩辅助浮窗（长按 + 上滑） ---------- */
+        /* ---------- 听辩辅助浮窗（长按 + 下滑；2026-10-07 与报错窗对调） ---------- */
         .mp-aid {
             position: fixed;
             inset: 0;
@@ -1872,6 +1882,16 @@
                     <span style="color: var(--text-tertiary);">BPM</span>
                 </div>
 
+                <!-- 强调低音（用户 2026-10-07）：把每小节的**最低音**（谱面最下面那个音）
+                     单独提亮，帮听辨时抓住低声部。滑块 0 = 完全不强调（默认）。
+                     ★ 只作用于主播放那一段离线渲染的音频；听辨辅助窗里试听的和弦保持原样。
+                     ★ 数值 = 低音增益提升的百分比；100% 时低音约 3 倍（上限见 BASS_EMPH_MAX）。 -->
+                <div class="tempo-control">
+                    <label>强调低音：</label>
+                    <input type="range" id="chord-bass-emph" min="0" max="100" step="5" value="0">
+                    <span class="tempo-value" id="chord-bass-emph-val">0</span>
+                </div>
+
                 <!-- 播放方式：连体椭圆滑块（三选一）。点一下就切成该方式，并把当前这段按该方式重放一遍。
                      生成新一段统一走底部常驻播放器的「下一首」；页面不再放 生成/播放/停止 三个键
                      （用户 2026-10-06 拍板）。 -->
@@ -1888,13 +1908,15 @@
                      ★ 只管页面里「按住卡片」看到的那张画；**锁屏封面恒为 roman**，
                        不受这个开关影响（这条是用户明确要求的）。
                      复用 .seg 那套连体椭圆滑块，不加新 CSS。 -->
+                <!-- 标题 + 两档滑块。用户 2026-10-07：只留标题「按住卡片显示的内容」，
+                     后面那段灰字说明删掉（设置页的说明文字太多了）。 -->
+                <div class="control-group" style="width: 100%; justify-content: center;">
+                    <label>按住卡片显示的内容</label>
+                </div>
                 <div class="seg" id="chord-reveal-seg" role="radiogroup" aria-label="按住卡片显示的内容">
                     <span class="seg__thumb" aria-hidden="true"></span>
                     <button type="button" class="seg__opt" data-reveal="roman" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-card"/></svg>和弦标记</button>
                     <button type="button" class="seg__opt" data-reveal="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>低音级数</button>
-                </div>
-                <div class="toggle-hint">
-                    按住卡片显示的内容：和弦标记＝罗马数字＋和弦音名；低音级数＝只给低音在调内的简谱数字（锁屏封面不受影响）
                 </div>
 
                 <!-- 两颗独立开关（椭圆可选项，选中点亮），可以同时开着：
@@ -1908,10 +1930,6 @@
                     <button type="button" class="toggle-pill" id="chord-portable" role="switch" aria-checked="false">
                         <svg class="ic" aria-hidden="true"><use href="#i-headphones"/></svg>随身听模式
                     </button>
-                </div>
-                <div class="toggle-hint">
-                    连续播放：一段播完停约 1.5 秒，自动换新的一段接着播（调性重新随机）<br>
-                    随身听模式：每小节的最后一拍只弹这个和弦的根音 —— 不用看屏幕，听根音就能对级数
                 </div>
             </div>
 
@@ -2054,9 +2072,10 @@
                 <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="错题练习开关"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg>错题练习</button>
             </div>
 
-            <!-- 长按热区：整个舞台。按住=揭示答案；按住下滑=报错；按住上滑=听辩辅助；
+            <!-- 长按热区：整个舞台。按住=揭示答案；按住上滑=报错；按住下滑=听辩辅助；
                  按住左/右滑=上一个/下一个和弦（左右互通、可连滑）。顶行按钮切换卡片⇄谱表。
-                 手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。 -->
+                 手势逻辑全在 chord_recognition.js（它要实时读模块内部状态）。
+                 ★ 用户 2026-10-07：上下两条手势**对调**（原来上滑是辅助、下滑是报错）。 -->
             <div class="mp-sheet__stage" id="chord-mp-stage">
                 <canvas class="mp-cover" id="chord-mp-cover"></canvas>
                 <div class="mp-cover-hidden" id="chord-mp-cover-hidden" hidden>按住看答案</div>
@@ -2066,11 +2085,11 @@
                         <div id="chord-sheet-music"></div>
                     </div>
                     <div class="key-hint" id="chord-key-hint"></div>
-                    <div class="key-hint" style="margin-top:4px;"><svg class="ic" aria-hidden="true"><use href="#i-bulb"/></svg> 点击谱面上的任意小节，可从该小节开始播放</div>
+                    <div class="key-hint" style="margin-top:4px;"><svg class="ic" aria-hidden="true"><use href="#i-bulb"/></svg> 点小节点一下：正在播＝从这一小节接着播；暂停时＝只把这一小节响一下</div>
                 </div>
             </div>
 
-            <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表</div>
+            <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住上滑报错 · 按住下滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表</div>
 
             <div class="mp-sheet__actions">
                 <button class="mp-action-btn" id="chord-mp-prev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg>上一个</button>
@@ -2084,7 +2103,7 @@
         </div>
     </div>
 
-    <!-- 报错浮窗：按住下滑 → 选一个「我听成了哪个级数」 -->
+    <!-- 报错浮窗：按住上滑 → 选一个「我听成了哪个级数」（2026-10-07 与辅助窗对调） -->
     <div id="chord-mp-error" class="mp-error" role="dialog" aria-modal="true" hidden>
         <div class="mp-error__panel">
             <div class="mp-error__title">你听成了哪个级数？</div>
@@ -2093,7 +2112,7 @@
         </div>
     </div>
 
-    <!-- 听辨辅助浮窗：按住上滑 → 暂停并播冻结和弦的「和弦分解」；点窗外关闭并恢复播放。
+    <!-- 听辨辅助浮窗：按住下滑 → 暂停并播冻结和弦的「和弦分解」；点窗外关闭并恢复播放。
          版式（用户 2026-10-06 定）：左列两个按钮（上=和弦分解 / 下=柱式，图标即示意），
          右列一列音，**按音高自下而上**排（最低音在最下）。
          ★ 第十六轮改：右列从"音名（C G C E）"改成**简谱数字 + 和弦几音标注**——

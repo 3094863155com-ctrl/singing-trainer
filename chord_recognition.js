@@ -87,8 +87,20 @@
         //  ★ 这个开关**只影响页面迷你播放器里那张 canvas**（按住卡片看到的那张）。
         //    锁屏 / 控制中心 / 灵动岛的封面走 coverBlobUrl → drawCover(不带 opts)，
         //    恒为 'roman'，不受这里影响（用户明确要求）。
-        revealMode: 'roman'
+        revealMode: 'roman',
+        // 强调低音（用户 2026-10-07）：把**每小节的最低音**（谱面最下面那个音）单独提亮，
+        //   帮听辨时抓住低声部。数值 = 低音增益要提升的百分比：
+        //     0   = 完全不强调（**默认**，此时混音路径与改造前逐字节一致）
+        //     100 = 低音 ×(1 + BASS_EMPH_MAX)
+        //   ★ 只作用于主播放那段离线渲染的音频；听辨辅助窗里试听的和弦保持原样（用户拍板）。
+        //   ★ 实现在 renderChordAudio 的混音循环里按"该小节最低音"提增益 ——
+        //     刻意不动 buildChordSchedule，和声排程回归基线（triad sha256）才守得住。
+        bassEmphasis: 0
     };
+
+    // 强调低音的上限倍数：100% 时低音 = 原增益 ×(1 + 这个数)。
+    //   2.0 → 3 倍。再高会明显盖住其它声部（而且峰值归一化会把整体音量压下去）。
+    const BASS_EMPH_MAX = 2.0;
 
     // ------------------------------------------------------------
     // 调式拼写（支持 E# / B# / Cb / Fb —— 现有 noteNameIndex 不支持）
@@ -1541,6 +1553,13 @@
         return out;
     }
 
+    // 强调低音：把滑块 0..100 换算成"低音增益要提升的比例"。0 = 关闭（返回 0，混音路径不变）。
+    function bassEmphasisFactor() {
+        const v = Number(settings.bassEmphasis) || 0;
+        const k = Math.max(0, Math.min(100, v)) / 100;
+        return (k > 0) ? k * BASS_EMPH_MAX : 0;
+    }
+
     async function renderChordAudio(chords, tempo, onProgress, mode) {
         mode = mode || 'block';
         const report = (t) => { if (onProgress) onProgress(t); };
@@ -1569,8 +1588,21 @@
 
         report('混音中…');
         let missing = 0;
+        // ★ 强调低音（用户 2026-10-07）：按"这个事件落在哪一小节"取该小节的**最低音**
+        //   （chords[m].midis 已升序 → [0] 就是谱面最下面那个音），只给它一个人提增益。
+        //   ★ 刻意只在混音这一步做，**不动 buildChordSchedule** —— 排程回归基线（triad
+        //     sha256）靠的就是排程逐字节不变。emphK = 0 时下行代码与改造前完全等价。
+        const emphK = bassEmphasisFactor();
+        const measureSpan = 4 * (60 / tempo);
+        const bassMidiOf = (e) => {
+            if (emphK <= 0 || !chords.length) return -1;
+            const m = Math.max(0, Math.min(chords.length - 1, Math.floor(e.time / measureSpan)));
+            const c = chords[m];
+            return (c && c.midis && c.midis.length) ? c.midis[0] : -1;
+        };
         for (const e of events) {
             const g = (e.gain != null) ? e.gain : 1.0;
+            const bassMidi = bassMidiOf(e);
             for (const midi of e.midis) {
                 const s = resolveSample(midi);
                 if (!s) { missing++; continue; }
@@ -1583,14 +1615,17 @@
                 src.connect(gain);
                 gain.connect(offlineCtx.destination);
 
+                // 低音那颗提亮；其余音照旧（最后整段做峰值归一化 → 相对差保留，不会削顶）
+                const gg = (emphK > 0 && midi === bassMidi) ? g * (1 + emphK) : g;
+
                 // 连奏包络：4ms 起音 → 按住（hold）→ 短淡出。
                 // 注意：这里**不再**人为做指数衰减 —— 之前的写法把这颗音从 0dB 强压到 -80dB，
                 // 比钢琴自身的衰减快十几倍，听着就是"弹一下就没了"。现在让采样自己衰减。
                 const t = e.time;
                 const hold = holdOf(e);           // 按住多久（秒）
                 gain.gain.setValueAtTime(0, t);
-                gain.gain.linearRampToValueAtTime(g, t + 0.004);
-                gain.gain.setValueAtTime(g, t + hold);
+                gain.gain.linearRampToValueAtTime(gg, t + 0.004);
+                gain.gain.setValueAtTime(gg, t + hold);
                 gain.gain.linearRampToValueAtTime(0, t + hold + CHORD_RELEASE);
 
                 src.start(t);
@@ -1685,9 +1720,9 @@
     }
 
     // 在**真·用户激活事件**里把 AudioContext 解锁好（同步，不 await）。
-    //   为什么要单独有这么一手：上滑那声琶音是在 `pointermove` 里播的，而 pointermove
+    //   为什么要单独有这么一手：下滑那声琶音是在 `pointermove` 里播的，而 pointermove
     //   **不是**用户激活事件（pointerdown / pointerup / touchend / click / keydown 才是），
-    //   在那里调 resume() 会被 iOS 拒绝。长按上滑的开头必有一个 pointerdown —— 在那一刻
+    //   在那里调 resume() 会被 iOS 拒绝。长按下滑的开头必有一个 pointerdown —— 在那一刻
     //   就把上下文唤醒，等 160ms 后手指滑上去时它已经是 running，直接排程就出声。
     //   initAudio()/resume() 都是同步完成幂等的，重复调用无副作用。
     //   ★ 第十六轮追加：如果宿主提供了 ensureAudioLive（自愈版），优先用它 ——
@@ -1731,6 +1766,10 @@
         if (typeof s.adaptiveFromStats === 'boolean') settings.adaptiveFromStats = s.adaptiveFromStats;
         // ★ 白名单登记：枚举值一定要显式收，否则 localStorage 里存着也会被悄悄丢掉。
         if (s.revealMode === 'roman' || s.revealMode === 'bass') settings.revealMode = s.revealMode;
+        // 强调低音（0..100，整数；老配置里没有这个键就是默认 0）
+        if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
+            settings.bassEmphasis = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
+        }
         // 连奏已固定 1.0（用户 2026-10-06 拍板，滑块已删）：localStorage 里的旧值一律忽略
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
@@ -2115,8 +2154,8 @@
     // ---- 长按手势的旋钮（手感全靠这几个数）----
     const MP_HOLD_MS = 160;       // 按住多久算"长按"（到点才揭示答案，防误触剧透）
     const MP_SLOP_PX = 12;        // 长按阈值到达前的容差：超过就当成滑动/误触，取消本次
-    const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要报错"
-    const MP_UP_PX = 56;          // 按住之后往上滑多少算"要听辩辅助"（与下滑对称）
+    const MP_DOWN_PX = 56;        // 按住之后往下滑多少算"要听辩辅助"（2026-10-07 与上滑对调）
+    const MP_UP_PX = 56;          // 按住之后往上滑多少算"要报错"（与下滑对称）
     // 水平方向只有一个轴：左右互通 —— 台阶锚点跟着"最后停下的位置"走，
     //   所以左滑几格之后不用把手指拉回原位，相对当前停留点再右滑够一格就是前进。
     //   垂直方向相反：一旦判成上下就锁死，不再切水平（上下各自是一次性动作）。
@@ -2139,6 +2178,9 @@
             playSeg: document.getElementById('chord-play-seg'),
             // 按住卡片显示什么：两档连体椭圆滑块（roman / bass）
             revealSeg: document.getElementById('chord-reveal-seg'),
+            // 强调低音：滑块 + 右侧读数
+            bassEmph: document.getElementById('chord-bass-emph'),
+            bassEmphVal: document.getElementById('chord-bass-emph-val'),
             // 两颗椭圆开关（都是 button[role=switch]，不是 checkbox —— 用户 2026-10-06 拍板）
             autoContinue: document.getElementById('chord-auto-continue'),
             portable: document.getElementById('chord-portable'),
@@ -3094,6 +3136,29 @@
             });
         }
 
+        // 强调低音（0..100）。拖动中只改读数（不重渲染 —— 每动一格渲染一次会卡）；
+        //   松手（change）才落盘，并按"在播就地重渲染续播 / 没播作废待播"处理。
+        //   音频是**离线渲染**好的成品，改任何音量参数都必须重渲染才听得出来。
+        if (els.bassEmph) {
+            els.bassEmph.value = String(settings.bassEmphasis);
+            if (els.bassEmphVal) els.bassEmphVal.textContent = String(settings.bassEmphasis);
+            const readEmph = (e) => {
+                settings.bassEmphasis = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
+                if (els.bassEmphVal) els.bassEmphVal.textContent = String(settings.bassEmphasis);
+            };
+            els.bassEmph.addEventListener('input', readEmph);
+            els.bassEmph.addEventListener('change', (e) => {
+                readEmph(e);
+                saveSettings();
+                if (mpIsPlaying()) {
+                    const at = Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()));
+                    doPlay(lastPlayMode, at);
+                } else {
+                    invalidateRenderedAudio('强调低音已改为 ' + settings.bassEmphasis + '%，点播放键用新设置重新渲染');
+                }
+            });
+        }
+
         if (els.inversion) {
             els.inversion.checked = settings.allowInversion;
             els.inversion.addEventListener('change', (e) => {
@@ -3216,7 +3281,9 @@
 
         // （原「停止」键已删：要停下来统一按底部播放器的暂停键，那一下同样会打断自动连播接力）
 
-        // 点击谱面上的小节 → 从该小节开头播放（沿用上次按的那个播放键）。
+        // 点击谱面上的小节：**在播** → 从该小节接着播；**暂停** → 与卡片页的「上一个/下一个」
+        //   同一套规则（用户 2026-10-07）：只把这一小节响一下、进度环不走，
+        //   并记住"下次按播放从这一小节起"（mpPauseJumpTo 由 mpTogglePlay 消费）。
         //   事件委托：命中矩形带 data-measure，点它任意位置都算点这一小节。
         if (els.sheetMusic) {
             els.sheetMusic.addEventListener('click', (e) => {
@@ -3225,8 +3292,14 @@
                 if (isRendering || !data) return;
                 const m = parseInt(rect.dataset.measure, 10);
                 if (!isFinite(m)) return;
-                setMeasureHighlight(m);          // 先给点击反馈，再去 seek / 渲染
-                doPlay(lastPlayMode, m);
+                if (mpIsPlaying()) {
+                    setMeasureHighlight(m);          // 先给点击反馈，再去 seek / 渲染
+                    doPlay(lastPlayMode, m);
+                    return;
+                }
+                mpShowMeasureOnly(m);
+                mpPauseJumpTo = m;
+                mpPreviewChord(m);
             });
         }
 
@@ -3311,7 +3384,7 @@
             });
         });
 
-        // 长按看的答案：按住揭示、按住下滑报错、按住左/右滑上一个/下一个（左右互通）
+        // 长按看的答案：按住揭示、按住上滑报错、按住左/右滑上一个/下一个（左右互通）
         bindStageGesture();
 
         // ★ 第十六轮：任意一次点击都顺手"续一下"音频上下文。
@@ -3407,6 +3480,10 @@
         if (v === mpStageView) return;
         mpCancelGesture();            // 切页瞬间作废在途手势
         mpStageView = v;
+        // ★ 谱表页把卡片整块藏掉（.is-sheet）：谱表页是**透明底**的 absolute 覆盖层，
+        //   卡片那圈 1px 描边 + 阴影会从谱面四周透出来 —— 看着像"谱表浮在卡片上"
+        //   （用户 2026-10-07 报的现象）。CSS 里按页隐藏，切回卡片页自动恢复。
+        if (els && els.mpStage) els.mpStage.classList.toggle('is-sheet', v === 'sheet');
         if (els && els.mpSheetPage) {
             els.mpSheetPage.hidden = (v !== 'sheet');
             if (v === 'sheet') requestAnimationFrame(fitSheetPage);
@@ -3572,7 +3649,7 @@
     // 长按看答案：手势状态机
     //
     //   按下 →（MP_HOLD_MS）→ 揭示 + **冻结**当前小节
-    //     按住往下滑 → 打开报错浮窗（对象 = 冻结点那个和弦，不随音乐前进而变）
+    //     按住往上滑 → 打开报错浮窗（对象 = 冻结点那个和弦，不随音乐前进而变）
     //     按住往左滑 → 回退到上一个和弦（可连滑，每滑一格退一格）
     //   松手 / 系统打断 → 回到遮住 + 解冻
     //
@@ -3762,7 +3839,7 @@
 
         stage.addEventListener('pointerdown', (e) => {
             // ★ 趁"真·用户激活事件"把音频上下文解锁（同步）。
-            //   上滑那声琶音稍后在 pointermove 里播，而 pointermove 不是激活事件 ——
+            //   下滑那声琶音稍后在 pointermove 里播，而 pointermove 不是激活事件 ——
             //   不在这里提前解锁，iOS 会拒绝 resume，于是"有窗没声"。
             unlockAudioNow();
             if (!mpExpanded || !data || !data.chords.length) return;
@@ -3814,10 +3891,11 @@
             if (horizontal) mpSetDragOffset(dx, 0); else mpSetDragOffset(0, dy);
 
             // 先定轴：斜滑按主导轴，绝不双触发；轴一旦锁定，另一方向就不再触发。
-            //   错题练习不设报错 → 不认"下滑"这个轴（上滑辅助/左右滑平移照常）。
+            //   ★ 用户 2026-10-07：上下两条手势**对调** —— 上滑 = 报错，下滑 = 听辨辅助。
+            //   错题练习不设报错 → 不认"上滑"这个轴（下滑辅助/左右滑平移照常）。
             if (!g.axis) {
-                if (!practiceMode && dy > MP_DOWN_PX && dy > Math.abs(dx) * 1.2) g.axis = 'down';
-                else if (dy < -MP_UP_PX && Math.abs(dy) > Math.abs(dx) * 1.2) g.axis = 'up';
+                if (dy > MP_DOWN_PX && dy > Math.abs(dx) * 1.2) g.axis = 'down';
+                else if (!practiceMode && dy < -MP_UP_PX && Math.abs(dy) > Math.abs(dx) * 1.2) g.axis = 'up';
                 // 左右合并成一个水平轴 'h'：具体往左还是往右，由 move 里相对锚点的位移决定
                 else if (Math.abs(dx) > MP_STEP_PX && Math.abs(dx) > Math.abs(dy) * 1.2) g.axis = 'h';
             }
@@ -3825,8 +3903,9 @@
             if (g.axis === 'down') {
                 if (dy > MP_DOWN_PX) {
                     g.phase = 'done';                 // 一次性动作，之后忽略 move
-                    mpNudge('down');                  // 触发那一下的纵向轻推（与左右切格同族）
-                    mpOpenError(mpFreeze);            // 目标 = 冻结快照；音乐不停
+                    g.consumed = true;                // 手势交给辅助窗接管：松手不解冻、不关门
+                    mpNudge('down');
+                    mpOpenAid(mpFreeze);              // 暂停 + 播冻结和弦的琶音 + 弹辅助窗
                 }
                 return;
             }
@@ -3834,9 +3913,8 @@
             if (g.axis === 'up') {
                 if (dy < -MP_UP_PX) {
                     g.phase = 'done';                 // 一次性动作，之后忽略 move
-                    g.consumed = true;                // 手势交给辅助窗接管：松手不解冻、不关门
-                    mpNudge('up');
-                    mpOpenAid(mpFreeze);              // 暂停 + 播冻结和弦的琶音 + 弹辅助窗
+                    mpNudge('up');                    // 触发那一下的纵向轻推（与左右切格同族）
+                    mpOpenError(mpFreeze);            // 目标 = 冻结快照；音乐不停
                 }
                 return;
             }
@@ -3862,7 +3940,7 @@
             if (g.consumed) {
                 // 听辩辅助窗已接管：只回收指针。解冻/恢复播放由"关辅助窗"那一侧负责。
                 if (g.captured) { try { stage.releasePointerCapture(g.pointerId); } catch (err) {} }
-                // ★ 兜底补放：上滑那声琶音是在 pointermove（非激活事件）里播的，若当时没能解锁
+                // ★ 兜底补放：下滑那声琶音是在 pointermove（非激活事件）里播的，若当时没能解锁
                 //   （mpAidLast.ok 为假），这里补一次 —— pointerup 是激活事件，这一下一定解锁。
                 //   守卫用"上一次 ok 为假才补"，所以第一次真排上程了绝不会出现双声。
                 if (mpAid && mpAidLast && !mpAidLast.ok) {
@@ -4049,7 +4127,7 @@
     }
 
     // 打开报错浮窗。
-    //   frozen = 长按那一刻的冻结快照（"按住下滑"进来时传它）；
+    //   frozen = 长按那一刻的冻结快照（"按住上滑"进来时传它）；
     //   传 null = 直接点「报错」按钮进来，用面板当前小节。
     //   ★ 目标一旦定下就再也不变 —— 这就是"报错对象锁定在按住那一刻的和弦"。
     function mpOpenError(frozen) {
@@ -4084,7 +4162,7 @@
         if (els && els.mpError) els.mpError.hidden = true;
     }
 
-    // ---------------- 听辩辅助窗（长按 + 上滑） ----------------
+    // ---------------- 听辩辅助窗（长按 + 下滑） ----------------
     //   触发即暂停主音频 → 播冻结和弦的「和弦分解」→ 弹浮窗；
     //   浮窗里可重听柱式 / 再放一遍和弦分解；点窗外关闭并恢复播放。
     //   辅助窗不写任何统计（与报错浮窗的 practiceMode 闸门无关，错题模式也可用）。
@@ -4238,8 +4316,9 @@
     // 错题练习模式（复用迷你播放器，正确率不计入数据库，不设报错）
     // ============================================================
 
-    const MP_HINT_NORMAL = '按住看答案 · 按住下滑报错 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表';
-    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住上滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表（不计统计 · 无报错）';
+    // ★ 用户 2026-10-07：上下手势对调（上滑=报错 / 下滑=辅助），提示文案跟着换。
+    const MP_HINT_NORMAL = '按住看答案 · 按住上滑报错 · 按住下滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表';
+    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住下滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表（不计统计 · 无报错）';
 
     // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 提示文案 / 收起条前缀 / 退出按钮
     function applyPracticeUi(on) {
@@ -4418,7 +4497,7 @@
         if (els.dbTop) {
             els.dbTop.innerHTML = '';
             if (!pairs.length) {
-                els.dbTop.appendChild(emptyLine('还没有报错记录 —— 练习时按住级数图、往下滑即可报错'));
+                els.dbTop.appendChild(emptyLine('还没有报错记录 —— 练习时按住级数图、往上滑即可报错'));
             } else {
                 pairs.slice(0, 8).forEach((p) => {
                     const row = document.createElement('div');
@@ -4660,7 +4739,7 @@
         _openMpError: mpOpenError,
         _closeMpError: mpCloseError,
         _openMpAid: mpOpenAid,
-        // 直接对第 m 小节开辅助窗（跳过"长按+上滑"手势，供自测用）
+        // 直接对第 m 小节开辅助窗（跳过"长按+下滑"手势，供自测用）
         _openMpAidAt: (m) => {
             if (!data || !data.chords[m]) return null;
             const chord = data.chords[m];
