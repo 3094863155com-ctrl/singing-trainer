@@ -1465,12 +1465,14 @@
             text-align: center;
         }
 
-        /* 左列按钮 + 右列简谱数字：**两列等高对称**。
-           怎么做到"多少音都对齐"：父容器给定高 + 两列都 height:100% + justify-content:space-between
-           + 子项 flex:1 1 0 → 左列 2 份、右列 3 份或 4 份，两列总高严格相等。
-           （旧版是 align-items:flex-end，靠"底部对齐"，音数一变就不齐了。） */
+        /* 左列一颗「柱式」按钮 + 右列简谱数字。两列都 height:100%（body 定高）：
+           右列靠 space-between 自动等分（3 音 / 4 音都铺满），左列单键垂直居中。
+           ★ 第十八轮：左列原来两颗键靠 flex:1 1 0 等分整列高（为的是"两列等高"）；
+             现在只剩一颗，等分会把它拉成 190~260px 的细长条 → 改成固定高 + 居中。
+             单键高度是观感项，**唯一旋钮 = --mp-aid-btn-h**。 */
         .mp-aid__body {
             --mp-aid-body-h: clamp(190px, 40vh, 260px);
+            --mp-aid-btn-h: clamp(72px, 22vh, 104px);
             display: flex;
             align-items: stretch;
             justify-content: center;
@@ -1483,11 +1485,12 @@
             flex-direction: column;
             gap: var(--mp-gap);
             height: 100%;
-            justify-content: space-between;
+            justify-content: center;   /* 单键在整列里垂直居中（原来 space-between 靠两颗键撑满） */
         }
 
         .mp-aid__opt {
-            flex: 1 1 0;              /* 左列两颗按键等分整列高度（与右列同高） */
+            flex: 0 0 auto;           /* 不再等分整列高度；高度交给 --mp-aid-btn-h */
+            height: var(--mp-aid-btn-h);
             touch-action: none;       /* 与右列一致：两指分别按两列也不会被当成捏合缩放 */
             display: inline-flex;
             align-items: center;
@@ -2112,9 +2115,11 @@
         </div>
     </div>
 
-    <!-- 听辨辅助浮窗：按住下滑 → 暂停并播冻结和弦的「和弦分解」；点窗外关闭并恢复播放。
-         版式（用户 2026-10-06 定）：左列两个按钮（上=和弦分解 / 下=柱式，图标即示意），
-         右列一列音，**按音高自下而上**排（最低音在最下）。
+    <!-- 听辨辅助浮窗：按住下滑 → 暂停并播冻结和弦的「和弦分解」；点窗外关闭并从"按住那一小节"重播。
+         版式（用户 2026-10-10 定）：左列**一颗**按钮（柱式），右列一列音，
+         **按音高自下而上**排（最低音在最下）。
+         ★ 第十八轮：左列原来还有一颗「和弦分解」按钮（手动再放一遍琶音），按用户要求删掉；
+           **开窗瞬间自动响的那一下仍是分解**（pointup 兜底补放也仍是分解），只是不再有按钮重放它。
          ★ 第十六轮改：右列从"音名（C G C E）"改成**简谱数字 + 和弦几音标注**——
            主文字 = 该音在调式内的级数（1-7，不带八度点，两个 C 都显示 1），
            副标注 = 它是和弦的几音（根音 / 三音 / 五音 / 七音）。
@@ -2126,12 +2131,11 @@
             <div class="mp-aid__title">听辨辅助</div>
             <div class="mp-aid__body">
                 <div class="mp-aid__btns">
-                    <button class="mp-aid__opt" id="chord-mp-aid-arp" aria-label="和弦分解"><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>和弦分解</button>
                     <button class="mp-aid__opt" id="chord-mp-aid-block"><svg class="ic" aria-hidden="true"><use href="#i-chord-block"/></svg>柱式</button>
                 </div>
                 <div class="mp-aid__tones" id="chord-mp-aid-tones"></div>
             </div>
-            <div class="mp-aid__hint">点简谱数字试听（可多指同时按）· 点窗外关闭并继续播放</div>
+            <div class="mp-aid__hint">点简谱数字试听（可多指同时按）· 点窗外关闭并从这一小节继续</div>
         </div>
     </div>
 
@@ -2406,6 +2410,31 @@
             return false;
         }
 
+        // 锁屏「±10 秒」键（seekbackward / seekforward）的公共处理体。
+        //   有 skip 钩子（和弦页）→ 走钩子 = 切一个和弦；没有钩子 → 沿用 track 组同款的 ±5 秒兜底。
+        //   抽成具名函数是为了能被验收脚本直接调用：setActionHandler 注册的 handler 在浏览器里
+        //   **读不回来**（navigator.mediaSession 上没有 getter），只能这样证明"seek 已转发到 skip"。
+        function mediaSeekAsSkip(dir) {
+            if (mediaSkip(dir)) return;
+            if (activeMediaEl) {
+                const dur = activeMediaEl.duration || 0;
+                const t = activeMediaEl.currentTime + dir * 5;
+                activeMediaEl.currentTime = (dir < 0) ? Math.max(0, t) : Math.min(dur, t);
+            }
+            mediaUpdatePosition(activeMediaEl);
+        }
+
+        // ⚠️ 真机行为开关：把锁屏左右键当「上一个 / 下一个和弦」用。
+        //   true  = 额外注册 seekbackward / seekforward，并转发到 mediaSkip(dir)。
+        //           iOS 有时自绘系统的「±10 秒」键并派发这两个动作；注册后，
+        //           不管系统画的是 ⏮⏭ 还是 ±10，按下去都 = 切一个和弦
+        //           （用户 2026-10-10 真机反馈：他看到的正是 ±10、且按下去是跳 10 秒）。
+        //           代价（预期内、**不是回归**）：iOS 可能因此把 ⏮⏭ 画成 ±10 —— 那对图标/数字
+        //           是系统绘制的，网页只有 handler、没有外观 API，改不了。
+        //   false = 回到第十二轮的旧行为：只注册 play / pause / previoustrack / nexttrack。
+        //   ★ 要回退/再实验，改这一个常量就够，别去下面各 reg() 里分散判断。
+        const MEDIA_SEEK_AS_SKIP = true;
+
         // 只注册一次。必须在任何播放之前调用 —— 和弦页可能比视唱页先播。
         function ensureMediaSession() {
             if (mediaSessionReady) return;
@@ -2416,21 +2445,21 @@
             //
             // 1) 可拖动进度条（seekto + positionState 实时更新）
             // 2) 当前页若给了 skip 钩子（和弦页 = 上一小节/下一小节），
-            //    锁屏上的「上一首/下一首」两颗键就都走它
-            // 3) 没有钩子时退回原生行为：previoustrack/nexttrack 各 ±5 秒
+            //    锁屏上那对「上一首/下一首」键都走它
+            // 3) 没有钩子时退回原生行为：各 ±5 秒
             //
-            // ★ 千万不要注册 seekbackward / seekforward（2026-10-06 实测 + 订正）
-            //   现象：锁屏左右键显示成系统的「±10 秒」。
-            //   真因：iOS 一旦看到网页接管了 seek（即注册了 seekbackward/seekforward），
-            //         就会把本该显示的 ⏮⏭（上一首/下一首）换成它自己画的 ±10 秒键，
-            //         而且这个「10」图标是系统固定画的，与我们设的步长无关。
-            //         反之，把这两个动作取消注册，⏮⏭ 就会回来。
-            //         （参考 overdevs《Nailing the MediaSession API on iOS》、
-            //          以及 dbushell 做播客 PWA 时的实测记录。）
-            //   走过的弯路：曾补注册这两个动作，想让 ±10 键也走 skip 钩子 ——
-            //         行为确实变成了"跳一个和弦"，但 iOS 从此只画 ±10，⏮⏭ 再也没出现。
-            //   正确做法：只注册 play / pause / previoustrack / nexttrack，⏮⏭ 才会出现；
-            //         两颗键按下都经 mediaSkip() → 和弦页跳一个和弦。
+            // ★★ 锁屏左右键的注册策略（2026-10-10 订正 —— **推翻**第十二轮的旧结论）★★
+            //   第十二轮写的是"千万不要注册 seekbackward / seekforward，否则 ⏮⏭ 永不再出现"，
+            //   于是把它们摘掉、只留 track 组。但 2026-10-10 用户真机复查发现：
+            //   **锁屏左右键依旧画着系统自绘的「±10 秒」，而且按下去是跳 10 秒、不是切和弦。**
+            //   即"只注册 track 组 → iOS 就会画 ⏮⏭"这条结论**与当前 iOS 行为已不符**：
+            //   iOS 自己画了 ±10 并派发 seekbackward/seekforward，而我们没接管 → 落到原生 seek。
+            //   所以现在的做法反过来：**把这两个动作也接管过来、转发到同一个 skip 钩子** ——
+            //   不管系统画哪一对键，按下去都 = 切一个和弦（用户要的是行为）。
+            //   代价（预期内、**不是回归**）：iOS 仍可能画 ±10；那对图标/数字是系统绘制的，
+            //   网页只有 handler、没有外观 API（MediaSession 没有 offset setter），改不了。
+            //   一切由下面的 MEDIA_SEEK_AS_SKIP 常量门控：置 false 就退回第十二轮的旧行为。
+            //   ★ 要回退请在**常量处**改，别在这里分散判断。
             const reg = (action, fn) => {
                 try {
                     navigator.mediaSession.setActionHandler(action, fn);
@@ -2462,8 +2491,13 @@
                 }
                 mediaUpdatePosition(activeMediaEl);
             });
-            // 注意：这里**只**处理锁屏进度条的拖动（Android Chrome / 桌面），
-            //   绝不注册 seekbackward / seekforward（原因见上）。
+            // 系统自绘的「±10 秒」键也接到 skip 上（原委见上面 ★★ 那段；由 MEDIA_SEEK_AS_SKIP 门控）。
+            if (MEDIA_SEEK_AS_SKIP) {
+                reg('seekbackward', () => mediaSeekAsSkip(-1));
+                reg('seekforward', () => mediaSeekAsSkip(1));
+            }
+            // 这里只处理锁屏进度条的拖动（Android Chrome / 桌面）；iOS 不支持 seekto，
+            //   注册会抛错、try/catch 兜住。它和"左右键被画成什么"是两码事，不要混在一起推。
             reg('seekto', (details) => {
                 if (!activeMediaEl) return;
                 if (details.fastSeek && 'fastSeek' in activeMediaEl) {
@@ -2504,7 +2538,9 @@
             getActiveMediaEl: () => activeMediaEl,
             hasMediaHooks: () => !!activeMediaHooks,
             // 调试：已经注册成功的锁屏动作名（浏览器里读不回 handler，只能这样证）
-            _mediaActions: () => mediaActions.slice()
+            _mediaActions: () => mediaActions.slice(),
+            // 调试：直接调"锁屏 ±10 键"的处理体（有钩子时应与 skip 等价 → 切一个和弦）
+            _mediaSeekAsSkip: (dir) => mediaSeekAsSkip(dir)
         };
 
         // 媒体会话的 actionHandler 只注册一次，且必须早于任何播放（用户可能先点和弦页）

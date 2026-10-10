@@ -36,3 +36,6 @@ tools/render/
 对比_*.wav
 四部大谱表_*.png
 线上发布_*.png
+
+# 验收脚本与无头浏览器 profile（第十八轮起；放 /tmp 会被系统清掉，所以挪进项目内不发布）
+.accept/

@@ -2217,7 +2217,6 @@
             mpErrorNone: document.getElementById('chord-mp-error-none'),
             mpAid: document.getElementById('chord-mp-aid'),
             mpAidBlock: document.getElementById('chord-mp-aid-block'),
-            mpAidArp: document.getElementById('chord-mp-aid-arp'),
             mpAidTones: document.getElementById('chord-mp-aid-tones'),
             // ---- 数据库页（听辨统计）----
             dbMatrix: document.getElementById('db-matrix'),
@@ -2868,6 +2867,9 @@
     // 锁屏的「上一首 / 下一首」对和弦页 = 上一小节 / 下一小节（点小节跳转的自然延伸）
     //   ★ 第十六轮：锁屏这两个键也是"前进/后退键"，所以暂停态下与页面按钮同一规则 ——
     //     只切 + 试听，不接着播。基准也统一成 mpMeasure（在播时才用 currentTime）。
+    //   ★ 第十八轮：iOS 锁屏实际画出来的往往是系统自绘的「±10 秒」键（数字是它画的，改不了）。
+    //     宿主席（index.html）已经把 seekbackward / seekforward 也注册下来并转发到这里，
+    //     所以**按哪一对键都走这个 skip 钩子** = 切一个和弦，不会再落回"跳 10 秒"。
     const chordMediaHooks = {
         skip: (dir) => {
             if (!data || !chordAudioEl) return false;
@@ -3329,9 +3331,10 @@
             }, { capture: true });
         }
 
-        // 听辨辅助窗：和弦分解 / 柱式（点一下即试听一遍）/ 点右侧数字试听 / 点窗外关闭并恢复播放
+        // 听辨辅助窗：柱式（点一下即试听一遍）/ 点右侧数字试听 / 点窗外关闭并从这一小节继续
+        //   ★ 第十八轮：「和弦分解」按钮已删（用户要求），所以这里只绑柱式。
+        //     开窗那一响与 pointerup 兜底补放仍然是分解/琶音 —— 那两处在 mpOpenAid / finish 里，未动。
         if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
-        if (els.mpAidArp) els.mpAidArp.addEventListener('click', () => mpReplayAid('arp'));
         // 数字列做事件委托（内容是每次开窗重画的，不能逐个挂）。
         //   ★ 按 data-midi 认音，不按数字 —— 两个 1 是不同音高。
         //   ★ 第十六轮：**从 click 改成 pointerdown**。三个理由：
@@ -4254,17 +4257,33 @@
         mpAid.sources = [];
     }
 
-    // 用户主动关窗：停声 → 收浮窗 → 恢复播放 → 结束长按态（解冻）
+    // 关浮层后从第 m 小节重新起播（m < 0 忽略）。
+    //   收口「报错窗提交 / 辅助窗关掉」两条恢复路径的起播点 —— 用户 2026-10-10 要求：
+    //   从**按住时的那一个和弦**重新开始，而不是它前一个和弦、也不是在暂停点原地续播。
+    //   ★ 必须在 mpCancelGesture() **之后**调用：unfreeze 会把 mpMeasure 拉回 mpLiveMeasure，
+    //     而 setMeasureHighlight() 开头有 `if (m === highlightedMeasure) return;` ——
+    //     重播的正好是当前已高亮那一小节时它会直接 return、不更新 mpLiveMeasure，
+    //     于是"先起播后解冻"会被 unfreeze 覆盖回旧值（画面/进度环跳回去）。
+    function mpResumeFromMeasure(m) {
+        if (!(m >= 0)) return;
+        doPlay(lastPlayMode, m);
+    }
+
+    // 用户主动关窗：停声 → 收浮窗 → 从"按住那一小节"重播 → 结束长按态（解冻）
     function mpCloseAid() {
         if (!mpAid) return;
         mpStopAidVoices();
         if (els && els.mpAid) els.mpAid.hidden = true;
         const was = mpAid.wasPlaying;
+        const at = mpAid.measure;     // ★ 必须在 mpAid = null 之前取（关窗后的起播点）
         mpAid = null;
         mpAidLast = null;
-        if (was && chordAudioEl) { try { chordAudioEl.play().catch(() => {}); } catch (e) {} }
         mpSyncPlayIcon();
-        mpCancelGesture();            // 解冻 + 收揭示态（mpCancelGesture 开头有 mpAid 兜底，不会递归）
+        //   ★ 顺序：先解冻（此时 mpAid 已置空 → 不会走 mpCancelGesture 里那段兜底分支，不会递归），
+        //     再起播。原先那句"原地 chordAudioEl.play()"已删 —— 留着会"先在暂停点响一下、
+        //     随后 doPlay 再 seek 回本小节"，两声抢音。
+        mpCancelGesture();
+        if (was) mpResumeFromMeasure(at);
     }
 
     function mpReplayAid(style) {
@@ -4302,14 +4321,14 @@
         mpCloseError();
         mpErrorCtx = null;
         try { console.log('[和弦听辨·报错]', rec); } catch (e) {}
-        // ★ 报错提交后回到**报错和弦的前一个**和弦的小节开头重播，播完自然继续往后
-        //   （把"出错和弦的前置语境"再给一遍，而不是孤零零重听出错的那一小节）。
-        //   rec.measure = 0 时没有前一个，原地退到 0。
-        //   doPlay 快路只是 seek，seeking 期间不会误计 heard；重播经过的小节会再计
-        //   一次 —— 它确实又被完整听了一遍，属可接受的双计。
-        //   isRendering 中提交时 doPlay 会静默跳过本次重播（概率极低）。
-        mpCancelGesture();            // 长按冻结/揭示态先解冻，再 seek
-        if (!practiceMode) doPlay(lastPlayMode, Math.max(0, rec.measure - 1));
+        // ★ 报错提交后从**报错那一个和弦**的小节开头重新起播，播完自然继续往后。
+        //   （用户 2026-10-10 改：原先是"提前一小节"重播 —— 先把出错和弦的前置语境给一遍；
+        //     现在要求直接从出错的那一小节起，不再退到它前一个和弦。）
+        //   doPlay 快路只是 seek，seeking 期间不会误计 heard；从 rec.measure 起播后，经过
+        //   rec.measure → +1 的小节边界时会把 rec.measure 记一次 heard —— 它确实被完整
+        //   重听了一遍，属可接受的计数。isRendering 中提交时 doPlay 会静默跳过本次重播。
+        mpCancelGesture();            // 长按冻结/揭示态先解冻，再 seek（必须先解冻，理由见 mpResumeFromMeasure）
+        if (!practiceMode) mpResumeFromMeasure(rec.measure);
     }
 
     // ============================================================
