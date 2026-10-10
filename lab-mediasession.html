@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="robots" content="noindex, nofollow">
+<title>锁屏控件实验室 · 仅供真机排查</title>
+<!-- ============================================================
+     锁屏控件实验室（MediaSession Lab）
+
+     用途：一次性把这个问题问死 ——
+       「iPhone 锁屏/控制中心那对左右键，iOS 到底画 ⏮⏭ 还是 ±10 秒？
+        这跟网页注册了哪些 mediaSession 动作有没有关系？」
+
+     背景（第十八轮已查明）：
+       · 那对键是 **iOS 自己画的**，网页只有"按下去干什么"的 handler，没有"长什么样"的接口。
+       · 我们唯一能动的开关 = 注册哪些动作。第十二轮摘掉 seekbackward/seekforward 并没有换来 ⏮⏭，
+         所以这一轮把「seekto / setPositionState（进度上报）」这两个**从没摘过的变量**也拆开试。
+       · → 组合矩阵见下面的 COMBOS / OPTIONAL_COMBOS。
+
+     使用（必须真机、必须 iOS）：
+       ① 在 iPhone 上打开 → ② 点一颗按钮 → ③ 锁屏或下拉控制中心
+       → ④ 看左右两键画的是 ⏮⏭ 还是 ±10（**这个只有你看得到，本页检测不到**）
+       → ⑤ 按一下左键、再按一下右键 → ⑥ 回本页看"派发日志"（这个本页会客观记下来）
+
+     ★ 本页独立自包含、零依赖，不引用 index.html / chord_recognition.js，改它不影响主应用。
+     ============================================================ -->
+<style>
+    :root {
+        /* 抄自 index.html 的 :root，保持观感一致 */
+        --bg-page: #f6f7f9;
+        --surface: #ffffff;
+        --surface-hover: #f3f4f8;
+        --border: #e5e7ee;
+        --border-strong: #d3d7e2;
+        --text-primary: #1f2430;
+        --text-secondary: #4b5263;
+        --text-tertiary: #9aa1b0;
+        --accent: #6366f1;
+        --accent-hover: #4f46e5;
+        --accent-active: #4338ca;
+        --accent-soft: #eef0ff;
+        --track: #e2e5ec;
+        --warn-bg: #fff7e6;
+        --warn-border: #f0d9a8;
+        --warn-ink: #8a5a00;
+        --ok: #16a34a;
+        --err: #dc2626;
+        --shadow-sm: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
+        --shadow-md: 0 2px 6px rgba(16, 24, 40, .05), 0 6px 16px rgba(16, 24, 40, .07);
+        --r-sm: 8px;
+        --r-md: 12px;
+        --r-lg: 16px;
+        --r-pill: 999px;
+    }
+
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+        background: var(--bg-page);
+        color: var(--text-primary);
+        padding: 18px 16px calc(28px + env(safe-area-inset-bottom, 0px));
+        font-size: 16px;
+        line-height: 1.5;
+        -webkit-text-size-adjust: 100%;
+    }
+
+    h1 { font-size: 21px; margin: 0 0 4px; letter-spacing: -.2px; }
+    h2 { font-size: 15px; margin: 0 0 10px; color: var(--text-secondary); font-weight: 700; }
+    .sub { font-size: 13px; color: var(--text-tertiary); margin: 0 0 16px; }
+
+    .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--r-lg);
+        box-shadow: var(--shadow-sm);
+        padding: 14px;
+        margin: 0 0 14px;
+    }
+
+    .warn {
+        background: var(--warn-bg);
+        border: 1px solid var(--warn-border);
+        color: var(--warn-ink);
+        border-radius: var(--r-md);
+        padding: 12px 14px;
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 14px;
+    }
+    .warn b { font-weight: 800; }
+
+    .bad {
+        background: #fef2f2;
+        border-color: #fecaca;
+        color: var(--err);
+    }
+
+    /* ---- 当前状态面板 ---- */
+    #now-title { font-size: 17px; font-weight: 800; margin: 0 0 10px; }
+    .kv { display: flex; gap: 8px; align-items: baseline; margin: 0 0 7px; flex-wrap: wrap; }
+    .kv .k { font-size: 13px; color: var(--text-tertiary); min-width: 74px; flex: 0 0 auto; }
+    .kv .v { font-size: 14px; font-weight: 600; word-break: break-all; }
+    .chip {
+        display: inline-block;
+        font: 600 13px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: var(--accent-soft);
+        color: var(--accent-active);
+        border-radius: 6px;
+        padding: 2px 7px;
+        margin: 0 4px 4px 0;
+    }
+    .chip.off { background: #f1f2f5; color: var(--text-tertiary); }
+    .chip.blank { background: #f1f2f5; color: var(--text-tertiary); font-style: italic; }
+
+    /* ---- 步骤 ---- */
+    ol.steps { margin: 0; padding-left: 22px; font-size: 14.5px; }
+    ol.steps li { margin: 0 0 6px; }
+    ol.steps b { color: var(--accent-active); }
+
+    /* ---- 按钮 ---- */
+    .btn {
+        display: block;
+        width: 100%;
+        min-height: 58px;
+        text-align: left;
+        background: var(--surface);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--r-md);
+        padding: 11px 14px;
+        margin: 0 0 10px;
+        font: inherit;
+        font-size: 16px;
+        color: var(--text-primary);
+        cursor: pointer;
+        touch-action: manipulation;
+        transition: background .12s;
+    }
+    .btn:active { background: var(--surface-hover); }
+    .btn.on { border-color: var(--accent); background: var(--accent-soft); box-shadow: 0 0 0 3px var(--accent-soft); }
+    .btn .id {
+        display: inline-block;
+        font: 800 13px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--accent-active);
+        background: var(--accent-soft);
+        border-radius: 5px;
+        padding: 1px 6px;
+        margin-right: 6px;
+    }
+    .btn.on .id { background: #fff; }
+    .btn .nm { font-weight: 700; }
+    .btn .hint2 { display: block; font-size: 12.5px; color: var(--text-tertiary); margin-top: 3px; }
+    .btn .why { display: block; font-size: 12.5px; color: var(--accent-active); margin-top: 3px; font-weight: 600; }
+
+    .minor {
+        min-height: 48px;
+        font-size: 14.5px;
+        color: var(--text-secondary);
+        text-align: center;
+        background: var(--surface-hover);
+        border-color: var(--border);
+    }
+
+    /* ---- 日志 ---- */
+    .logrow {
+        border-top: 1px solid var(--border);
+        padding: 10px 0 4px;
+    }
+    .logrow:first-child { border-top: 0; padding-top: 2px; }
+    .logrow .name { font: 700 13.5px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text-secondary); }
+    .logrow .entries { margin: 5px 0 0; padding: 0; list-style: none; }
+    .logrow .entries li {
+        font: 600 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--text-primary);
+        word-break: break-all;
+    }
+    .logrow .entries li .t { color: var(--text-tertiary); font-weight: 500; }
+    .logrow .none { font: 700 13.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--err); }
+    .empty { font-size: 14px; color: var(--text-tertiary); }
+
+    .foot { font-size: 12.5px; color: var(--text-tertiary); margin: 4px 0 0; }
+    .sep { height: 1px; background: var(--border); margin: 12px 0; }
+</style>
+</head>
+<body>
+
+<h1>锁屏控件实验室</h1>
+<p class="sub">只用来回答一个问题：iOS 锁屏那对左右键画 ⏮⏭ 还是 ±10，跟网页注册了哪些动作有没有关系。不影响主应用。</p>
+
+<div id="unsupported" class="warn bad" hidden>
+    这个浏览器没有 <code>navigator.mediaSession</code>，本页测不了。请用 iPhone 上的 Safari 打开。
+</div>
+
+<div class="warn">
+    <b>⚠️ 分离两类信息：</b><br>
+    ①「图标长什么样」= <b>只有你看得到</b>，本页没有任何 API 能读它 —— 请你用眼睛看并记下来。<br>
+    ②「按下去 iOS 派发了哪个动作」= <b>本页会客观记下来</b>，看最下面的「派发日志」。
+</div>
+
+<div class="card" id="now">
+    <div id="now-title">还没有选组合</div>
+    <div class="kv"><span class="k">注册的动作</span><span class="v" id="now-actions"><span class="chip blank">—</span></span></div>
+    <div class="kv"><span class="k">seekto</span><span class="v" id="now-seekto">—</span></div>
+    <div class="kv"><span class="k">进度上报</span><span class="v" id="now-pos">—</span></div>
+    <div class="kv"><span class="k">音源</span><span class="v" id="now-src">—</span></div>
+    <div class="kv"><span class="k">播放状态</span><span class="v" id="now-play">—</span></div>
+</div>
+
+<div class="card">
+    <h2>每一步怎么做</h2>
+    <ol class="steps">
+        <li>点下面任意一颗按钮（会开始放一段轻声音，这是让系统认为"有媒体在播"）。</li>
+        <li><b>优先下拉「控制中心」</b>（不用解锁）；想更接近真实场景就锁屏。</li>
+        <li>看那对左右键：是 <b>⏮ ⏭</b> 还是 <b>±10 秒</b>？<b>记下这一格。</b></li>
+        <li>按一下左键、再按一下右键（各按一次就够）。</li>
+        <li>回到本页（上滑/解锁），看最下面那张「派发日志」，看这一组记下了什么。</li>
+        <li>换下一颗按钮，重复 1~5。<b>每换一组请重新锁一次屏/重开一次控制中心</b> —— 系统未必会即时重画那几个键。</li>
+    </ol>
+    <div class="sep"></div>
+    <p class="foot">想省事？只跑 <b>C4 → C4b → C4a</b> 三颗就能定位到"哪个变量是元凶"。<br>
+       全部跑完约 5 分钟。跑完把结果（每组的图标 + 日志）告诉我就行。</p>
+</div>
+
+<div class="card">
+    <h2>组合矩阵 · 核心 7 颗（按这个顺序跑）</h2>
+    <div id="btn-list"></div>
+</div>
+
+<div class="card" id="opt-card">
+    <h2>补充 2 颗（前面结果说不清时再跑）</h2>
+    <div id="btn-list-opt"></div>
+</div>
+
+<div class="card">
+    <h2>派发日志（跨组合保留）</h2>
+    <div id="log-box"><p class="empty">还没跑任何组合。</p></div>
+    <div class="sep"></div>
+    <button class="btn minor" id="btn-mark">标记本组「没有任何动作派发」</button>
+    <button class="btn minor" id="btn-reset">清空日志 + 停掉声音</button>
+</div>
+
+<p class="foot">本页不会上传任何东西，也不写 localStorage。刷新即清空。</p>
+
+<audio id="lab-audio" hidden></audio>
+
+<script>
+(function () {
+    'use strict';
+
+    // ============================================================
+    // 组合矩阵
+    //   三个正交可疑变量：A = 注册 seekbackward/seekforward
+    //                     B = 注册 seekto
+    //                     C = 调 setPositionState（上报有限时长进度）
+    //   track 组（play/pause/prev/next）是基线，全留着。
+    // ============================================================
+    var TRACK = ['play', 'pause', 'previoustrack', 'nexttrack'];
+    var SEEK = ['seekbackward', 'seekforward'];
+
+    var COMBOS = [
+        {
+            id: 'C4', name: '只用 track 组', actions: TRACK.slice(),
+            seekto: false, pos: 'none', src: 'blob',
+            why: '★ 最高优先级：三个变量全关（唯一没试过的组合）'
+        },
+        {
+            id: 'C4b', name: 'track 组 + 只上报进度', actions: TRACK.slice(),
+            seekto: false, pos: 'finite', src: 'blob',
+            why: 'C4 出 ⏮⏭ 而这颗不出 → 元凶 = 进度上报'
+        },
+        {
+            id: 'C4a', name: 'track 组 + 只注册 seekto', actions: TRACK.slice(),
+            seekto: true, pos: 'none', src: 'blob',
+            why: 'C4 出 ⏮⏭ 而这颗不出 → 元凶 = seekto'
+        },
+        {
+            id: 'C1', name: 'track 组 + seekto + 上报进度', actions: TRACK.slice(),
+            seekto: true, pos: 'finite', src: 'blob',
+            why: '第十二轮那套（已知失败，作为基线）'
+        },
+        {
+            id: 'C3', name: '7 个动作（含 seek 两个）', actions: TRACK.concat(SEEK),
+            seekto: true, pos: 'finite', src: 'blob',
+            why: '= 现在线上主应用的样子（对照组）'
+        },
+        {
+            id: 'C6', name: '一个动作都不注册', actions: [],
+            seekto: false, pos: 'none', src: 'blob',
+            why: '看 iOS 完全不理网页时默认画什么'
+        },
+        {
+            id: 'C7', name: 'track 组 + 音源换成直播流', actions: TRACK.slice(),
+            seekto: false, pos: 'none', src: 'stream',
+            why: '唯一"关掉拖动条"的杠杆；可能连控件都不画，失败也算答案'
+        }
+    ];
+
+    var OPTIONAL_COMBOS = [
+        {
+            id: 'C8', name: 'track 组 + 时长报成"无限"', actions: TRACK.slice(),
+            seekto: false, pos: 'infinity', src: 'blob',
+            why: '伪直播：不换音源，只在进度上报里声称时长无限'
+        },
+        {
+            id: 'C5', name: '7 个动作，但无 seekto、无进度上报', actions: TRACK.concat(SEEK),
+            seekto: false, pos: 'none', src: 'blob',
+            why: 'C4 与 C3 差异说不清时补一枪'
+        }
+    ];
+
+    var ALL_ACTIONS = ['play', 'pause', 'stop', 'previoustrack', 'nexttrack',
+                       'seekbackward', 'seekforward', 'seekto'];
+
+    var ALL_COMBOS = COMBOS.concat(OPTIONAL_COMBOS);
+    var byId = {};
+    ALL_COMBOS.forEach(function (c) { byId[c.id] = c; });
+
+    // ============================================================
+    // 状态
+    // ============================================================
+    var handlers = {};          // 当前真正注册上的动作 -> handler（验收脚本据此断言）
+    var regFailed = [];         // 注册失败的动作名（浏览器不支持时）
+    var current = null;         // 当前组合
+    var activated = {};         // id -> true（跑过）
+    var entries = {};           // id -> [{t, text}]
+    var autoMarked = {};        // id -> true（已自动标过"无派发"）
+    var posTimer = 0;
+    var hiddenAt = 0;
+
+    var blobUrl = null;
+    var blobAudioEl = null;
+    var streamAudioEl = new Audio();
+    streamAudioEl.volume = 0.25;
+
+    var $ = function (id) { return document.getElementById(id); };
+
+    function hasMediaSession() {
+        return typeof navigator !== 'undefined' && 'mediaSession' in navigator
+            && navigator.mediaSession && typeof navigator.mediaSession.setActionHandler === 'function';
+    }
+
+    function nowLabel() {
+        var d = new Date();
+        return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2)
+             + ':' + ('0' + d.getSeconds()).slice(-2);
+    }
+
+    // ============================================================
+    // 音频源 1：离线渲染 2 秒柔和正弦 → WAV blob → <audio loop>
+    //   ★ 页面加载时就渲染好（渲染不占用户手势），这样点击时只剩下同步的 play()。
+    // ============================================================
+    function audioBufferToWav(buf) {
+        var ch = buf.numberOfChannels, len = buf.length, i, c;
+        var bytes = 44 + len * ch * 2;
+        var ab = new ArrayBuffer(bytes), v = new DataView(ab);
+        var ws = function (o, s) { for (var k = 0; k < s.length; k++) v.setUint8(o + k, s.charCodeAt(k)); };
+        ws(0, 'RIFF'); v.setUint32(4, bytes - 8, true); ws(8, 'WAVE'); ws(12, 'fmt ');
+        v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, ch, true);
+        v.setUint32(24, buf.sampleRate, true);
+        v.setUint32(28, buf.sampleRate * ch * 2, true);
+        v.setUint16(32, ch * 2, true); v.setUint16(34, 16, true);
+        ws(36, 'data'); v.setUint32(40, len * ch * 2, true);
+        var chans = [];
+        for (c = 0; c < ch; c++) chans.push(buf.getChannelData(c));
+        var off = 44;
+        for (i = 0; i < len; i++) {
+            for (c = 0; c < ch; c++) {
+                var s = Math.max(-1, Math.min(1, chans[c][i]));
+                v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+                off += 2;
+            }
+        }
+        return new Blob([ab], { type: 'audio/wav' });
+    }
+
+    function renderTone() {
+        var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        if (!OAC) { lab.blobReady = false; lab.blobError = 'no OfflineAudioContext'; return Promise.resolve(); }
+        var sr = 44100, dur = 2.0;
+        var off = new OAC(1, Math.round(sr * dur), sr);
+        var osc = off.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = 440;
+        var g = off.createGain();
+        // 首尾各 0.15s 淡入淡出 —— 循环接缝处不会有"咔"的一声
+        g.gain.setValueAtTime(0, 0);
+        g.gain.linearRampToValueAtTime(0.30, 0.15);
+        g.gain.setValueAtTime(0.30, dur - 0.15);
+        g.gain.linearRampToValueAtTime(0, dur);
+        osc.connect(g);
+        g.connect(off.destination);
+        osc.start(0);
+        osc.stop(dur);
+        return off.startRendering().then(function (buf) {
+            blobUrl = URL.createObjectURL(audioBufferToWav(buf));
+            blobAudioEl = new Audio(blobUrl);
+            blobAudioEl.loop = true;
+            blobAudioEl.volume = 0.25;   // 能听见但不吵
+            lab.blobUrl = blobUrl;
+            lab.blobReady = true;
+        }).catch(function (e) {
+            lab.blobReady = false;
+            lab.blobError = String(e && e.message || e);
+        });
+    }
+
+    // ============================================================
+    // 音频源 2：实时 AudioContext → MediaStreamAudioDestinationNode → srcObject
+    //   = "没有已知时长"的直播流形态。StackOverflow 上唯一被提到能"关掉锁屏拖动条"的路子。
+    //   ★ iOS 上实时 AudioContext 的解锁必须在**手势的同步调用栈**里（不能 await），
+    //     状态判据用 !== 'running'（iOS 有私有态 'interrupted'）。
+    // ============================================================
+    var liveCtx = null, liveDest = null, liveOsc = null, liveGain = null;
+
+    function ensureLiveStream() {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return false;
+        if (!liveCtx) {
+            try {
+                liveCtx = new AC();
+                liveDest = liveCtx.createMediaStreamDestination();
+                liveOsc = liveCtx.createOscillator();
+                liveOsc.type = 'sine';
+                liveOsc.frequency.value = 440;
+                liveGain = liveCtx.createGain();
+                liveGain.gain.value = 0.22;
+                liveOsc.connect(liveGain);
+                liveGain.connect(liveDest);
+                liveOsc.start();
+            } catch (e) { lab.streamError = String(e && e.message || e); return false; }
+        }
+        if (liveCtx.state !== 'running') { try { liveCtx.resume(); } catch (e) { /* ignore */ } }
+        if (streamAudioEl.srcObject !== liveDest.stream) streamAudioEl.srcObject = liveDest.stream;
+        streamAudioEl.volume = 0.25;
+        return true;
+    }
+
+    // ============================================================
+    // 注销 / 注册 / 进度上报
+    // ============================================================
+    function unregisterAll() {
+        handlers = {};
+        regFailed = [];
+        for (var i = 0; i < ALL_ACTIONS.length; i++) {
+            try { navigator.mediaSession.setActionHandler(ALL_ACTIONS[i], null); }
+            catch (e) { /* 不支持的动作用 null 注销也可能抛，忽略 */ }
+        }
+        // 无参 setPositionState() = 传 {} = 清空已有的进度状态（MDN）
+        try { navigator.mediaSession.setPositionState(); } catch (e) { /* ignore */ }
+        clearPositionLoop();
+    }
+
+    function reg(action, fn) {
+        try {
+            navigator.mediaSession.setActionHandler(action, fn);
+            handlers[action] = fn;
+        } catch (e) {
+            regFailed.push(action);
+        }
+    }
+
+    function clearPositionLoop() { if (posTimer) { clearInterval(posTimer); posTimer = 0; } }
+
+    function pushPositionOnce(el) {
+        var d = el.duration;
+        if (!isFinite(d) || d <= 0) return false;
+        try {
+            navigator.mediaSession.setPositionState({
+                duration: d, playbackRate: el.playbackRate || 1,
+                position: Math.min(Math.max(el.currentTime, 0), d)
+            });
+            return true;
+        } catch (e) { return false; }
+    }
+
+    function armPositionLoop(el) {
+        clearPositionLoop();
+        pushPositionOnce(el);
+        posTimer = setInterval(function () { pushPositionOnce(el); }, 400);
+    }
+
+    // ============================================================
+    // 日志
+    // ============================================================
+    function logAction(action, detail) {
+        if (!current) return;
+        var id = current.id;
+        if (!entries[id]) entries[id] = [];
+        entries[id].push({ t: nowLabel(), text: action + (detail ? ' (' + detail + ')' : '') });
+        renderLog();
+    }
+
+    function markNoDispatch(auto) {
+        if (!current) return;
+        var id = current.id;
+        if (entries[id] && entries[id].length) return;
+        if (!entries[id]) entries[id] = [];
+        if (autoMarked[id]) return;
+        autoMarked[id] = true;
+        entries[id].push({ t: nowLabel(), none: auto ? '（回到页面时：没有任何动作派发）' : '（已手动标记：没有任何动作派发）' });
+        renderLog();
+    }
+
+    function renderLog() {
+        var ran = ALL_COMBOS.filter(function (c) { return activated[c.id]; });
+        var box = $('log-box');
+        if (!ran.length) { box.innerHTML = '<p class="empty">还没跑任何组合。</p>'; return; }
+        var html = '';
+        ran.forEach(function (c) {
+            var list = entries[c.id] || [];
+            html += '<div class="logrow"><div class="name">' + c.id + ' · ' + esc(c.name) + '</div>';
+            if (!list.length) {
+                html += '<div class="none">（还没有任何派发记录）</div>';
+            } else {
+                html += '<ul class="entries">';
+                list.forEach(function (e) {
+                    html += '<li>' + (e.none
+                        ? esc(e.none)
+                        : '<span class="t">' + e.t + '</span> ' + esc(e.text)) + '</li>';
+                });
+                html += '</ul>';
+            }
+            html += '</div>';
+        });
+        box.innerHTML = html;
+    }
+
+    function esc(s) {
+        return String(s).replace(/[&<>"]/g, function (m) {
+            return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[m];
+        });
+    }
+
+    // ============================================================
+    // handler：既要记日志，又要让系统看到"这个网页真的会响应"
+    // ============================================================
+    function activeEl() {
+        if (current && current.src === 'stream') return streamAudioEl;
+        return blobAudioEl;
+    }
+
+    function handlerFor(action) {
+        return function (d) {
+            var el = activeEl();
+            if (el) {
+                if (action === 'play') { try { el.play().catch(function () {}); } catch (e) { /* ignore */ } }
+                else if (action === 'pause' || action === 'stop') { try { el.pause(); } catch (e) { /* ignore */ } }
+            }
+            var dir = '';
+            if (action === 'previoustrack' || action === 'seekbackward') dir = 'prev';
+            else if (action === 'nexttrack' || action === 'seekforward') dir = 'next';
+            var extra = dir;
+            if (!extra && d) {
+                if (typeof d.seekOffset === 'number') extra = 'seekOffset=' + d.seekOffset;
+                else if (typeof d.seekTime === 'number') extra = 'seekTime=' + d.seekTime;
+            }
+            logAction(action, extra);
+            renderNow();
+        };
+    }
+
+    // ============================================================
+    // 激活一个组合
+    //   ★ 全程同步：注销 → 重注册 → 起播 必须在同一次点击的同步栈里完成。
+    //     千万不能 location.reload() —— 重载后就没有用户手势了，iOS 会拒绝自动播放。
+    // ============================================================
+    function activate(id) {
+        var c = byId[id];
+        if (!c) return false;
+
+        // 0) 停掉上一组合的声
+        if (blobAudioEl) { try { blobAudioEl.pause(); } catch (e) { /* ignore */ } }
+        try { streamAudioEl.pause(); streamAudioEl.srcObject = null; } catch (e) { /* ignore */ }
+        clearPositionLoop();
+
+        // ★ current 要先切过来 —— 下面任何一句都可能往"本组"写日志，晚了就会写进上一组
+        current = c;
+        activated[c.id] = true;
+
+        // 1) 选定音源（stream 源要在这里就把 AudioContext 解锁，仍在手势栈内）
+        var el;
+        if (c.src === 'stream') {
+            if (!ensureLiveStream()) { logAction('（直播流音源创建失败）', ''); }
+            el = streamAudioEl;
+        } else {
+            el = blobAudioEl;
+        }
+
+        // 2) 全注销 → 按组合重注册（顺序对齐主应用 index.html，便于对照）
+        unregisterAll();
+
+        if (hasMediaSession()) {
+            // metadata 要在注册动作前后都设好，否则 iOS 可能不把它当成一条"媒体"
+            if (typeof window.MediaMetadata === 'function') {
+                try {
+                    navigator.mediaSession.metadata = new MediaMetadata({
+                        title: c.id + ' · ' + c.name,
+                        artist: 'MediaSession Lab',
+                        album: '锁屏控件实验室'
+                    });
+                } catch (e) { /* ignore */ }
+            }
+            c.actions.forEach(function (a) { reg(a, handlerFor(a)); });
+            if (c.seekto) reg('seekto', handlerFor('seekto'));
+        }
+
+        // 3) 进度上报
+        if (c.pos === 'finite' && el) {
+            armPositionLoop(el);
+        } else if (c.pos === 'infinity') {
+            try {
+                navigator.mediaSession.setPositionState({ duration: Infinity, playbackRate: 1, position: 0 });
+            } catch (e) { /* ignore */ }
+        }
+
+        // 4) 起播 —— 必须在这次点击的同步栈里
+        if (el) {
+            try { el.currentTime = 0; } catch (e) { /* live stream 上没有意义 */ }
+            try {
+                var p = el.play();
+                if (p && p.catch) p.catch(function (err) { logAction('（play 被拒绝）', err && err.name || ''); });
+            } catch (e) { logAction('（play 抛错）', String(e && e.message || e)); }
+        }
+
+        renderButtons();
+        renderNow();
+        renderLog();
+        return true;
+    }
+
+    // ============================================================
+    // 渲染
+    // ============================================================
+    function chips(list) {
+        if (!list.length) return '<span class="chip blank">一个都不注册</span>';
+        return list.map(function (a) { return '<span class="chip">' + a + '</span>'; }).join('');
+    }
+
+    function renderNow() {
+        if (!current) return;
+        var c = current;
+        $('now-title').textContent = c.id + ' · ' + c.name;
+        $('now-actions').innerHTML = chips(c.actions)
+            + (regFailed.length ? ' <span class="chip off">注册失败：' + regFailed.join(',') + '</span>' : '');
+        $('now-seekto').innerHTML = c.seekto
+            ? '<span class="chip">已注册</span>' : '<span class="chip off">未注册</span>';
+        $('now-pos').innerHTML = c.pos === 'finite' ? '<span class="chip">上报有限时长（0.4s 一次）</span>'
+            : c.pos === 'infinity' ? '<span class="chip">上报"时长无限"（伪直播）</span>'
+            : '<span class="chip off">不上报</span>';
+        $('now-src').innerHTML = c.src === 'stream'
+            ? '<span class="chip">直播流（无已知时长）</span>' : '<span class="chip">循环音频（blob）</span>';
+        var el = activeEl();
+        var st = '—';
+        if (el) {
+            st = el.paused ? '暂停中' : '播放中';
+            if (el !== streamAudioEl) {
+                st += ' · 时长 ' + (isFinite(el.duration) ? el.duration.toFixed(1) + 's' : '未知');
+            } else {
+                st += ' · 时长 未知';
+            }
+        }
+        $('now-play').textContent = st;
+    }
+
+    function renderButtons() {
+        ['btn-list', 'btn-list-opt'].forEach(function (boxId, idx) {
+            var list = idx === 0 ? COMBOS : OPTIONAL_COMBOS;
+            var box = $(boxId);
+            box.innerHTML = '';
+            list.forEach(function (c) {
+                var b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'btn' + (current && current.id === c.id ? ' on' : '');
+                b.id = 'btn-' + c.id;
+                b.innerHTML = '<span class="id">' + c.id + '</span><span class="nm">' + esc(c.name) + '</span>'
+                    + '<span class="hint2">注册：' + (c.actions.length ? c.actions.join(', ') : '（空）')
+                    + ' ｜ seekto：' + (c.seekto ? '✓' : '✗')
+                    + ' ｜ 进度上报：' + (c.pos === 'none' ? '✗' : c.pos === 'infinity' ? '无限' : '有限')
+                    + ' ｜ 音源：' + (c.src === 'stream' ? '直播流' : '循环音频')
+                    + '</span>'
+                    + (c.why ? '<span class="why">' + esc(c.why) + '</span>' : '');
+                if (b.addEventListener) b.addEventListener('click', function () { activate(c.id); });
+                else b.onclick = function () { activate(c.id); };
+                box.appendChild(b);
+            });
+        });
+    }
+
+    // ============================================================
+    // 启动
+    // ============================================================
+    if (!hasMediaSession()) {
+        $('unsupported').hidden = false;
+    }
+    renderButtons();
+    renderLog();
+
+    $('btn-mark').addEventListener('click', function () { markNoDispatch(false); });
+    $('btn-reset').addEventListener('click', function () {
+        entries = {}; autoMarked = {}; activated = {}; current = null;
+        if (blobAudioEl) { try { blobAudioEl.pause(); } catch (e) {} }
+        try { streamAudioEl.pause(); streamAudioEl.srcObject = null; } catch (e) {}
+        clearPositionLoop();
+        if (hasMediaSession()) unregisterAll();
+        $('now-title').textContent = '还没有选组合';
+        ['now-actions', 'now-seekto', 'now-pos', 'now-src'].forEach(function (k) {
+            $(k).innerHTML = '<span class="chip blank">—</span>';
+        });
+        $('now-play').textContent = '—';
+        renderButtons();
+        renderLog();
+    });
+
+    // 回到前台：这一组如果一条派发都没有，就自动标一下。
+    //   ★ 两个守卫：① 离开时间要够长（>1.5s）—— 免得只是切个 App 就被误标；
+    //             ② iOS 上 visibilitychange 不保证每次都触发 → 上面那颗手动按钮兜底。
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); return; }
+        if (document.visibilityState === 'visible' && current && hiddenAt
+            && Date.now() - hiddenAt > 1500) {
+            markNoDispatch(true);
+        }
+    });
+
+    window.addEventListener('pagehide', function () {
+        try { if (blobAudioEl) blobAudioEl.pause(); } catch (e) {}
+        try { if (liveCtx) liveCtx.suspend(); } catch (e) {}
+    });
+
+    // ---- 给验收脚本用的把手 ----
+    var lab = {
+        blobReady: false,
+        blobUrl: null,
+        streamError: null,
+        COMBOS: COMBOS.map(function (c) { return c.id; }),
+        OPTIONAL: OPTIONAL_COMBOS.map(function (c) { return c.id; }),
+        ALL_ACTIONS: ALL_ACTIONS.slice(),
+        activate: activate,
+        markNoDispatch: markNoDispatch,
+        reset: function () { $('btn-reset').dispatchEvent(new Event('click')); },
+        _handlers: function () { return handlers; },   // 名字带下划线：验收脚本读
+        _current: function () { return current ? current.id : null; },
+        _entries: function () { return entries; },
+        _regFailed: function () { return regFailed.slice(); },
+        _blobAudioEl: function () { return blobAudioEl; },
+        _streamAudioEl: function () { return streamAudioEl; },
+        _positions: function () { return pushPositionOnce; }
+    };
+    window.__lab = lab;
+
+    renderTone();
+})();
+</script>
+</body>
+</html>
