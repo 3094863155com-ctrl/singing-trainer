@@ -1435,7 +1435,10 @@
             justify-content: center;
             padding: 16px;
             background: rgba(16, 24, 40, 0.42);
-            touch-action: manipulation;   /* 同 .mp-error：关双击判定，关闭走 pointerdown */
+            /* 第二十轮：遮罩层不吃滚动/惯性（原来是 manipulation，仍允许 pan → 手指一碰就
+               "停住惯性滚动"、浏览器顺势补发一次点击 → 落在这层上把窗关掉）。
+               窗本身是 fixed + 内容不超屏，不需要滚动，所以直接 none 最干净。 */
+            touch-action: none;
             cursor: pointer;
         }
 

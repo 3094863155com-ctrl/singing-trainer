@@ -2124,6 +2124,13 @@
     let autoBreak = 0;            // 打断代数：用户动手就 +1
     let autoRunning = false;      // 接力自身执行中（此期间的 stop 不算"用户打断"）
 
+    // 第二十轮：**一次性**豁免接力。
+    //   用途只有一个 —— 用户按住的是**最后一个和弦**，关掉听辩辅助窗/报错浮窗后从那里恢复播放，
+    //   这一段播完就停在那儿，不再自动换新的一段。否则"再听一遍这个和弦"必然以
+    //   "换一首新曲子、从第 0 小节开始播"收场（这正是用户报的"从头开始 / 变成下一首"）。
+    //   置位：mpResumeFromMeasure()；消费：scheduleAutoNext()；任何一次 doPlay 都会清掉它。
+    let mpNoAutoNextOnce = false;
+
     // 段间停顿：从"上一段结束"算起，隔这么久去生成下一段。
     //   实际静音时长 = 这个值 + 生成/渲染耗时。实测（8 小节 / 四部和声 / 柱式）：
     //   1050 → 静音约 1.5 秒（渲染额外吃掉约 0.45 秒）。16 小节或分解和弦渲染更久，
@@ -2161,6 +2168,13 @@
     //   垂直方向相反：一旦判成上下就锁死，不再切水平（上下各自是一次性动作）。
     const MP_STEP_PX = 48;        // 每滑过这么多算走一格（往左退一个 / 往右进一个）
     const MP_REPORTS_MAX = 500;   // 内存里留存的明细上限
+
+    // ---- 关听辩辅助窗"算不算点了一下"的判据（第二十轮）----
+    //   以前是"指针一按下就关"，于是下滑开窗后那一下松手、或惯性滚动里被按住，都会被浏览器
+    //   补成一次点击 → 误关 → 提前起播。现在按下只记录，抬起才判：位移小、时间短、开窗已过 guard。
+    const MP_AID_TAP_PX = 14;         // 按下→抬起位移超过这么多 = 拖/滑，不是点
+    const MP_AID_TAP_MS = 900;        // 按住超过这么久 = 长按，不是点
+    const MP_AID_OPEN_GUARD_MS = 320; // 开窗后这段时间内的"点"不算（挡住开窗那一下的余波）
 
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
     let progressRaf = 0;          // requestAnimationFrame 句柄
@@ -2411,7 +2425,21 @@
     // 手动播放 / 点小节 / 切视图），那些动作都会把 autoBreak +1 → 这里就放弃接力。
     function scheduleAutoNext() {
         if (practiceMode) return;    // 错题练习播完即停：自动连播会生成普通题混入统计口径
-        if (!settings.autoContinue) return;
+        // ★ 第二十轮：浮窗开着就**不接力** —— 用户正在看/评这一小节，这时候换段会把浮窗
+        //   锁定的对象抽走（关窗/提交后就落在"另一首曲子"的同一小节上）。
+        //   这是结构性保护：mpOpenAid / mpOpenError 里的 cancelAutoNext() 只能作废
+        //   "已经排上的"接力，管不了"开窗之后才到点的 ended"。
+        if (mpAid) return;
+        if (els && els.mpError && !els.mpError.hidden) return;
+        if (!settings.autoContinue) { mpNoAutoNextOnce = false; return; }
+        // ★ 第二十轮：从"最后一个和弦"恢复播放的那一次，播完就停（不换段）。
+        //   注意它必须排在 autoContinue 判断**之后**：没开连续播放时这里本来就不接力，
+        //   顺手把标记清掉，别让它留到下一次播完才生效。
+        if (mpNoAutoNextOnce) {
+            mpNoAutoNextOnce = false;
+            showAutoInfo('连续播放：停在按住的那一个和弦（末小节复习完不换段）');
+            return;
+        }
         cancelAutoNext();                        // 清掉可能残留的上一次接力（同时抬高代数）
         const brk = autoBreak;
         showAutoInfo('连续播放：马上换新的一段…', 'i-repeat');
@@ -3013,7 +3041,12 @@
         fromMeasure = fromMeasure || 0;
         mpPauseJumpTo = -1;             // 真开始播了 → 待重定位消费掉（避免下次按播放又跳一次）
         if (!data || !data.chords.length || isRendering) return;
-        if (!auto) cancelAutoNext();   // 用户手动播放 / 点小节 → 作废在途的自动接力
+        if (!auto) {
+            cancelAutoNext();          // 用户手动播放 / 点小节 → 作废在途的自动接力
+            // 同理作废"末小节豁免"：这里清、mpResumeFromMeasure 在其后重新置上 ——
+            //   ★ 顺序不能反（那句 doPlay 是同步执行到第一个 await 的）。
+            mpNoAutoNextOnce = false;
+        }
         const host = global.ChordHost;
         if (!host) { renderInfoText('音频桥接不可用', true); return; }
 
@@ -3364,11 +3397,32 @@
             });
         }
         if (els.mpAid) {
+            // ★ 第二十轮：关窗从 "指针一按下就关" 改成 "按下只记录、抬起才判"。
+            //   原因：下滑开窗那一刻手指还在窗上方，那一下松手、以及惯性滚动里被按住的那一下，
+            //   浏览器都会补发一次点击 → 窗口被误关 → 立刻起播（用户看到的就是"莫名其妙就开始了"、
+            //   "还从不对的地方开始"）。现在要求：起点在窗外 + 位移小 + 时间短 + 开窗已过保护窗。
+            let aidDown = null;
             els.mpAid.addEventListener('pointerdown', (e) => {
                 // 窗内任何按下（含点音名）也顺手解锁一次音频上下文 —— 它是真激活事件
                 unlockAudioNow();
-                if (!e.target.closest || !e.target.closest('.mp-aid__panel')) mpCloseAid();
+                aidDown = {
+                    outside: !(e.target.closest && e.target.closest('.mp-aid__panel')),
+                    x: e.clientX, y: e.clientY, t: Date.now()
+                };
             }, { capture: true });
+            els.mpAid.addEventListener('pointerup', (e) => {
+                const d = aidDown;
+                aidDown = null;
+                if (!d || !d.outside) return;                                     // 起点在窗内 → 不是关窗
+                if (e.target.closest && e.target.closest('.mp-aid__panel')) return; // 拖进窗内 → 不算
+                if (Math.abs(e.clientX - d.x) > MP_AID_TAP_PX) return;            // 是拖/滑，不是点
+                if (Math.abs(e.clientY - d.y) > MP_AID_TAP_PX) return;
+                if (Date.now() - d.t > MP_AID_TAP_MS) return;                     // 长按，不是点
+                if (mpAid && Date.now() - (mpAid.openedAt || 0) < MP_AID_OPEN_GUARD_MS) return;
+                mpCloseAid();
+            }, { capture: true });
+            // 手势被系统打断（来电、返回手势…）→ 忘掉这次按下，别让下次抬起误判成"点"
+            els.mpAid.addEventListener('pointercancel', () => { aidDown = null; }, { capture: true });
         }
         if (els.mpErrorGrid) {
             els.mpErrorGrid.addEventListener('click', (e) => {
@@ -3712,7 +3766,13 @@
         if (mpAid) {
             mpStopAidVoices();
             if (els && els.mpAid) els.mpAid.hidden = true;
-            if (mpAid.wasPlaying && chordAudioEl) { try { chordAudioEl.play().catch(() => {}); } catch (e) {} }
+            // ★ 第二十轮：这里不再"原地续播"。
+            //   原先这句 `chordAudioEl.play()` 是第十八轮在 mpCloseAid 里删掉、却漏在这里的**同一份代码**：
+            //   ① 它从"暂停点"续播，不是从按住的那一小节（用户要的是后者）；
+            //   ② 它先 play() 再 mpUnfreeze()，而 unfreeze 会把 mpMeasure 拉回 mpLiveMeasure，
+            //      于是画面/进度环和声音又错开了（这就是那个"两份代码只修了一份"的包袱）。
+            //   现在：收窗/收手势只停声。要恢复播放只有 mpCloseAid 一条路（它走 mpResumeFromMeasure）。
+            //   顺带说清 deactivate() 的行为：它也会走到这里 —— 离开和弦页本来就不该起播。
             mpAid = null;
             mpAidLast = null;
             mpSyncPlayIcon();
@@ -4136,6 +4196,12 @@
     function mpOpenError(frozen) {
         if (practiceMode) return;            // 错题练习不设报错
         if (!data || !data.chords.length) return;
+        // ★ 第二十轮：和听辩辅助窗同一个道理 —— 开窗就意味着"我要评这一小节"，
+        //   在途的自动连播接力必须作废。否则整段正好在这时播完，接力会在 1.05 秒后
+        //   换一段新的（从第 0 小节播），而浮窗里锁定的还是旧那一段的小节号：
+        //   提交后既评错了和弦，又会"从新曲子的第 N 小节开始放"。
+        //   （音乐不停，所以这里只清定时器，不动播放。）
+        cancelAutoNext();
         let m, deg, rom, prev2, prev3;
         if (frozen) {
             m = frozen.measure;
@@ -4186,10 +4252,17 @@
             ? frozen.midis
             : ((data && data.chords[frozen.measure] || {}).midis);
         if (!midis || !midis.length) return;
+        // ★ 第二十轮：开窗 = "我要停下来听这个和弦" → 在途的自动连播接力立刻作废。
+        //   否则（尤其开窗前音频刚好播完 → wasPlaying=false → 关窗时根本没有 doPlay 去取消它）
+        //   1.05 秒后接力照样到点：生成新的一段、从第 0 小节起播 —— 用户看到的就是
+        //   "关窗后从头开始 / 直接变成下一首"。这是本次"概率性复现"的主因。
+        cancelAutoNext();
         const wasPlaying = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
         if (chordAudioEl && wasPlaying) { try { chordAudioEl.pause(); } catch (e) {} }
         mpSyncPlayIcon();                                  // pause 事件会同步，这里兜底
-        mpAid = { measure: frozen.measure, midis: midis.slice(), sources: [], wasPlaying };
+        //   openedAt：关窗那一下的"开窗保护窗"要用（见 MP_AID_OPEN_GUARD_MS）
+        mpAid = { measure: frozen.measure, midis: midis.slice(), sources: [], wasPlaying,
+                  openedAt: Date.now() };
         mpPaintAidTones(frozen.measure);
         if (els && els.mpAid) els.mpAid.hidden = false;
         try { await playInstantChord(midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
@@ -4266,7 +4339,15 @@
     //     于是"先起播后解冻"会被 unfreeze 覆盖回旧值（画面/进度环跳回去）。
     function mpResumeFromMeasure(m) {
         if (!(m >= 0)) return;
-        doPlay(lastPlayMode, m);
+        const n = (data && data.chords) ? data.chords.length : 0;
+        // 夹到"当前这一段"的有效范围内：极少数情况下（开窗那一瞬间自动连播正好把 data
+        //   换成了新的一段）记下的小节号会越界 —— 越界的 currentTime 会直接落到末尾、立刻 ended。
+        const k = (n > 0) ? Math.min(m, n - 1) : m;
+        doPlay(lastPlayMode, k);
+        // ★ 第二十轮：恢复点就是**最后一个和弦** → 这一次播完别再自动换段。
+        //   否则"按住末小节再听一遍"必然以"换一段新的、从第 0 小节播"收场。
+        //   （必须在 doPlay 之后置位：doPlay 开头会把这标记清掉。）
+        if (n > 0 && k >= n - 1) mpNoAutoNextOnce = true;
     }
 
     // 用户主动关窗：停声 → 收浮窗 → 从"按住那一小节"重播 → 结束长按态（解冻）
@@ -4279,6 +4360,10 @@
         mpAid = null;
         mpAidLast = null;
         mpSyncPlayIcon();
+        // ★ 第二十轮：关窗也要作废在途的自动连播接力。
+        //   wasPlaying 为 false 时下面不会调 doPlay —— 少了这一句，那段"没人取消"的接力
+        //   会在 1.05 秒后到点：生成新的一段 + 从第 0 小节播 = "从头开始 / 变成下一首"。
+        cancelAutoNext();
         //   ★ 顺序：先解冻（此时 mpAid 已置空 → 不会走 mpCancelGesture 里那段兜底分支，不会递归），
         //     再起播。原先那句"原地 chordAudioEl.play()"已删 —— 留着会"先在暂停点响一下、
         //     随后 doPlay 再 seek 回本小节"，两声抢音。
@@ -4804,13 +4889,19 @@
         //   注意：**别**为了造样本去给 currentTime 赋值 —— 那会触发 timeupdate，
         //   反过来把高亮改掉；要样本就让音频真播着，隔一会儿读两次。
         _getAudioClock: () => (chordAudioEl
-            ? { t: chordAudioEl.currentTime, d: chordAudioEl.duration, paused: chordAudioEl.paused }
+            ? { t: chordAudioEl.currentTime, d: chordAudioEl.duration,
+                paused: chordAudioEl.paused, ended: chordAudioEl.ended }
             : null),
         // 第十六轮：音频自愈相关的两个口子
         //   _unlockAudioNow：手动唤醒上下文（验收用；也可以在真机控制台里敲）
         //   _reloadSamples：宿主重建 AudioContext 后，bufferCache 被清空 → 由这里重新解码
         _unlockAudioNow: unlockAudioNow,
         _reloadSamples: () => preloadChordSamples(() => {}),
+        // 第二十轮：自动连播接力的状态（断言"开窗/关窗有没有作废在途接力"用）
+        _getAutoState: () => ({
+            pending: !!autoTimer, break: autoBreak, running: autoRunning,
+            noAutoOnce: mpNoAutoNextOnce, gapMs: AUTO_CONTINUE_GAP_MS
+        }),
         // ---- 听辨统计 / 数据库页（调试 / 自测用）----
         renderStats: renderStats,
         _getStats: () => ({ all: statsAll, session: statsSession, scope: statsScope }),
