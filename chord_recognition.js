@@ -2176,6 +2176,22 @@
     const MP_AID_TAP_MS = 900;        // 按住超过这么久 = 长按，不是点
     const MP_AID_OPEN_GUARD_MS = 320; // 开窗后这段时间内的"点"不算（挡住开窗那一下的余波）
 
+    // ---- 「从第 k 小节起播」的落点余量（第二十一轮）----
+    //   用户反馈：关辅助窗后听起来是"**按住那个和弦的前一个**"。
+    //   原因不是记错小节号（脚本里真实手势路径验过：记的就是按住那一节），而是
+    //   seek 落点**正好压在小节边界上**：`currentTime = k*md` 是精确边界，
+    //   ① 浏览器的解码/取整容差（WAV 也是按帧的）会让实际落点掉到 k*md - ε；
+    //   ② 这时候 `Math.floor(t/md)` 得 k-1 → 高亮/封面先显示上一节，
+    //      听感上也是**上一小节最后一个和弦的余音先响一下**；
+    //   ③ iOS 上从暂停态 seek + play 还有管线延迟，把这点误差放大成"先响前一个"。
+    //   所以起播点**往小节内部挪一点点**，宁可切掉几十毫秒的音头（柱式一拍 0.86s、
+    //   分解一拍 4 个十六分，80ms 无感），也绝不再压边界。
+    //   想更保守/更激进就只改这一个数（0 = 恢复旧行为）。
+    const MP_RESUME_LEAD_S = 0.08;
+    //   play() 之后校验一次落点：偏得太多（> 这个值）说明 seek 被系统吞了/迟到了 → 重设一次。
+    //   取 0.30s：远小于半拍（0.43s @70），不会把"正常的播放推进"误判成 seek 失败。
+    const MP_SEEK_CHECK_S = 0.30;
+
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
     let progressRaf = 0;          // requestAnimationFrame 句柄
     let lastPosPush = 0;          // 上次推锁屏进度的时刻（setPositionState 限流用）
@@ -3036,6 +3052,74 @@
     // mode：'block' 柱式 / 'arpeggio' 分解 / 'bass' 单音
     // fromMeasure：从第几小节开始（0 = 从头）。点谱面小节时传入该小节索引。
     // auto：true = 本次是"自动连播"接力发起的，不要当成用户操作去打断接力。
+    // 「从第 k 小节起播」的 seek 落点：小节起点 + 一点点余量（见 MP_RESUME_LEAD_S 的说明）。
+    //   第 0 小节不加 —— 0 就是 0，加了只会白切掉第一个和弦的音头。
+    function mpSeekTarget(k) {
+        const base = k * measureDuration();
+        return (k > 0) ? base + MP_RESUME_LEAD_S : 0;
+    }
+
+    // 给 <audio> 换 src 之后等 metadata（readyState >= HAVE_METADATA）。
+    //   ★ 不是洁癖：Safari/iOS 在 HAVE_NOTHING 时给 currentTime 赋值会**静默忽略**，
+    //     紧接着 play() 就从 0 开始播 —— 表现就是"从头开始 / 落到别的小节"。
+    //   ★ 更不能"同步看 readyState 就放行"：给 src 赋值后 readyState 要到**下一个 task**
+    //     才归 HAVE_NOTHING，同步读到的还是**旧源**的 4 → 误判成就绪 → 马上 seek → 被丢弃。
+    //     （第二十一轮踩到的就是这一步：验收里 t 从 0 开始播，而日志里"看起来"是就绪的。）
+    //     所以：事件先到就立刻过；否则延后 60/200ms 再各查一次（那时状态才是真实的）。
+    function mpWaitMeta(el) {
+        return new Promise((res) => {
+            if (!el) return res();
+            let done = false;
+            const fin = () => {
+                if (done) return;
+                done = true;
+                el.removeEventListener('loadedmetadata', fin);
+                el.removeEventListener('canplay', fin);
+                res();
+            };
+            el.addEventListener('loadedmetadata', fin);
+            el.addEventListener('canplay', fin);
+            const check = () => { if (el.readyState >= 1) fin(); };
+            setTimeout(check, 60);
+            setTimeout(check, 200);
+            setTimeout(fin, 1600);   // 兜底：死活不给 metadata 也别把播放卡死
+        });
+    }
+
+    // 设 seek 并**等它真的落地**（seeked 事件，900ms 兜底）。
+    //   换过 src 之后光赋值不一定算数，play() 会抢在 seek 前面从 0 起播 ——
+    //   这就是"关窗后从头开始"的另一条路（慢路 = 重新渲染时才走）。
+    function mpSeekTo(el, t) {
+        return new Promise((res) => {
+            if (!el) return res();
+            let done = false;
+            const fin = () => {
+                if (done) return;
+                done = true;
+                el.removeEventListener('seeked', fin);
+                res();
+            };
+            el.addEventListener('seeked', fin);
+            try { el.currentTime = t; } catch (e) { fin(); }
+            setTimeout(fin, 900);
+        });
+    }
+
+    // seek 之后的兜底校验（两件事）：
+    //   ① 落点被系统吞了/迟到了（偏差 > MP_SEEK_CHECK_S）→ 重设一次；
+    //   ② 显示对齐到第 k 小节 —— setMeasureHighlight(k) 开头是
+    //      `if (m === highlightedMeasure) return;`，所以"高亮已经就是 k"或
+    //      "按住期间音乐照常播、高亮已走到 k+2"这两种情况下它会直接 return，
+    //      mpLiveMeasure 就留在按住期间前进的值上（关窗后画面/进度环先错一格）。
+    function mpEnsureSeek(k, target) {
+        if (!chordAudioEl) return;
+        const t = chordAudioEl.currentTime;
+        if (Number.isFinite(t) && Math.abs(t - target) > MP_SEEK_CHECK_S) {
+            try { chordAudioEl.currentTime = target; } catch (e) {}
+        }
+        if (!mpFreeze && mpLiveMeasure !== k) mpOnMeasure(k);
+    }
+
     async function doPlay(mode, fromMeasure, auto) {
         mode = mode || lastPlayMode || 'block';
         fromMeasure = fromMeasure || 0;
@@ -3067,7 +3151,7 @@
             chordAudioEl = new Audio();
             bindAudioProgress();
         }
-        const seekTo = fromMeasure * measureDuration();
+        const seekTo = mpSeekTarget(fromMeasure);
 
         // ★ 若"这段音频"就是本次要的（同一份 data + 同一种播放方式）→ 直接设进度条时间，
         //   **不重新渲染**。（整段是离线渲染成的一个 WAV，所以点小节 = 给 currentTime 赋值。）
@@ -3083,6 +3167,7 @@
                 await chordAudioEl.play();
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
+                mpEnsureSeek(fromMeasure, seekTo);   // ★ 落点校验 + 显示对齐（见函数注释）
             } catch (err) {
                 renderInfoText('播放失败: ' + (err && err.message), true);
             } finally {
@@ -3110,8 +3195,11 @@
 
             chordAudioEl.pause();
             chordAudioEl.src = blobUrl;
+            // ★ 换 src 之后先等 metadata 再 seek（Safari/iOS 上 HAVE_NOTHING 期间给
+            //   currentTime 赋值会被静默忽略 → play() 从 0 播 = "从头开始"）。
+            await mpWaitMeta(chordAudioEl);
             seeking = true;
-            try { chordAudioEl.currentTime = seekTo; } catch (e) {}
+            await mpSeekTo(chordAudioEl, seekTo);   // ★ 等 seeked 真的落地，再 play
             if (els.renderInfo) {
                 els.renderInfo.textContent = '播放中（' + (PLAY_MODES[mode] || '柱式') + '）…';
             }
@@ -3119,6 +3207,7 @@
                 await chordAudioEl.play();
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
+                mpEnsureSeek(fromMeasure, seekTo);   // ★ 落点校验 + 显示对齐（见函数注释）
             } catch (err) {
                 // 离线渲染耗时可能超出浏览器的自动播放时限 → NotAllowedError。
                 // 这不是功能故障：用户再点一次刚才那个播放键即可（那一下是明确手势）。
@@ -4343,6 +4432,12 @@
         // 夹到"当前这一段"的有效范围内：极少数情况下（开窗那一瞬间自动连播正好把 data
         //   换成了新的一段）记下的小节号会越界 —— 越界的 currentTime 会直接落到末尾、立刻 ended。
         const k = (n > 0) ? Math.min(m, n - 1) : m;
+        // ★ 第二十一轮：高亮正停在 k 时先清一次。
+        //   setMeasureHighlight() 开头是 `if (m === highlightedMeasure) return;`，而
+        //   "按住期间音乐照常播"会让高亮走到 k+1/k+2；反过来也可能恰好还停在 k。
+        //   后一种情况下它会直接 return → mpLiveMeasure 留在按住期间前进的值上，
+        //   画面/进度环与声音错一格。清成 -1 之后下一步一定会真正落一次。
+        if (highlightedMeasure === k) setMeasureHighlight(-1);
         doPlay(lastPlayMode, k);
         // ★ 第二十轮：恢复点就是**最后一个和弦** → 这一次播完别再自动换段。
         //   否则"按住末小节再听一遍"必然以"换一段新的、从第 0 小节播"收场。
@@ -4369,6 +4464,15 @@
         //     随后 doPlay 再 seek 回本小节"，两声抢音。
         mpCancelGesture();
         if (was) mpResumeFromMeasure(at);
+        // ★ 第二十一轮：暂停态关窗（不自动起播）也要把"下次按播放从哪起"钉到这一小节。
+        //   否则会沿用**更早**留下的 mpPauseJumpTo（暂停态点过「上一个」时记下的那一节，
+        //   可能比按住的小节还早一格）—— 用户点播放键就"回到按住那个的前一个"。
+        else if (at >= 0) {
+            mpPauseJumpTo = at;
+            //   显示也一起摆回按住那一节（unfreeze 刚把 mpMeasure 拉到了 mpLiveMeasure =
+            //   按住期间音乐前进到的位置），否则"看着在第 k+2、一按播放从第 k 响"。
+            mpShowMeasureOnly(at);
+        }
     }
 
     function mpReplayAid(style) {
