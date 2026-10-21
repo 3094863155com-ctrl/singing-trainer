@@ -2147,6 +2147,16 @@
     // ★ 第十六轮：暂停态用「上一个 / 下一个」切过和弦之后，下次按播放键要**从这个新小节起播**。
     //   记的就是"待重定位到的小节"，-1 = 没有待重定位（正常原地续播）。
     let mpPauseJumpTo = -1;
+    // ★ 第二十三轮：下一次 doPlay 要不要**先把媒体管线重置一次**（load() 再 seek）。
+    //   起因见 doPlay 快路里的注释：从"暂停态"起播时，Safari/iOS 有可能先从**暂停时那个位置**
+    //   放出一小段旧音频，再跳到我们设的落点 —— 听感就是"上一小节的尾音叠在第一拍"。
+    //   置位点只有两个：关辅助窗 / 关报错窗（以及随后那次"按播放键"）。
+    let mpNeedsCleanSeek = false;
+    // load() 重置管线到 seek 落地之间：进度跟随要让路（否则画面先跳回第一小节，见 updateProgress）
+    let mpCleanLoading = false;
+    // 起播代数：每次 doPlay 自增。延后的落点自检（mpGuardLanding）拿它作废自己 ——
+    //   否则"用户已经点了下一个"之后，上一轮的自检还会往回 seek 一下（又是一次抢音）。
+    let mpPlayToken = 0;
     let mpExpanded = false;       // 展开中？
     let mpRevealing = false;      // 是否处于"按住揭示"（默认遮住，按住才显示）
     let mpFreeze = null;          // 长按那一刻的冻结快照（null = 未冻结）
@@ -2175,6 +2185,11 @@
     const MP_AID_TAP_PX = 14;         // 按下→抬起位移超过这么多 = 拖/滑，不是点
     const MP_AID_TAP_MS = 900;        // 按住超过这么久 = 长按，不是点
     const MP_AID_OPEN_GUARD_MS = 320; // 开窗后这段时间内的"点"不算（挡住开窗那一下的余波）
+    // 「松手补放琶音」只在这个时间窗内做（第十九轮的行为，线上基线里丢了，第二十三轮补回）：
+    //   开窗那一响是在 pointermove（非激活事件）里排的，若当时没解锁成功，松手时补一次。
+    //   但如果用户盯着窗看了一会儿才松手，这一次补放会盖在他正听着的东西上 ——
+    //   表现为"关窗/重播时多出一串和声，一上来挺乱的"。超过这个窗口就不再补。
+    const MP_AID_REPLAY_MS = 900;
 
     // ---- 「从第 k 小节起播」的落点余量（第二十一轮）----
     //   用户反馈：关辅助窗后听起来是"**按住那个和弦的前一个**"。
@@ -2184,12 +2199,16 @@
     //   ② 这时候 `Math.floor(t/md)` 得 k-1 → 高亮/封面先显示上一节，
     //      听感上也是**上一小节最后一个和弦的余音先响一下**；
     //   ③ iOS 上从暂停态 seek + play 还有管线延迟，把这点误差放大成"先响前一个"。
-    //   所以起播点**往小节内部挪一点点**，宁可切掉几十毫秒的音头（柱式一拍 0.86s、
-    //   分解一拍 4 个十六分，80ms 无感），也绝不再压边界。
+    //   所以起播点**往小节内部挪一点点**，宁可切掉几十毫秒的音头，也绝不再压边界。
+    //   ★ 第二十三轮：0.08 → 0.02。用户反馈"位置对了，但一上来把前面那个和弦叠在第一拍、
+    //     听着挺乱"。80ms 正好是钢琴采样**起振**的长度 —— 跳过它 = 新和弦没有音头，
+    //     听感上剩下的就是**上一小节那颗还在满音量衰减的尾音**，于是像"前一个和弦叠上来"。
+    //     20ms 足够躲开"落点被取整到 k*md-ε"（误差只有微秒级），又完整保留音头。
     //   想更保守/更激进就只改这一个数（0 = 恢复旧行为）。
-    const MP_RESUME_LEAD_S = 0.08;
-    //   play() 之后校验一次落点：偏得太多（> 这个值）说明 seek 被系统吞了/迟到了 → 重设一次。
-    //   取 0.30s：远小于半拍（0.43s @70），不会把"正常的播放推进"误判成 seek 失败。
+    const MP_RESUME_LEAD_S = 0.02;
+    //   起播落点自检的**下限**：落后少于这个值一律不管（刚起播的正常滞后）。
+    //   ★ 第二十三轮：真正的门槛是"半小节"（见 mpGuardLanding 的 need），这个数只当下限。
+    //     （原先它是 mpEnsureSeek 的判据，而"play 后读一次"太脆 → 会把正常播放再 seek 一次。）
     const MP_SEEK_CHECK_S = 0.30;
 
     // ---- 起播落点自检（第二十二轮）----
@@ -2394,6 +2413,9 @@
     // ------------------------------------------------------------
     function updateProgress(force) {
         if (!data || !chordAudioEl) return;
+        // ★ 第二十三轮：load() 重置管线期间 currentTime 会回到 0。这时若按它刷一次，
+        //   画面/锁屏封面会先"跳回第一小节"再回来 —— 白白抖一下。这段时间不跟随。
+        if (mpCleanLoading) return;
         // ★ 第十六轮：暂停态用「上一个/下一个」手动切过和弦 → 面板位置由用户说了算，
         //   别让这条按 currentTime 的回调把显示拉回暂停点（那会让"切过去又自己跳回来"）。
         if (mpPauseJumpTo >= 0 && !mpIsPlaying()) return;
@@ -3124,24 +3146,26 @@
         });
     }
 
-    // seek 之后的兜底校验（两件事）：
-    //   ① 落点被系统吞了/迟到了（偏差 > MP_SEEK_CHECK_S）→ 重设一次；
-    //   ② 显示对齐到第 k 小节 —— setMeasureHighlight(k) 开头是
-    //      `if (m === highlightedMeasure) return;`，所以"高亮已经就是 k"或
-    //      "按住期间音乐照常播、高亮已走到 k+2"这两种情况下它会直接 return，
-    //      mpLiveMeasure 就留在按住期间前进的值上（关窗后画面/进度环先错一格）。
-    function mpEnsureSeek(k, target) {
+    // seek 之后的兜底：**只负责显示对齐**。
+    //   setMeasureHighlight(k) 开头是 `if (m === highlightedMeasure) return;`，所以
+    //   "高亮已经就是 k"或"按住期间音乐照常播、高亮已走到 k+2"这两种情况下它会直接 return，
+    //   mpLiveMeasure 就留在按住期间前进的值上（关窗后画面/进度环先错一格）。
+    //   ★ 第二十三轮：**这里不再重新 seek**。原来它读一次 currentTime、偏了就重设，
+    //     而"读一次"这个动作太脆：刚起播时 currentTime 可能还没走起来，或者读到的还是旧值
+    //     → 在**正常播放里再 seek 一下** → 听感就是"第一拍被重放 + 上一小节的尾巴"。
+    //     而且延后判更糟：延后那一下会把人(或锁屏进度条)刚挪到的位置硬拽回来（验收 11.1 抓到的）。
+    //     真正"没落地"的纠正统一交给 mpGuardLanding：起播 200/700ms、落后超过半小节才动手。
+    function mpEnsureSeek(k) {
         if (!chordAudioEl) return;
-        const t = chordAudioEl.currentTime;
-        if (Number.isFinite(t) && Math.abs(t - target) > MP_SEEK_CHECK_S) {
-            try { chordAudioEl.currentTime = target; } catch (e) {}
-        }
         if (!mpFreeze && mpLiveMeasure !== k) mpOnMeasure(k);
     }
 
     async function doPlay(mode, fromMeasure, auto) {
         mode = mode || lastPlayMode || 'block';
         fromMeasure = fromMeasure || 0;
+        mpPlayToken++;                  // ★ 起播代数 +1：在途的延后自检全部作废（见 mpPlayToken）
+        const cleanSeek = mpNeedsCleanSeek;   // 本次是否要先重置媒体管线（见 mpNeedsCleanSeek）
+        mpNeedsCleanSeek = false;
         mpPauseJumpTo = -1;             // 真开始播了 → 待重定位消费掉（避免下次按播放又跳一次）
         if (!data || !data.chords.length || isRendering) return;
         if (!auto) {
@@ -3178,6 +3202,23 @@
         if (blobData === data && blobMode === mode && blobUrl) {
             try {
                 seeking = true;
+                // ★ 第二十三轮：「从暂停态回来」先把媒体管线重置一次，再 seek。
+                //   用户反馈（第二十二轮修好落点之后）：位置对了，但**一上来把前面那个和弦
+                //   叠在第一拍**、听着挺乱。上一轮已经改成"等 seeked 再 play"，所以不再是
+                //   "整节上一和弦"，剩下的就是**暂停态 seek 的老毛病**：暂停时给 currentTime
+                //   赋值，Safari 会先把 seek 记下来、真正重定位要等管线重新跑起来 —— 于是
+                //   play() 的头几十/几百毫秒放的是**暂停点那一段**（那一小段正是上一小节
+                //   还在满音量衰减的尾音 + 这一小节已经过去的音头）→ 重复叠加 = "挺乱的"。
+                //   load() 让元素回到 HAVE_NOTHING 再按目标 seek（与慢路"换 src 后等 metadata
+                //   再 seek"完全同一条经验），管线从干净状态起步，不会先出声。
+                //   ★ 只在"关窗回来"这类恢复路径置位（见 mpNeedsCleanSeek），普通暂停/继续
+                //     仍走 mpTogglePlay 的原地 play()，不额外付出加载延迟。
+                if (cleanSeek) {
+                    mpCleanLoading = true;
+                    try { chordAudioEl.load(); } catch (e) {}
+                    await mpWaitMeta(chordAudioEl);
+                    mpLogResume({ tag: 'clean', k: fromMeasure, readyState: chordAudioEl.readyState });
+                }
                 // ★ 第二十二轮：**等 seek 真的落地，再 play()**。
                 //   原来这里是"设完 currentTime 立刻 play()"，而慢路（重新渲染）从第二十一轮起
                 //   就会 await seeked —— 又是"两条路只修了一条"的老包袱。
@@ -3186,6 +3227,7 @@
                 //   "先响别处、再跳到按住的和弦"，而且每次都这样。
                 //   先停到目标位置、等 seeked，再 play()，第一声就落在目标上。
                 await mpSeekTo(chordAudioEl, seekTo, { skipSame: true });
+                mpCleanLoading = false;      // 落点已就位 → 进度跟随恢复正常
                 if (els.renderInfo) {
                     els.renderInfo.style.display = 'block';
                     els.renderInfo.textContent = '播放中（' + (PLAY_MODES[mode] || '柱式') + '）…';
@@ -3193,11 +3235,12 @@
                 await chordAudioEl.play();
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
-                mpEnsureSeek(fromMeasure, seekTo);   // ★ 落点校验 + 显示对齐（见函数注释）
+                mpEnsureSeek(fromMeasure);   // ★ 显示对齐（见函数注释；"没落地"的纠正归 mpGuardLanding）
             } catch (err) {
                 renderInfoText('播放失败: ' + (err && err.message), true);
             } finally {
                 seeking = false;
+                mpCleanLoading = false;      // 任何早退都不能把它留在 true（否则进度跟随会一直停摆）
             }
             return;
         }
@@ -3233,7 +3276,7 @@
                 await chordAudioEl.play();
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
-                mpEnsureSeek(fromMeasure, seekTo);   // ★ 落点校验 + 显示对齐（见函数注释）
+                mpEnsureSeek(fromMeasure);   // ★ 显示对齐（见函数注释；"没落地"的纠正归 mpGuardLanding）
             } catch (err) {
                 // 离线渲染耗时可能超出浏览器的自动播放时限 → NotAllowedError。
                 // 这不是功能故障：用户再点一次刚才那个播放键即可（那一下是明确手势）。
@@ -4121,7 +4164,10 @@
                 // ★ 兜底补放：下滑那声琶音是在 pointermove（非激活事件）里播的，若当时没能解锁
                 //   （mpAidLast.ok 为假），这里补一次 —— pointerup 是激活事件，这一下一定解锁。
                 //   守卫用"上一次 ok 为假才补"，所以第一次真排上程了绝不会出现双声。
-                if (mpAid && mpAidLast && !mpAidLast.ok) {
+                //   ★ 第二十三轮：再叠一道"开窗久了就不补"（MP_AID_REPLAY_MS）——
+                //     用户盯着窗听了几秒才松手时，这一补会盖在当下的声音上，听起来就是"多出一串和声"。
+                if (mpAid && mpAidLast && !mpAidLast.ok &&
+                    (Date.now() - (mpAid.openedAt || 0)) < MP_AID_REPLAY_MS) {
                     try { mpReplayAid('arp'); } catch (err) {}
                 }
                 mpGesture = null;
@@ -4463,6 +4509,10 @@
     // 起播落点自检：起播后 200/700ms 各核一次"现在真正在第几小节"。
     //   早于期望 → 重设一次（最多一次，别和用户抢）；其余情况只记日志。
     //   日志用 _getResumeLog() 取，真机上排查"到底落在哪"不必再靠猜。
+    //   ★ 第二十三轮：**判据收紧**。原先只要 `cur < k` 就重设，而刚起播那一两帧
+    //     currentTime 可能还没走起来（iOS 尤其爱晚报），于是自检自己在正常播放里 seek 了一下
+    //     —— 一样是"第一拍重放 + 上一小节尾巴"。现在必须"整整落后半小节以上"才动手，
+    //     并且拿 mpPlayToken 作废掉"用户已经又点了一次"的旧自检。
     let mpResumeLog = [];
     function mpLogResume(entry) {
         try {
@@ -4473,17 +4523,25 @@
     }
     function mpGuardLanding(k, tag) {
         if (!(k >= 0)) return;
-        const seg = mpSeg, d = data;
+        const seg = mpSeg, d = data, token = mpPlayToken;
         let fixed = 0;
         const check = (label) => {
             if (!chordAudioEl || mpSeg !== seg || data !== d) return;   // 换段了 → 作废
+            if (token !== mpPlayToken) return;                          // 又起播过 → 作废
             if (mpAid) return;                                          // 又开窗了 → 不插手
             const t = chordAudioEl.currentTime;
             const cur = mpMeasureOf(t);
-            if (!(cur < k)) return;                                     // 到位 / 已经在后面
+            const target = mpSeekTarget(k);
+            // 落后超过半小节才算"真的没落地"。只差一点点（刚起播的正常滞后）不碰它。
+            const need = Math.max(MP_SEEK_CHECK_S, measureDuration() * 0.5);
+            const behind = (target - t) > need;
+            if (!behind) {
+                if (cur < k) mpLogResume({ tag, k, label, t, cur, fixed: false, behind: false });
+                return;
+            }
             if (fixed >= 1) { mpLogResume({ tag, k, label, t, cur, fixed: false }); return; }
             fixed++;
-            try { chordAudioEl.currentTime = mpSeekTarget(k); } catch (e) {}
+            try { chordAudioEl.currentTime = target; } catch (e) {}
             mpLogResume({ tag, k, label, t, cur, fixed: true });
         };
         setTimeout(() => check('200ms'), 200);
@@ -4506,6 +4564,9 @@
         //   万一真机上还不对，_getResumeLog() 里能直接看到"想要第几节 / 实际落在第几节"。
         mpLogResume({ tag: 'resume', k: k, md: measureDuration(),
                       t0: chordAudioEl ? chordAudioEl.currentTime : null });
+        // ★ 第二十三轮：从浮层回来 = 媒体元素刚刚被 pause 过 → 起播前先重置一次管线
+        //   （否则 play() 会先放出暂停点那一小段旧音频，叠在第一拍上，见 doPlay 快路注释）。
+        mpNeedsCleanSeek = true;
         doPlay(lastPlayMode, k);
         mpGuardLanding(k, 'resume');
         if (MP_DEBUG && els && els.renderInfo) {
@@ -4546,6 +4607,9 @@
         //   可能比按住的小节还早一格）—— 用户点播放键就"回到按住那个的前一个"。
         else if (at >= 0) {
             mpPauseJumpTo = at;
+            //   ★ 第二十三轮：这一支不起播，但用户下一次按播放键照样是"从暂停态起播"
+            //     → 把"先重置管线"的标记交下去（doPlay 会消费它）。
+            mpNeedsCleanSeek = true;
             //   显示也一起摆回按住那一节（unfreeze 刚把 mpMeasure 拉到了 mpLiveMeasure =
             //   按住期间音乐前进到的位置），否则"看着在第 k+2、一按播放从第 k 响"。
             mpShowMeasureOnly(at);
@@ -5019,6 +5083,8 @@
         // 第二十二轮：起播落点自检的记录（真机上排查"关窗后落在第几节"直接用）
         _getResumeLog: () => mpResumeLog.slice(),
         _clearResumeLog: () => { mpResumeLog = []; },
+        _mpSeekTarget: (k) => mpSeekTarget(k),
+        _getResumeLead: () => MP_RESUME_LEAD_S,
         _measureOf: (t) => mpMeasureOf(t),
         _setMpExpanded: mpSetExpanded,
         _setMpStageView: mpSetStageView,
