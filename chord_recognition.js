@@ -1576,7 +1576,27 @@
         const legato = LEGATO;
         // 事件自带 hold 时用它（分解模式固定一拍），否则按连奏算 —— 柱式/单音行为不变
         const holdOf = (e) => (e.hold != null) ? e.hold : e.dur * legato;
-        const slot = (e) => e.time + holdOf(e) + CHORD_RELEASE;
+        // ★ 第二十四轮：**不让淡出尾巴跨过小节线**（TAIL_TRIM_AT_BARLINE）。
+        //   起因（用户）："退出听辨窗后，上一个和弦先触发，然后极快速地紧跟着正确的和弦出来"。
+        //   实测（验收 §11f，把 WAV 解出来用 Goertzel 量）：从第 k 小节起点往后
+        //   0–40ms 里"上一小节和弦"的能量还有本和弦的 **59%**，120–160ms 还有 45% —— 因为
+        //   每个和弦按住整拍再淡出 CHORD_RELEASE(0.12s)，那段淡出**压在小节线两侧**。
+        //   正常顺序播时它在上下文里听不出来；直接从边界起播就很扎耳（= 用户听到的那一下）。
+        //   做法：把"本来会跨过小节线的那部分 hold"收窄，让淡出在**小节线之前**结束。
+        //   只有每小节最后一拍（分解是最后一组）会受影响 —— 小节线上多一个 0.12s 的"气口"。
+        //   想恢复原来的连奏手感：把这个常量改成 false（只改这一处）。
+        const TAIL_TRIM_AT_BARLINE = true;
+        const measureSpan0 = 4 * (60 / tempo);
+        const holdTrimmed = (e) => {
+            const h = holdOf(e);
+            if (!TAIL_TRIM_AT_BARLINE) return h;
+            const idx = Math.floor(e.time / measureSpan0 + 1e-6);
+            const barEnd = (idx + 1) * measureSpan0;
+            const room = barEnd - e.time;                 // 这个事件离小节线还有多久
+            if (h + CHORD_RELEASE <= room) return h;      // 不跨线 → 原样
+            return Math.max(0.06, room - CHORD_RELEASE);  // 收窄到"淡出刚好压线结束"
+        };
+        const slot = (e) => e.time + holdTrimmed(e) + CHORD_RELEASE;
 
         let total = 0;
         events.forEach((e) => { total = Math.max(total, slot(e)); });
@@ -1622,7 +1642,7 @@
                 // 注意：这里**不再**人为做指数衰减 —— 之前的写法把这颗音从 0dB 强压到 -80dB，
                 // 比钢琴自身的衰减快十几倍，听着就是"弹一下就没了"。现在让采样自己衰减。
                 const t = e.time;
-                const hold = holdOf(e);           // 按住多久（秒）
+                const hold = holdTrimmed(e);      // 按住多久（秒）—— 已按"不跨小节线"收窄过
                 gain.gain.setValueAtTime(0, t);
                 gain.gain.linearRampToValueAtTime(gg, t + 0.004);
                 gain.gain.setValueAtTime(gg, t + hold);
@@ -3146,6 +3166,32 @@
         });
     }
 
+    // 等到**目标位置上真的有数据可播**（readyState ≥ HAVE_FUTURE_DATA）才允许 play()。
+    //   ★ 第二十四轮：用户把症状描述得很准 ——"上一个和弦先触发，然后**极快速地紧跟着**
+    //     正确的和弦出来"。这不是"落在别的小节"（那会整整一节、每次都一样），而是**起播那一瞬间**
+    //     放的是解码器里**上一次的 PCM 缓冲**（几十～几百毫秒），等管线在新位置解出数据才"跳"过去。
+    //     `seeked` 只证明"播放头挪了"，**不证明"新位置解码好了"**：本地 blob 一样要走
+    //     "重新定位 → 解出一段 PCM → 才能从那儿出声"。所以再等一道 canplay 作为门槛。
+    //     兜底 600ms：真等不到也不能把播放卡死（宁可慢一点，也不要卡住）。
+    function mpWaitCanPlay(el, ms) {
+        return new Promise((res) => {
+            if (!el) return res();
+            if (el.readyState >= 3) return res();
+            let done = false;
+            const fin = () => {
+                if (done) return;
+                done = true;
+                el.removeEventListener('canplay', fin);
+                el.removeEventListener('canplaythrough', fin);
+                res();
+            };
+            el.addEventListener('canplay', fin);
+            el.addEventListener('canplaythrough', fin);
+            setTimeout(() => { if (el.readyState >= 3) fin(); }, 80);
+            setTimeout(fin, ms || 600);
+        });
+    }
+
     // seek 之后的兜底：**只负责显示对齐**。
     //   setMeasureHighlight(k) 开头是 `if (m === highlightedMeasure) return;`，所以
     //   "高亮已经就是 k"或"按住期间音乐照常播、高亮已走到 k+2"这两种情况下它会直接 return，
@@ -3164,6 +3210,7 @@
         mode = mode || lastPlayMode || 'block';
         fromMeasure = fromMeasure || 0;
         mpPlayToken++;                  // ★ 起播代数 +1：在途的延后自检全部作废（见 mpPlayToken）
+        const myToken = mpPlayToken;    // ★ 本次起播的身份证：每个 await 之后都比一次，过期就放弃
         const cleanSeek = mpNeedsCleanSeek;   // 本次是否要先重置媒体管线（见 mpNeedsCleanSeek）
         mpNeedsCleanSeek = false;
         mpPauseJumpTo = -1;             // 真开始播了 → 待重定位消费掉（避免下次按播放又跳一次）
@@ -3217,8 +3264,19 @@
                     mpCleanLoading = true;
                     try { chordAudioEl.load(); } catch (e) {}
                     await mpWaitMeta(chordAudioEl);
+                    // ★ 第二十四轮：**先等数据到位（readyState ≥ 3）再 seek**。
+                    //   load() 之后只有 HAVE_METADATA，这个阶段给 currentTime 赋值在 Safari 上
+                    //   可能被静默忽略（我们第二十一轮已经栽过一次）→ 落点没生效，play 从别处出声。
+                    await mpWaitCanPlay(chordAudioEl, 800);
                     mpLogResume({ tag: 'clean', k: fromMeasure, readyState: chordAudioEl.readyState });
                 }
+                // ★ 第二十四轮：**过了 await 就作废旧请求**。
+                //   用户的原话："上一个和弦先触发，然后极快速地紧跟着正确的和弦出来"。
+                //   这正是"两次起播叠在一起"的样子：先前那次 doPlay(k-1)（或上一次关窗的 doPlay）
+                //   还卡在某个 await 里（等 seek / 等 metadata，可能几百毫秒），等它醒过来
+                //   照样把 currentTime 指到**它那一节**并 play 一下 —— 于是先响上一小节的和弦，
+                //   紧接着被新请求顶回正确的小节。每次 await 之后都对一次代数，过期的立刻放弃。
+                if (myToken !== mpPlayToken) return;
                 // ★ 第二十二轮：**等 seek 真的落地，再 play()**。
                 //   原来这里是"设完 currentTime 立刻 play()"，而慢路（重新渲染）从第二十一轮起
                 //   就会 await seeked —— 又是"两条路只修了一条"的老包袱。
@@ -3227,12 +3285,16 @@
                 //   "先响别处、再跳到按住的和弦"，而且每次都这样。
                 //   先停到目标位置、等 seeked，再 play()，第一声就落在目标上。
                 await mpSeekTo(chordAudioEl, seekTo, { skipSame: true });
+                if (myToken !== mpPlayToken) return;          // 又被别的起播顶掉了 → 别出声
+                await mpWaitCanPlay(chordAudioEl);   // ★ 等新位置解好数据再 play（见函数注释）
+                if (myToken !== mpPlayToken) return;
                 mpCleanLoading = false;      // 落点已就位 → 进度跟随恢复正常
                 if (els.renderInfo) {
                     els.renderInfo.style.display = 'block';
                     els.renderInfo.textContent = '播放中（' + (PLAY_MODES[mode] || '柱式') + '）…';
                 }
                 await chordAudioEl.play();
+                mpTraceStart(fromMeasure);       // ★ 记下头 300ms 的播放头（真机排查"先响别的"用）
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
                 mpEnsureSeek(fromMeasure);   // ★ 显示对齐（见函数注释；"没落地"的纠正归 mpGuardLanding）
@@ -3267,13 +3329,20 @@
             // ★ 换 src 之后先等 metadata 再 seek（Safari/iOS 上 HAVE_NOTHING 期间给
             //   currentTime 赋值会被静默忽略 → play() 从 0 播 = "从头开始"）。
             await mpWaitMeta(chordAudioEl);
+            // ★ 第二十四轮：慢路同样要"过了 await 就检查代数"（异步渲染动辄几百毫秒，
+            //   最容易和另一次起播叠在一起 —— 见快路里那段说明）。
+            if (myToken !== mpPlayToken) return;
             seeking = true;
             await mpSeekTo(chordAudioEl, seekTo);   // ★ 等 seeked 真的落地，再 play
+            if (myToken !== mpPlayToken) return;
+            await mpWaitCanPlay(chordAudioEl);      // ★ 再等新位置解好数据（见函数注释）
+            if (myToken !== mpPlayToken) return;
             if (els.renderInfo) {
                 els.renderInfo.textContent = '播放中（' + (PLAY_MODES[mode] || '柱式') + '）…';
             }
             try {
                 await chordAudioEl.play();
+                mpTraceStart(fromMeasure);       // ★ 记下头 300ms 的播放头（真机排查"先响别的"用）
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
                 mpEnsureSeek(fromMeasure);   // ★ 显示对齐（见函数注释；"没落地"的纠正归 mpGuardLanding）
@@ -4220,6 +4289,9 @@
         if (!data || !data.chords.length) return;
         const playing = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
         if (playing) {
+            // ★ 第二十四轮：暂停也要作废在途的起播 —— 否则那次 doPlay 醒过来还会 play 一下，
+            //   用户看到的就是"按了暂停，过一会儿又自己响了"。
+            mpPlayToken++;
             try { chordAudioEl.pause(); } catch (e) {}
             return;
         }
@@ -4420,6 +4492,9 @@
         cancelAutoNext();
         const wasPlaying = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
         if (chordAudioEl && wasPlaying) { try { chordAudioEl.pause(); } catch (e) {} }
+        // ★ 第二十四轮：开窗 = 停下来听 → 顺手作废在途的起播（否则它醒过来又把音乐响起来，
+        //   而窗还开着 —— 与我们前面"开窗后不许有声音"的约定相悖）。
+        mpPlayToken++;
         mpSyncPlayIcon();                                  // pause 事件会同步，这里兜底
         //   openedAt：关窗那一下的"开窗保护窗"要用（见 MP_AID_OPEN_GUARD_MS）
         mpAid = { measure: frozen.measure, midis: midis.slice(), sources: [], wasPlaying,
@@ -4514,6 +4589,24 @@
     //     —— 一样是"第一拍重放 + 上一小节尾巴"。现在必须"整整落后半小节以上"才动手，
     //     并且拿 mpPlayToken 作废掉"用户已经又点了一次"的旧自检。
     let mpResumeLog = [];
+    // 最近一次起播的头 300ms 里播放头走到了哪儿（真机排查"先响别的和弦"用）。
+    //   判读：`minT` 明显小于 `target` → 起播那一瞬间确实在目标**之前**（先放了旧位置的音频）；
+    //   一直 ≥ target → 位置没问题，问题在"声音层"（比如辅助窗那串音没停干净）。
+    let mpStartTrace = null;
+    function mpTraceStart(k) {
+        if (!chordAudioEl) return;
+        const target = mpSeekTarget(k);
+        const rec = { k, target, samples: [], minT: Infinity };
+        mpStartTrace = rec;
+        [30, 70, 120, 200, 300].forEach((ms) => {
+            setTimeout(() => {
+                if (!chordAudioEl || mpStartTrace !== rec) return;
+                const t = chordAudioEl.currentTime;
+                rec.samples.push({ ms, t });
+                if (Number.isFinite(t) && t < rec.minT) rec.minT = t;
+            }, ms);
+        });
+    }
     function mpLogResume(entry) {
         try {
             entry.ts = Date.now();
@@ -4533,7 +4626,10 @@
             const cur = mpMeasureOf(t);
             const target = mpSeekTarget(k);
             // 落后超过半小节才算"真的没落地"。只差一点点（刚起播的正常滞后）不碰它。
-            const need = Math.max(MP_SEEK_CHECK_S, measureDuration() * 0.5);
+            //   ★ 第二十四轮：700ms 那一拍改用**很紧**的判据（0.06s）。
+            //     700ms 后播放头早该老老实实在走了，这时若还在目标**之前**，就是真没落地
+            //     （只是错得不够半小节，旧判据会放过它 —— 比如整整早一拍只有 0.86s）。
+            const need = (label === '700ms') ? 0.06 : Math.max(MP_SEEK_CHECK_S, measureDuration() * 0.5);
             const behind = (target - t) > need;
             if (!behind) {
                 if (cur < k) mpLogResume({ tag, k, label, t, cur, fixed: false, behind: false });
@@ -4573,8 +4669,14 @@
             setTimeout(() => {
                 if (!chordAudioEl || !els || !els.renderInfo) return;
                 const now = mpMeasureOf(chordAudioEl.currentTime);
+                // ★ 第二十四轮：把"头 300ms 播放头最低走到了哪儿"一起印出来 ——
+                //   这是判断"先响的那个和弦从哪来"的唯一客观依据（低于目标 = 起播瞬间在目标之前）。
+                const tr = mpStartTrace;
+                const minT = (tr && Number.isFinite(tr.minT)) ? tr.minT.toFixed(2) : '—';
+                const tgt = (tr && Number.isFinite(tr.target)) ? tr.target.toFixed(2) : '—';
                 els.renderInfo.style.display = 'block';
-                els.renderInfo.textContent = '调试：按住 第' + (k + 1) + ' 节 · 起播后 第' + (now + 1) + ' 节';
+                els.renderInfo.textContent = '调试 v24：按住 第' + (k + 1) + ' 节 · 起播后 第' + (now + 1) +
+                    ' 节 · 首300ms 最低 t=' + minT + '（目标 ' + tgt + '）';
             }, 750);
         }
         // ★ 第二十轮：恢复点就是**最后一个和弦** → 这一次播完别再自动换段。
@@ -5083,6 +5185,10 @@
         // 第二十二轮：起播落点自检的记录（真机上排查"关窗后落在第几节"直接用）
         _getResumeLog: () => mpResumeLog.slice(),
         _clearResumeLog: () => { mpResumeLog = []; },
+        _getStartTrace: () => (mpStartTrace ? {
+            k: mpStartTrace.k, target: mpStartTrace.target, minT: mpStartTrace.minT,
+            samples: mpStartTrace.samples.slice()
+        } : null),
         _mpSeekTarget: (k) => mpSeekTarget(k),
         _getResumeLead: () => MP_RESUME_LEAD_S,
         _measureOf: (t) => mpMeasureOf(t),
