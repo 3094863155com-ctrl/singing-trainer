@@ -2211,6 +2211,17 @@
     //   表现为"关窗/重播时多出一串和声，一上来挺乱的"。超过这个窗口就不再补。
     const MP_AID_REPLAY_MS = 900;
 
+    // ---- 起播那一瞬的"残留 PCM"斜坡（第二十六轮）----
+    //   症状（用户，多轮未解）：关听辨窗恢复播放时，"上一个和弦先响一下，然后正确的才出来"。
+    //   第二十四轮已把渲染里跨小节线的尾巴切到小节线前即归零（小节线前 25ms 从满音量降到 15%），
+    //   但真机上 iOS 在 seek 之后、新位置 PCM 真正从 DAC 出去之前，会先吐出**几十～一百多毫秒**
+    //   旧位置的缓冲（= k-1 的尾巴）才"跳"到目标 —— 这是播放头 currentTime 已经就位、
+    //   但输出管线还滞后的表现，靠等 seeked / 等 canplay 都抓不到（它们认的是 readyState）。
+    //   唯一稳的办法：起播后把音量压到 0，等这段残留窗口过去再拉回 1。
+    //   代价：本和弦开头 ~200ms 是"轻起音"（fade-in），不再有钢琴那下重音头 —— 但总比
+    //   先响错的和弦强。想关掉：把这个数设 0（关窗恢复就会回到"可能有上一声"的状态）。
+    const MP_RESUME_MUTE_MS = 0.20;
+
     // ---- 「从第 k 小节起播」的落点余量（第二十一轮）----
     //   用户反馈：关辅助窗后听起来是"**按住那个和弦的前一个**"。
     //   原因不是记错小节号（脚本里真实手势路径验过：记的就是按住那一节），而是
@@ -2246,7 +2257,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 25;
+    const APP_VERSION = 26;
     (function mountVersionTag() {
         function place() {
             try {
@@ -3217,6 +3228,30 @@
         });
     }
 
+    // ★ 第二十六轮：起播那一瞬用极短音量斜坡把"旧位置的残留 PCM"盖掉（见 MP_RESUME_MUTE_MS）。
+    //   返回 Promise：在音量拉回 1 之后 resolve（起播已稳）。若 play() 被拒（自动播放策略），
+    //   仍尽力把音量复位，并把错误抛出给上层（上层会提示"再点一次"）。
+    function mpPlayMutedStart(el, durMs) {
+        return new Promise((res, rej) => {
+            if (!el) return rej(new Error('no-el'));
+            const restore = () => { try { el.volume = 1; } catch (e) {} };
+            try { el.volume = 0; } catch (e) {}
+            el.play().then(() => {
+                // 残留窗口过去后再把音量拉回 1：用 ~60ms 斜坡，避免"啪"的突变。
+                setTimeout(() => {
+                    const t0 = Date.now();
+                    const step = () => {
+                        const p = Math.min(1, (Date.now() - t0) / 60);
+                        try { el.volume = p; } catch (e) {}
+                        if (p < 1) requestAnimationFrame(step);
+                        else res();
+                    };
+                    step();
+                }, Math.max(0, durMs * 1000));
+            }).catch((err) => { restore(); rej(err); });
+        });
+    }
+
     // seek 之后的兜底：**只负责显示对齐**。
     //   setMeasureHighlight(k) 开头是 `if (m === highlightedMeasure) return;`，所以
     //   "高亮已经就是 k"或"按住期间音乐照常播、高亮已走到 k+2"这两种情况下它会直接 return，
@@ -3318,7 +3353,19 @@
                     els.renderInfo.style.display = 'block';
                     els.renderInfo.textContent = '播放中（' + (PLAY_MODES[mode] || '柱式') + '）…';
                 }
-                await chordAudioEl.play();
+                // ★ 第二十六轮：从"暂停态/开窗态"恢复（cleanSeek）时起播，iOS 会先吐旧位置缓冲，
+                //   用静音斜坡盖掉那一瞬间（见 mpPlayMutedStart / MP_RESUME_MUTE_MS）。
+                //   普通起播（cleanSeek 为假，比如从头播、切和弦）保留钢琴那下重音头，不静音。
+                try { chordAudioEl.volume = 1; } catch (e) {}
+                if (cleanSeek) {
+                    try {
+                        await mpPlayMutedStart(chordAudioEl, MP_RESUME_MUTE_MS);
+                    } catch (err) {
+                        try { await chordAudioEl.play(); } catch (e) {}
+                    }
+                } else {
+                    await chordAudioEl.play();
+                }
                 mpTraceStart(fromMeasure);       // ★ 记下头 300ms 的播放头（真机排查"先响别的"用）
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
@@ -3366,7 +3413,17 @@
                 els.renderInfo.textContent = '播放中（' + (PLAY_MODES[mode] || '柱式') + '）…';
             }
             try {
-                await chordAudioEl.play();
+                try { chordAudioEl.volume = 1; } catch (e) {}
+                // ★ 第二十六轮：慢路同样，从暂停态恢复（cleanSeek）时起播用静音斜坡盖掉残留。
+                if (cleanSeek) {
+                    try {
+                        await mpPlayMutedStart(chordAudioEl, MP_RESUME_MUTE_MS);
+                    } catch (err) {
+                        try { await chordAudioEl.play(); } catch (e) {}
+                    }
+                } else {
+                    await chordAudioEl.play();
+                }
                 mpTraceStart(fromMeasure);       // ★ 记下头 300ms 的播放头（真机排查"先响别的"用）
                 setMeasureHighlight(fromMeasure);
                 setCoverMeasure(fromMeasure);   // 跳小节后封面立刻跟上，不等下一帧
@@ -5205,7 +5262,9 @@
             pauseJumpTo: mpPauseJumpTo,
             errorOpen: !!(els && els.mpError && !els.mpError.hidden),
             aidOpen: !!(els && els.mpAid && !els.mpAid.hidden),
-            reportCount: mpReports.length
+            reportCount: mpReports.length,
+            // 第二十六轮：起播静音斜坡的当前音量（0 = 正处于"盖残留"窗口；1 = 已恢复）
+            volume: chordAudioEl ? chordAudioEl.volume : null
         }),
         // 第二十二轮：起播落点自检的记录（真机上排查"关窗后落在第几节"直接用）
         _getResumeLog: () => mpResumeLog.slice(),
