@@ -2242,6 +2242,31 @@
         try { return /[?&]dbg=1\b/.test(String(location.search || '')); } catch (e) { return false; }
     })();
 
+    // ★ 第二十五轮：常驻版本角标。
+    //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
+    //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
+    //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
+    const APP_VERSION = 25;
+    (function mountVersionTag() {
+        function place() {
+            try {
+                let tag = document.getElementById('appVersionTag');
+                if (!tag) {
+                    tag = document.createElement('div');
+                    tag.id = 'appVersionTag';
+                    tag.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:99999;'
+                        + 'font:11px/1.4 -apple-system,BlinkMacSystemFont,sans-serif;'
+                        + 'color:#9aa0a6;background:rgba(0,0,0,.32);padding:2px 6px;'
+                        + 'border-radius:7px;pointer-events:none;opacity:.85;letter-spacing:.3px;';
+                    (document.body || document.documentElement).appendChild(tag);
+                }
+                tag.textContent = 'v' + APP_VERSION;
+            } catch (e) {}
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', place);
+        else place();
+    })();
+
     // ---- 进度轮询（高亮 + 锁屏封面跟随）----
     let progressRaf = 0;          // requestAnimationFrame 句柄
     let lastPosPush = 0;          // 上次推锁屏进度的时刻（setPositionState 限流用）
@@ -4675,7 +4700,7 @@
                 const minT = (tr && Number.isFinite(tr.minT)) ? tr.minT.toFixed(2) : '—';
                 const tgt = (tr && Number.isFinite(tr.target)) ? tr.target.toFixed(2) : '—';
                 els.renderInfo.style.display = 'block';
-                els.renderInfo.textContent = '调试 v24：按住 第' + (k + 1) + ' 节 · 起播后 第' + (now + 1) +
+                els.renderInfo.textContent = '调试 v' + APP_VERSION + '：按住 第' + (k + 1) + ' 节 · 起播后 第' + (now + 1) +
                     ' 节 · 首300ms 最低 t=' + minT + '（目标 ' + tgt + '）';
             }, 750);
         }
