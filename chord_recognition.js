@@ -2220,7 +2220,9 @@
     //   唯一稳的办法：起播后把音量压到 0，等这段残留窗口过去再拉回 1。
     //   代价：本和弦开头 ~200ms 是"轻起音"（fade-in），不再有钢琴那下重音头 —— 但总比
     //   先响错的和弦强。想关掉：把这个数设 0（关窗恢复就会回到"可能有上一声"的状态）。
-    const MP_RESUME_MUTE_MS = 0.20;
+    //   ★ 第二十七轮：根因已定位（合成 click 穿透触发 playInstantChord），静音斜坡压的是
+    //     错对象（chordAudioEl），且让恢复播放开头变软 200ms。设 0 关掉它；想恢复就改回 0.20。
+    const MP_RESUME_MUTE_MS = 0;
 
     // ---- 「从第 k 小节起播」的落点余量（第二十一轮）----
     //   用户反馈：关辅助窗后听起来是"**按住那个和弦的前一个**"。
@@ -2257,7 +2259,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 26;
+    const APP_VERSION = 27;
     (function mountVersionTag() {
         function place() {
             try {
@@ -3234,6 +3236,9 @@
     function mpPlayMutedStart(el, durMs) {
         return new Promise((res, rej) => {
             if (!el) return rej(new Error('no-el'));
+            // ★ 第二十七轮：根因已修（合成 click 穿透），静音斜坡不再需要。
+            //   durMs <= 0 时直接 play、不压音量 —— 恢复钢琴重音头。
+            if (durMs <= 0) { el.play().then(res, rej); return; }
             const restore = () => { try { el.volume = 1; } catch (e) {} };
             try { el.volume = 0; } catch (e) {}
             el.play().then(() => {
@@ -3728,6 +3733,7 @@
                 if (Math.abs(e.clientY - d.y) > MP_AID_TAP_PX) return;
                 if (Date.now() - d.t > MP_AID_TAP_MS) return;                     // 长按，不是点
                 if (mpAid && Date.now() - (mpAid.openedAt || 0) < MP_AID_OPEN_GUARD_MS) return;
+                e.stopPropagation();          // ★ 第二十七轮：不让 pointerup 冒泡（双保险，主修复在 mpCloseAid 里吃合成 click）
                 mpCloseAid();
             }, { capture: true });
             // 手势被系统打断（来电、返回手势…）→ 忘掉这次按下，别让下次抬起误判成"点"
@@ -4798,6 +4804,17 @@
             //   按住期间音乐前进到的位置），否则"看着在第 k+2、一按播放从第 k 响"。
             mpShowMeasureOnly(at);
         }
+
+        // ★ 第二十七轮：吃掉关窗后浏览器合成的 click。
+        //   关窗用 pointerup 判定，但处理器没拦合成 click → 遮罩已 display:none →
+        //   click hit-test 穿透到下方 .mp-sheet 内的按钮（上一个/下一个）→ mpJump →
+        //   playInstantChord(k-1) 立刻出声（实时 Web Audio，不受 chordAudioEl.volume 控制）。
+        //   这是"关窗后先响上一个和弦 / 变成下一首"的真凶 —— 前 26 轮全在音频层修，
+        //   没人看事件层的合成 click 穿透。
+        //   修法：capture 阶段吃掉关窗后的第一个 click（once 自动移除，400ms 兜底防泄漏）。
+        const eatClick = (e) => { e.stopPropagation(); e.preventDefault(); };
+        document.addEventListener('click', eatClick, { capture: true, once: true });
+        setTimeout(() => document.removeEventListener('click', eatClick, { capture: true }), 400);
     }
 
     function mpReplayAid(style) {
