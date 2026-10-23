@@ -1208,6 +1208,56 @@
         return list;
     }
 
+    // ------------------------------------------------------------
+    // 谱面上的标记绘制
+    //   自然和弦：一行罗马数字，位置与字号与改造前**完全一致**（长度 ×8 估宽）。
+    //   离调和弦：三段 ——「阿拉伯（副调级数 + 转位数字）」大字 +「/」+「罗马（目标级数）」
+    //   小一号且下沉到基线。视觉上左大右小、右段更低，读作"某某 之 Ⅴ"。
+    //
+    // ★ 四个旋钮都在这里。调"看起来太小/太挤/浮得太高"只改这几个数，别去改绘制流程：
+    //     AP_NUM_FONT    阿拉伯数字字号（自然标记是 14）
+    //     AP_TARGET_FONT 目标罗马字号（比数字小一号才像"分母"）
+    //     AP_TARGET_SINK 目标罗马的下沉量（px，正数=往下）
+    //     AP_SLASH_GAP   斜杠前后一共留出的空隙（太小会像 5/Ⅳ 粘在一起）
+    // ------------------------------------------------------------
+    const AP_NUM_FONT = 15;
+    const AP_TARGET_FONT = 12;
+    const AP_TARGET_SINK = 2.5;
+    const AP_SLASH_GAP = 6.4;
+    // 估宽用的字宽系数（Arial 数字 ≈ 0.55em；罗马数字字符落在衬线字体上 ≈ 0.95em）
+    const AP_NUM_W = 8.3, AP_FIG_W = 5.4, AP_ROMAN_W = 10.6;
+
+    function measureRomanWidth(chord) {
+        if (!chord.applied) return chord.roman.length * 8;
+        const f = figuresOf(chord.seventh, chord.inversion);
+        const nums = f.text.length;                        // 上标/下标字符各算一个
+        const wNum = String(chord.applied.localDegree).length * AP_NUM_W + nums * AP_FIG_W;
+        const wTarget = (ROMAN_MAJOR[chord.applied.targetDegree - 1] || '').length * AP_ROMAN_W;
+        return wNum + AP_SLASH_GAP + wTarget;
+    }
+
+    function drawRomanLabel(ctx, chord, centerX, labelY) {
+        if (!chord.applied) {
+            const estW = chord.roman.length * 8;
+            ctx.fillText(chord.roman, centerX - estW / 2, labelY);
+            return;
+        }
+        const fig = figuresOf(chord.seventh, chord.inversion).text;
+        const w = measureRomanWidth(chord);
+        let x = centerX - w / 2;
+        ctx.setFont('Arial', AP_NUM_FONT, '');
+        ctx.fillText(String(chord.applied.localDegree) + fig, x, labelY);
+        x += String(chord.applied.localDegree).length * AP_NUM_W + fig.length * AP_FIG_W;
+        // 斜杠画在两段正中间，前后各留一半空隙
+        ctx.setFont('Arial', AP_TARGET_FONT, '');
+        ctx.fillText('/', x + AP_SLASH_GAP * 0.25, labelY);
+        x += AP_SLASH_GAP;
+        // 目标罗马：小一号 + 略微下沉，读作"某某 的 Ⅴ"
+        ctx.setFont('Arial', AP_TARGET_FONT, '');
+        ctx.fillText(ROMAN_MAJOR[chord.applied.targetDegree - 1] || '', x, labelY + AP_TARGET_SINK);
+        ctx.setFont('Arial', 14, '');
+    }
+
     // 生成一段和弦连接：Ⅰ 开头、Ⅰ 结尾；中间从勾选的级数里随机
     function generateChordProgression(settings) {
         const key = pickRandomMajorKey();
@@ -1308,7 +1358,13 @@
                 : v.midis.map((m) => midiToSpelled(m, scale));
 
             const chord = {
-                degree,
+                // ★ 离调小节的 degree 取**目标级**（= 它离调去的那个调的主和弦）。
+                //   理由：答题界面只有 Ⅰ—Ⅶ（离调不扩展答题维度），报错统计、卡片配色、
+                //   出题加权都需要一个"这一小节属于哪个级"的答案。副属和弦的槽位级数
+                //   （生成时随机抽到的那个 degree）与实际听感毫无关系，留着它等于随机记账。
+                //   目标级是唯一说得通的归属：5⁷/ⅱ 在功能上就是"冲着 ⅱ 去的"。
+                //   真实标记（5⁷/ⅱ）另存在 roman / applied 里，报错浮窗照原样显示。
+                degree: ap ? ap.targetDegree : degree,
                 seventh,
                 inversion: v.inv,
                 midis: v.midis,
@@ -1521,15 +1577,17 @@
             // 这个 VexFlow 构建里横向位置要 draw() 之后才确定，也是必须量两遍的原因
             let naturalAbs = NaN;
             try { naturalAbs = note.getAbsoluteX(); } catch (e) { /* ignore */ }
-            const measured = { naturalAbs: naturalAbs, centerX: centerX, glyphW: glyphW };
+            const labelY = stave.getYForLine(4) + 46;
+            const measured = {
+                naturalAbs: naturalAbs, centerX: centerX, glyphW: glyphW,
+                labelY: labelY, lineNo: Math.floor(m / measuresPerLine)
+            };
 
             // 罗马数字级数标注（谱表下方，居中于本小节的和弦）
             ctx.save();
             ctx.setFont('Arial', 14, '');
             ctx.setFillStyle('#555');
-            const labelY = stave.getYForLine(4) + 46;
-            const estW = chord.roman.length * 8;
-            ctx.fillText(chord.roman, centerX - estW / 2, labelY);
+            drawRomanLabel(ctx, chord, centerX, labelY);
             ctx.restore();
 
             return measured;
@@ -1640,18 +1698,19 @@
             // 罗马数字级数标注：放在低音谱表下方（两谱表中间的位置会被音符占满）
             // 34 = 低音谱表底线往下 34 个单位；最低音 F2 的加线在 +5，不会撞上。
             // 想让级数离谱表更远/更近，就改这个 34。
+            const labelY = bass.getYForLine(4) + 34;
             ctx.save();
             ctx.setFont('Arial', 14, '');
             ctx.setFillStyle('#555');
-            const labelY = bass.getYForLine(4) + 34;
-            const estW = chord.roman.length * 8;
-            ctx.fillText(chord.roman, centerX - estW / 2, labelY);
+            drawRomanLabel(ctx, chord, centerX, labelY);
             ctx.restore();
 
             return {
                 naturalAbs: naturalAbs,
                 centerX: centerX,
-                glyphW: glyphW
+                glyphW: glyphW,
+                labelY: labelY,
+                lineNo: Math.floor(m / measuresPerLine)
             };
         }
 
@@ -1673,6 +1732,87 @@
             return measured;
         }
 
+        // ---- 离调括号 ----
+        //   教材写法：同一组离调的和弦下面画一条**开口向上的方括号**，右端再挑一支箭头
+        //   指向"解决到达"的那一小节。让眼睛看出"这一串是一个整体，然后落到那里"。
+        //   ★ 用裸 SVG path 而不是 VexFlow 的画笔：坐标系与 viewBox 同一套（几何量是逻辑单位），
+        //     而且能直接设 pointer-events:none，绝不抢小节热区的点击。
+        //   ★ 一组常常跨行（每行 4 小节），跨行必须**断开**成多段 —— 否则会连成一条斜线。
+        function drawAppliedBrackets(svgEl, measured) {
+            if (!svgEl) return [];
+            const groups = new Map();
+            for (let m = 0; m < totalMeasures; m++) {
+                const ap = chords[m].applied;
+                if (!ap) continue;
+                if (!groups.has(ap.groupId)) groups.set(ap.groupId, []);
+                groups.get(ap.groupId).push(m);
+            }
+            const out = [];
+            const NS = 'http://www.w3.org/2000/svg';
+            for (const [gid, idxs] of groups) {
+                const r = idxs[idxs.length - 1] + 1;         // 解决到达的小节
+                // 按行切段
+                const byLine = new Map();
+                for (const m of idxs) {
+                    const ln = measured[m].lineNo;
+                    if (!byLine.has(ln)) byLine.set(ln, []);
+                    byLine.get(ln).push(m);
+                }
+                const lines = Array.from(byLine.keys()).sort((a, b) => a - b);
+                const segs = [];
+                for (const ln of lines) {
+                    const ms = byLine.get(ln);
+                    // 深度：标记行再往下 11/13 —— 落在罗马数字与高亮带底边之间
+                    const y = measured[ms[0]].labelY + (fourPart ? 11 : 13);
+                    // 左右端点贴着**这一组首尾两个标记的宽度**外扩 4 —— 括号看起来是"罩住这串标记"，
+                    //   不是随便截一段（固定 ±8 时，5⁷/Ⅳ 这种宽标记会被括号尾巴穿过去）。
+                    const w0 = measureRomanWidth(chords[ms[0]]);
+                    const w1 = measureRomanWidth(chords[ms[ms.length - 1]]);
+                    segs.push({
+                        line: ln, y: y,
+                        x0: measured[ms[0]].centerX - w0 / 2 - 4,
+                        x1: measured[ms[ms.length - 1]].centerX + w1 / 2 + 4
+                    });
+                }
+                let d = '';
+                const followArrow = (r < totalMeasures) && measured[r]
+                    && measured[r].lineNo === segs[segs.length - 1].line;
+                segs.forEach((s, si) => {
+                    // 开口向上的方括号：左端必挑起来；**最后一段**若还接着箭头，右端就不挑
+                    //   （挑起来会和箭头抢同一个起点，看起来像多了一条竖线）。
+                    d += 'M' + s.x0.toFixed(1) + ' ' + (s.y - AP_BRACKET_ARM).toFixed(1)
+                        + 'V' + s.y.toFixed(1) + 'H' + s.x1.toFixed(1);
+                    const isLastSeg = (si === segs.length - 1);
+                    if (!isLastSeg || !followArrow) {
+                        d += 'V' + (s.y - AP_BRACKET_ARM).toFixed(1);
+                    }
+                });
+                // 箭头：解决小节与最后一段在同一行才画（换行时画不出有意义的箭头）
+                const last = segs[segs.length - 1];
+                const rLine = (r < totalMeasures) ? measured[r].lineNo : -1;
+                if (r < totalMeasures && rLine === last.line) {
+                    const xt = measured[r].centerX;
+                    const tipY = last.y - AP_BRACKET_ARM;      // 箭头尖与括号两端的挑高齐平
+                    d += 'M' + last.x1.toFixed(1) + ' ' + last.y.toFixed(1) + 'H' + xt.toFixed(1)
+                        + 'V' + (tipY + 4).toFixed(1);
+                    d += 'M' + (xt - 3).toFixed(1) + ' ' + (tipY + 4).toFixed(1)
+                        + 'L' + xt.toFixed(1) + ' ' + tipY.toFixed(1)
+                        + 'L' + (xt + 3).toFixed(1) + ' ' + (tipY + 4).toFixed(1);
+                }
+                const p = document.createElementNS(NS, 'path');
+                p.setAttribute('d', d);
+                p.setAttribute('fill', 'none');
+                p.setAttribute('stroke', APPLIED_BRACKET_COLOR);
+                p.setAttribute('stroke-width', APPLIED_BRACKET_W);
+                p.setAttribute('stroke-linecap', 'round');
+                p.setAttribute('stroke-linejoin', 'round');
+                p.setAttribute('pointer-events', 'none');
+                svgEl.appendChild(p);
+                out.push({ groupId: gid, measures: idxs.slice(), resolve: r, segments: segs.length });
+            }
+            return out;
+        }
+
         try {
             // pass 1：量出每小节全音符的自然落点
             const measured = drawSheet(null);
@@ -1682,7 +1822,7 @@
                 return r.centerX - (r.naturalAbs + r.glyphW / 2);
             });
             container.innerHTML = '';
-            drawSheet(shifts);
+            const measured2 = drawSheet(shifts);
 
             // ---- 每小节挂一个"命中 + 高亮"矩形 ----
             //   必须在 drawSheet 之后追加（上面的 innerHTML='' 会清空第一遍的 SVG）。
@@ -1691,6 +1831,8 @@
             sheetGeom = geom;
             measureRects = [];
             const hitSvg = container.querySelector('svg');
+            // 离调括号先画（在热区矩形之下），热区仍盖在最上层接点击
+            appliedBrackets = drawAppliedBrackets(hitSvg, measured2);
             if (hitSvg) {
                 // 带高 = 整整一行（= lineHeight）：上一行带底 = 下一行带顶，相邻行严丝合缝，
                 // 与每小节外面的黑色细框底边对齐；判定区就是这个 rect 本身，自动同步。
@@ -2167,6 +2309,15 @@
         if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
             settings.bassEmphasis = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
         }
+        // ---- 离调和弦（三个键都要登记，否则被静默丢弃 → 刷新后设置"自己变回去了"）----
+        if (typeof s.appliedEnabled === 'boolean') settings.appliedEnabled = s.appliedEnabled;
+        if (s.appliedTargetMode === 'simple' || s.appliedTargetMode === 'complex') {
+            settings.appliedTargetMode = s.appliedTargetMode;
+        }
+        if (s.appliedReturnMode === 'simple' || s.appliedReturnMode === 'medium'
+            || s.appliedReturnMode === 'complex') {
+            settings.appliedReturnMode = s.appliedReturnMode;
+        }
         // 连奏已固定 1.0（用户 2026-10-06 拍板，滑块已删）：localStorage 里的旧值一律忽略
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
@@ -2495,6 +2646,7 @@
     //   （audioEl.currentTime），不需要重新渲染。
     let sheetGeom = [];           // 每小节的几何（由 renderChordSheet 落盘）
     let measureRects = [];        // 每小节的命中/高亮 <rect>
+    let appliedBrackets = [];     // 离调括号（每次重绘重建；供调试 / 验收）
     let highlightedMeasure = -1;  // 当前高亮的小节索引（-1 = 无）
 
     // 每小节热区 rect 上"两件互不相干的事"，别再混（用户 2026-10-06 纠正过一次）：
@@ -2508,6 +2660,12 @@
     const HL_OP = '0.08';         // 填充深浅 ← 只改这一个数就能整体调浓淡
     const HL_STROKE = '#c9ccd4';  // 包裹框描边：冷浅灰 ← 只改这一个数就能调框的深浅
     const HL_SW = '1';            // 包裹框线宽（想更清楚可 1.2）
+    // 离调括号：比包裹框略深一点（它是"乐谱分析记号"，不该淡到看不见），
+    //   但仍明显浅于音符 / 罗马数字，不抢主角。
+    //   线宽/上挑高度也在这里 —— 觉得"像条下划线"就把 AP_BRACKET_ARM 调大、颜色调深。
+    const APPLIED_BRACKET_COLOR = '#7f8798';
+    const APPLIED_BRACKET_W = '1.4';
+    const AP_BRACKET_ARM = 9;     // 两端往上挑的高度（px）；4 以下基本就只剩一条横线
     let lastPlayMode = 'block';   // 记住上次按的播放键（点小节时沿用它）
     let blobData = null;          // 已渲染音频对应的 data（判断能否直接 seek）
     let blobMode = null;          // 已渲染音频对应的播放方式（柱式/分解/单音）
@@ -2636,7 +2794,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 27;
+    const APP_VERSION = 28;
     (function mountVersionTag() {
         function place() {
             try {
@@ -2683,6 +2841,14 @@
             inversion: document.getElementById('chord-inversion'),
             secondInv: document.getElementById('chord-second-inv'),
             adaptive: document.getElementById('chord-adaptive'),
+            // ---- 离调和弦页 ----
+            kindSeg: document.getElementById('chord-kind-seg'),
+            appliedPage: document.getElementById('chord-page-applied'),
+            naturalPage: document.getElementById('chord-page-natural'),
+            appliedEnable: document.getElementById('chord-applied-enable'),
+            appliedTargetSeg: document.getElementById('chord-applied-target-seg'),
+            appliedReturnSeg: document.getElementById('chord-applied-return-seg'),
+            appliedPreview: document.getElementById('chord-applied-preview'),
             info: document.getElementById('chord-info'),
             renderInfo: document.getElementById('chord-render-info'),
             hint: document.getElementById('chord-key-hint'),
@@ -3078,6 +3244,61 @@
     //   遮住之后光看底色就能猜出"这不是 Ⅶ 就是没级数"，等于没遮干净。这里是去色相的中性灰。
     const COVER_NEUTRAL = { top: '#f4f4f5', bottom: '#e2e4e9', ink: '#3f4854' };
 
+    // ---- 离调卡片的配色：**同色系压暗**（用户拍板）----
+    //   语义 = "同一个目标级数，暗了一层"。既能一眼看出是离调，又不会和七个级数的颜色打架。
+    //   ★ 派生自 ART_PALETTE，不硬编码 —— 以后改色板，离调色自动跟着走。
+    function hexToHsl(hex) {
+        const m = /^#?([0-9a-f]{6})$/i.exec(String(hex).trim());
+        if (!m) return { h: 0, s: 0, l: 0.5 };
+        const n = parseInt(m[1], 16);
+        const r = ((n >> 16) & 255) / 255;
+        const gg = ((n >> 8) & 255) / 255;
+        const b = (n & 255) / 255;
+        const mx = Math.max(r, gg, b);
+        const mn = Math.min(r, gg, b);
+        const l = (mx + mn) / 2;
+        const d = mx - mn;
+        if (d === 0) return { h: 0, s: 0, l };
+        const s = d / (1 - Math.abs(2 * l - 1));
+        let h;
+        if (mx === r) h = ((gg - b) / d) % 6;
+        else if (mx === gg) h = (b - r) / d + 2;
+        else h = (r - gg) / d + 4;
+        return { h: (h * 60 + 360) % 360, s: s, l: l };
+    }
+
+    function hslToHex(h, s, l) {
+        const c = (1 - Math.abs(2 * l - 1)) * s;
+        const hp = ((h % 360) + 360) % 360 / 60;
+        const x = c * (1 - Math.abs((hp % 2) - 1));
+        let r = 0, gg = 0, b = 0;
+        if (hp < 1) { r = c; gg = x; }
+        else if (hp < 2) { r = x; gg = c; }
+        else if (hp < 3) { gg = c; b = x; }
+        else if (hp < 4) { gg = x; b = c; }
+        else if (hp < 5) { r = x; b = c; }
+        else { r = c; b = x; }
+        const m = l - c / 2;
+        const to = (v) => {
+            const q = Math.round(Math.max(0, Math.min(1, v + m)) * 255);
+            return (q < 16 ? '0' : '') + q.toString(16);
+        };
+        return '#' + to(r) + to(gg) + to(b);
+    }
+
+    // dl = 明度增量（-1..1），ds = 饱和度增量（-1..1）
+    function darkenHex(hex, dl, ds) {
+        const { h, s, l } = hexToHsl(hex);
+        return hslToHex(h, Math.max(0, Math.min(1, s + ds)), Math.max(0, Math.min(1, l + dl)));
+    }
+
+    const ART_PALETTE_APPLIED = ART_PALETTE.map((p) => ({
+        top: darkenHex(p.top, -0.10, -0.08),
+        bottom: darkenHex(p.bottom, -0.13, -0.08),
+        ink: darkenHex(p.ink, 0.06, -0.06),
+        sub: darkenHex(p.sub, 0.02, -0.06)
+    }));
+
     let artCache = [];     // 小节索引 -> MediaMetadata.artwork 数组
     let artUrls = [];      // 已生成的全部 blob URL（换一段时统一回收）
     let artImages = [];    // 已"读进内存并解码"的图。钉住引用，保证系统取图时命中暖缓存
@@ -3155,7 +3376,10 @@
     //   ★ 锁屏封面走 coverBlobUrl → drawCover(不带 opts)，所以恒为罗马数字那档。
     function drawCover(g, size, info, compact, opts) {
         const bassOnly = !!(opts && opts.bassOnly);
-        const pal = bassOnly ? COVER_NEUTRAL : ART_PALETTE[(info.degree - 1) % ART_PALETTE.length];
+        const isApplied = !bassOnly && !!(info && info.applied);
+        const pal = bassOnly
+            ? COVER_NEUTRAL
+            : (isApplied ? ART_PALETTE_APPLIED : ART_PALETTE)[(info.degree - 1) % ART_PALETTE.length];
         const grad = g.createLinearGradient(0, 0, 0, size);
         grad.addColorStop(0, pal.top);
         grad.addColorStop(1, pal.bottom);
@@ -3188,23 +3412,48 @@
         }
 
         // 中央罗马数字：基号大字，转位数字排在基号右侧的右上 / 右下角
-        const parts = compact ? { base: info.base, sup: '', sub: '' } : info.parts;
+        //   离调档：基号换成阿拉伯数字（= 副调里的级数），右边跟一个「/」+ 小一号的目标罗马，
+        //   目标下沉到基线 → 读起来就是"5⁷ 之 Ⅴ"。
         const figRatio = 0.42;                 // 转位数字相对基号的字号比
+        const tgtRatio = 0.60;                 // 目标罗马相对基号的字号比
+        const slashW = () => fsRef * 0.26;
+        let fsRef = size * (compact ? 0.68 : 0.5);   // widthAt 里要引用，先给个初值
+        const parts = compact
+            ? {
+                base: info.base, sup: '', sub: '',
+                target: isApplied ? info.applied.targetRoman : ''
+            }
+            : {
+                base: info.parts.base, sup: info.parts.sup, sub: info.parts.sub,
+                target: isApplied ? info.parts.target : ''
+            };
+        const figW = (px) => {
+            if (!parts.sup && !parts.sub) return 0;
+            g.font = '700 ' + (px * figRatio) + 'px ' + ART_SERIF;
+            return Math.max(
+                parts.sup ? g.measureText(parts.sup).width : 0,
+                parts.sub ? g.measureText(parts.sub).width : 0
+            );
+        };
         const widthAt = (px) => {
             g.font = '700 ' + px + 'px ' + ART_SERIF;
-            let w = g.measureText(parts.base).width;
-            if (parts.sup || parts.sub) {
-                g.font = '700 ' + (px * figRatio) + 'px ' + ART_SERIF;
-                w += Math.max(
-                    parts.sup ? g.measureText(parts.sup).width : 0,
-                    parts.sub ? g.measureText(parts.sub).width : 0
-                );
+            let w = g.measureText(parts.base).width + figW(px);
+            if (parts.target) {
+                g.font = '700 ' + (px * tgtRatio) + 'px ' + ART_SERIF;
+                w += px * 0.26 + g.measureText(parts.target).width;
             }
             return w;
         };
         const maxW = size * 0.86;
-        let fs = size * (compact ? 0.68 : 0.5);
+        let fs = size * (compact ? 0.60 : 0.5);
+        // 96px 的缩略图：先试着把 target 一起塞进去，实在太小就只留基号（否则就是一撮糊）
         while (fs > size * 0.16 && widthAt(fs) > maxW) fs -= size * 0.02;
+        if (compact && parts.target && fs < size * 0.30) {
+            parts.target = '';
+            fs = size * 0.68;
+            while (fs > size * 0.16 && widthAt(fs) > maxW) fs -= size * 0.02;
+        }
+        fsRef = fs;
 
         const cy = compact ? size * 0.5 : size * 0.435;
         const x0 = (size - widthAt(fs)) / 2;
@@ -3213,11 +3462,24 @@
         g.fillStyle = pal.ink;
         g.font = '700 ' + fs + 'px ' + ART_SERIF;
         g.fillText(parts.base, x0, cy);
+        let cursor = x0 + g.measureText(parts.base).width;
         if (parts.sup || parts.sub) {
-            const wb = g.measureText(parts.base).width;
+            const wf = figW(fs);
             g.font = '700 ' + (fs * figRatio) + 'px ' + ART_SERIF;
-            if (parts.sup) g.fillText(parts.sup, x0 + wb, cy - fs * 0.30);
-            if (parts.sub) g.fillText(parts.sub, x0 + wb, cy + fs * 0.28);
+            if (parts.sup) g.fillText(parts.sup, cursor, cy - fs * 0.30);
+            if (parts.sub) g.fillText(parts.sub, cursor, cy + fs * 0.28);
+            cursor += wf;
+        }
+        if (parts.target) {
+            // 斜杠居中偏上一点，别被基号的下伸部分顶开
+            g.font = '700 ' + (fs * tgtRatio) + 'px ' + ART_SERIF;
+            g.fillText('/', cursor + fs * 0.04, cy - fs * 0.02);
+            cursor += fs * 0.26;
+            // 目标罗马：切到 alphabetic 基线画，再恢复 middle（下沉看起来才是"分母"）
+            const prevBaseline = g.textBaseline;
+            g.textBaseline = 'alphabetic';
+            g.fillText(parts.target, cursor, cy + fs * 0.36);
+            g.textBaseline = prevBaseline;
         }
 
         if (compact) return;
@@ -3307,10 +3569,11 @@
     function buildCoverInfo(m) {
         if (!data || m < 0 || m >= data.chords.length) return null;
         const c = data.chords[m];
-        const parts = romanParts(c.degree, c.seventh, c.inversion);
+        const parts = romanParts(c.degree, c.seventh, c.inversion, c.applied);
         // 「按住卡片只显示低音级数」那一档要用：这个和弦**低音**在调内的简谱数字。
         //   低音 = midis[0]（转位时就是那个转位音）。和弦音全来自调内音级 → 一定能在
         //   data.scale 里查到；真查不到（理论上不会）退回音名兜底，别把 'undefined' 画上屏。
+        //   ★ 离调和弦的低音可能是调外音（如 5⁷/Ⅴ 的 F♯），查不到就显示音名 —— 正是期望行为。
         const bassPc = ((c.midis && c.midis.length ? c.midis[0] : 0) % 12 + 12) % 12;
         const bassScale = (data.scale || []).find((s) => s.pc === bassPc);
         const bassNote = (c.notes && c.notes.length) ? c.notes[0] : null;
@@ -3319,6 +3582,15 @@
             roman: c.roman,
             base: parts.base,
             parts: parts,
+            // 离调：卡片走"目标级数同色系压暗"的色板 + 阿拉伯/罗马两段标记
+            applied: c.applied
+                ? {
+                    localDegree: c.applied.localDegree,
+                    targetDegree: c.applied.targetDegree,
+                    targetRoman: ROMAN_MAJOR[c.applied.targetDegree - 1] || '',
+                    groupId: c.applied.groupId
+                }
+                : null,
             tones: c.notes.map((n) => pitchName(n.letter, n.acc)).join('  '),
             footer: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
             pos: (m + 1) + ' / ' + data.chords.length,
@@ -3415,7 +3687,82 @@
         if (!els) return;
         if (els.autoContinue) els.autoContinue.setAttribute('aria-checked', settings.autoContinue ? 'true' : 'false');
         if (els.portable) els.portable.setAttribute('aria-checked', settings.portable ? 'true' : 'false');
+        if (els.appliedEnable) els.appliedEnable.setAttribute('aria-checked', settings.appliedEnabled ? 'true' : 'false');
     }
+
+    // ---- 离调设置页：滑块位置 / 页面切换 / 预览行 ----
+    //   三个滑块都用同一套"按选中项 offsetLeft/Width 摆 thumb"的写法（量两遍，
+    //   因为首次调用时这一页可能刚被 display 切出来，几何还没稳）。
+    function placeSegThumb(segEl, active) {
+        if (!segEl || !active) return;
+        const thumb = segEl.querySelector('.seg__thumb');
+        if (!thumb) return;
+        const place = () => {
+            thumb.style.left = active.offsetLeft + 'px';
+            thumb.style.width = active.offsetWidth + 'px';
+        };
+        place();
+        requestAnimationFrame(place);
+    }
+
+    function markSeg(segEl, isOn) {
+        const opts = segEl.querySelectorAll('.seg__opt');
+        let active = null;
+        for (let i = 0; i < opts.length; i++) {
+            const on = isOn(opts[i]);
+            opts[i].classList.toggle('active', on);
+            opts[i].setAttribute('aria-checked', on ? 'true' : 'false');
+            if (on) active = opts[i];
+        }
+        placeSegThumb(segEl, active);
+    }
+
+    // 设置页当前停在哪一页（只在内存里，不落盘 —— 它不是"设置"，别污染 localStorage）
+    let chordSettingsPage = 'natural';
+
+    function applySettingsPage() {
+        if (!els) return;
+        if (els.naturalPage) els.naturalPage.style.display = (chordSettingsPage === 'natural') ? 'contents' : 'none';
+        if (els.appliedPage) els.appliedPage.style.display = (chordSettingsPage === 'applied') ? 'block' : 'none';
+        // 从 display:none 里切出来时几何要重算一遍
+        updateKindSeg();
+        if (chordSettingsPage === 'applied') {
+            updateAppliedTargetSeg();
+            updateAppliedReturnSeg();
+        }
+    }
+
+    function updateKindSeg() {
+        if (!els || !els.kindSeg) return;
+        markSeg(els.kindSeg, (b) => b.dataset.kind === chordSettingsPage);
+    }
+
+    function updateAppliedTargetSeg() {
+        if (!els || !els.appliedTargetSeg) return;
+        const cur = (settings.appliedTargetMode === 'complex') ? 'complex' : 'simple';
+        markSeg(els.appliedTargetSeg, (b) => b.dataset.target === cur);
+    }
+
+    function updateAppliedReturnSeg() {
+        if (!els || !els.appliedReturnSeg) return;
+        const cur = ['simple', 'medium', 'complex'].indexOf(settings.appliedReturnMode) >= 0
+            ? settings.appliedReturnMode : 'simple';
+        markSeg(els.appliedReturnSeg, (b) => b.dataset.return === cur);
+    }
+
+    // 「当前可用和弦」预览：直接调生成侧那份词汇表 → 预览与出题永远不会脱节。
+    function updateAppliedPreview() {
+        if (!els || !els.appliedPreview) return;
+        if (!settings.appliedEnabled) {
+            els.appliedPreview.innerHTML = '离调和弦已关闭（这一段与「自然和弦」页的设置完全一致）';
+            return;
+        }
+        const list = appliedVocabulary(settings);
+        els.appliedPreview.innerHTML = '当前可用和弦：<b>'
+            + (list.length ? list.join('　') : '（无 —— 勾选的级数里没有可离调的目标）')
+            + '</b>';
+    }
+
 
     // 把滑块挪到「当前播放方式」那一项上。
     //   几何量两遍：首次调用时这块可能刚被 display 切出来，offsetWidth 还没稳。
@@ -3475,8 +3822,9 @@
         const modeText = (data.voicingMode === 'fourpart')
             ? '四部和声 · 大谱表'
             : '三和弦 · 单行谱';
+        const appliedText = settings.appliedEnabled ? ' · 含离调' : '';
         els.hint.textContent =
-            `本段：${data.key} 大调 · ${data.chords.length} 小节 · ${settings.tempo} BPM · ${modeText} · ${invText}`;
+            `本段：${data.key} 大调 · ${data.chords.length} 小节 · ${settings.tempo} BPM · ${modeText} · ${invText}${appliedText}`;
     }
 
     async function doGenerate(auto) {
@@ -3937,6 +4285,7 @@
                 settings.degrees[d] = t.checked;
                 syncCard(d);
                 saveSettings();
+                updateAppliedPreview();     // 目标级数池跟着自然页的勾选走
             });
             els.grid.addEventListener('input', (e) => {
                 const t = e.target;
@@ -3946,8 +4295,54 @@
                 const val = els.grid.querySelector(`[data-role="probVal"][data-degree="${d}"]`);
                 if (val) val.textContent = t.value + '%';
                 saveSettings();
+                updateAppliedPreview();
             });
         }
+
+        // ---------------- 离调和弦页 ----------------
+        //   切页只是切显示，不发新题（用户可能只是来看一眼设置）。
+        if (els.kindSeg) {
+            els.kindSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.kind) return;
+                chordSettingsPage = opt.dataset.kind;
+                applySettingsPage();
+            });
+        }
+        //   总开关 / 两档目标 / 三档回归：改完存盘 + 立刻重出一段（否则要按「下一首」才生效）
+        if (els.appliedEnable) {
+            els.appliedEnable.addEventListener('click', () => {
+                settings.appliedEnabled = !settings.appliedEnabled;
+                syncTogglePills();
+                saveSettings();
+                updateAppliedPreview();
+                doGenerate(true);
+            });
+        }
+        if (els.appliedTargetSeg) {
+            els.appliedTargetSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.target) return;
+                settings.appliedTargetMode = opt.dataset.target;
+                updateAppliedTargetSeg();
+                saveSettings();
+                updateAppliedPreview();
+                if (settings.appliedEnabled) doGenerate(true);
+            });
+        }
+        if (els.appliedReturnSeg) {
+            els.appliedReturnSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.return) return;
+                settings.appliedReturnMode = opt.dataset.return;
+                updateAppliedReturnSeg();
+                saveSettings();
+                updateAppliedPreview();
+                if (settings.appliedEnabled) doGenerate(true);
+            });
+        }
+        applySettingsPage();
+        updateAppliedPreview();
 
         // 播放方式（连体椭圆滑块）：点一项 = 切成该方式 + 把当前这段按该方式重放一遍
         if (els.playSeg) {
@@ -5572,6 +5967,8 @@
         _localDegValid: localDegValid,
         _appliedVocabulary: appliedVocabulary,
         _planAppliedEvents: planAppliedEvents,
+        _getAppliedBrackets: () => appliedBrackets.slice(),
+        _measureRomanWidth: measureRomanWidth,
         _defaultSettings: DEFAULT_SETTINGS,
         _generateChordProgression: generateChordProgression,
         _doubledToneIndex: doubledToneIndex,
@@ -5813,6 +6210,8 @@
         //   （辅助窗那个「根音/三音/五音/七音」小标签的来源就是它）
         _chordToneSpelled: chordToneSpelled,
         _getArtPalette: () => ART_PALETTE.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
+        // 离调卡片用的"同色系压暗"派生色板（派生自 ART_PALETTE，不硬编码）
+        _getAppliedPalette: () => ART_PALETTE_APPLIED.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
         // 报错浮窗的几何布局：每个色块的中心坐标 + 尺寸（用来客观验证"两列 + Ⅶ 横跨"）
         _getMpErrorLayout: () => {
             if (!els || !els.mpErrorGrid) return null;

@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=27"></script>
+<script src="chord_recognition.js?v=28"></script>
     <style>
         * {
             margin: 0;
@@ -332,6 +332,29 @@
             justify-content: center;
             gap: 15px;
             padding-top: 10px;
+        }
+
+        /* 分段控件在 flex 容器里要独占一行并居中（.seg 本身是 inline-flex，不会自动撑满） */
+        .seg-row {
+            width: 100%;
+            display: flex;
+            justify-content: center;
+        }
+
+        /* 离调页底部那行「当前可用和弦」：只读预览，用等宽感的细字，别抢控件的视觉重量 */
+        .applied-preview {
+            width: 100%;
+            text-align: center;
+            font-size: 13px;
+            line-height: 1.7;
+            color: var(--text-secondary);
+            padding: 2px 6px 4px;
+            word-break: break-word;
+        }
+
+        .applied-preview b {
+            font-weight: 600;
+            color: var(--text-primary);
         }
 
         .control-group {
@@ -1945,6 +1968,18 @@
             <details class="more-settings" open>
                 <summary><svg class="ic ic-tri" aria-hidden="true"><use href="#i-chevron-right"/></svg><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>和弦设置</summary>
                 <div class="more-settings-grid">
+                    <!-- 和弦类型：自然 / 离调 两页切换（连体椭圆滑块）。
+                         ★ 用 display:contents 包住自然页那几块：既不破坏 .more-settings-grid 的
+                           flex 布局（子项仍直接参与排版），又能整块 display:none 收起来。 -->
+                    <div class="seg-row">
+                        <div class="seg" id="chord-kind-seg" role="radiogroup" aria-label="和弦类型">
+                            <span class="seg__thumb" aria-hidden="true"></span>
+                            <button type="button" class="seg__opt" data-kind="natural" role="radio" aria-checked="false">自然和弦</button>
+                            <button type="button" class="seg__opt" data-kind="applied" role="radio" aria-checked="false">离调和弦</button>
+                        </div>
+                    </div>
+
+                    <div id="chord-page-natural" style="display: contents">
                     <div class="control-group" style="width: 100%; justify-content: center;">
                         <label>参与的级数 / 各级出现七和弦的概率：</label>
                     </div>
@@ -1974,6 +2009,48 @@
                             关闭＝每个级数等概率；开启＝按你的历史错误率调整出题概率（错得多的多出一点，正确率回升就自动降回来）。数据在底部「数据库」页里看
                         </span>
                     </div>
+                    </div><!-- /#chord-page-natural -->
+
+                    <!-- ===== 离调页 =====
+                         离调 = 把调内某个和弦临时当成主和弦，套用它那个调的属/下属功能，
+                         随后立刻回到原调（不做终止，所以不是转调）。
+                         ★ 离调是**叠加**在自然进行上的：自然页那些设置继续生效。 -->
+                    <div id="chord-page-applied" style="display: none; width: 100%">
+                        <div class="toggle-row">
+                            <button type="button" class="toggle-pill" id="chord-applied-enable" role="switch" aria-checked="false">
+                                <svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>启用离调和弦
+                            </button>
+                        </div>
+
+                        <div class="control-group" style="width: 100%; justify-content: center;">
+                            <label>离调目标：</label>
+                            <span style="color: var(--text-tertiary); font-size: 12px;">被临时当成主和弦的那一级</span>
+                        </div>
+                        <div class="seg-row">
+                            <div class="seg" id="chord-applied-target-seg" role="radiogroup" aria-label="离调目标">
+                                <span class="seg__thumb" aria-hidden="true"></span>
+                                <button type="button" class="seg__opt" data-target="simple" role="radio" aria-checked="false">简单（Ⅳ Ⅴ）</button>
+                                <button type="button" class="seg__opt" data-target="complex" role="radio" aria-checked="false">复杂（Ⅱ—Ⅵ）</button>
+                            </div>
+                        </div>
+
+                        <div class="control-group" style="width: 100%; justify-content: center;">
+                            <label>回归方式：</label>
+                            <span style="color: var(--text-tertiary); font-size: 12px;">离调之后怎么走回原调</span>
+                        </div>
+                        <div class="seg-row">
+                            <div class="seg" id="chord-applied-return-seg" role="radiogroup" aria-label="回归方式">
+                                <span class="seg__thumb" aria-hidden="true"></span>
+                                <button type="button" class="seg__opt" data-return="simple" role="radio" aria-checked="false">简单</button>
+                                <button type="button" class="seg__opt" data-return="medium" role="radio" aria-checked="false">中等</button>
+                                <button type="button" class="seg__opt" data-return="complex" role="radio" aria-checked="false">复杂</button>
+                            </div>
+                        </div>
+
+                        <!-- 当前可用和弦预览：直接调生成侧的 appliedVocabulary，
+                             所以预览列出来的和弦与真出题时用的**永远是同一份**。 -->
+                        <div class="applied-preview" id="chord-applied-preview"></div>
+                    </div><!-- /#chord-page-applied -->
                 </div>
             </details>
 
