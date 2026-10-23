@@ -95,7 +95,21 @@
         //   ★ 只作用于主播放那段离线渲染的音频；听辨辅助窗里试听的和弦保持原样（用户拍板）。
         //   ★ 实现在 renderChordAudio 的混音循环里按"该小节最低音"提增益 ——
         //     刻意不动 buildChordSchedule，和声排程回归基线（triad sha256）才守得住。
-        bassEmphasis: 0
+        bassEmphasis: 0,
+        // ---- 离调和弦（2026-10-23 新增，用户逐项拍板）----
+        // ★ 三个键缺省即"关闭"：老 localStorage、回归脚本传入的 settings 对象都没有它们，
+        //   于是自动走关闭分支 —— 关着的时候出题必须与改造前**逐字节一致**。
+        appliedEnabled: false,
+        // 离调目标（被临时当成主和弦的那一级，不是"离调和弦自己是第几级"）：
+        //   'simple'  = Ⅳ、Ⅴ（正三和弦，教程起步）
+        //   'complex' = Ⅱ Ⅲ Ⅳ Ⅴ Ⅵ（排除 Ⅰ 与 ⅶ°：向 Ⅰ 离调等于没有离调，
+        //               ⅶ° 是减三和弦，当不了稳定的临时主）
+        appliedTargetMode: 'simple',
+        // 回归方式（离调之后怎么走回来）：
+        //   'simple'  = 5/x→x（正格）、4/x→x（变格）
+        //   'medium'  = 固定短模板 2/x→5/x→x、4/x→5/x→x
+        //   'complex' = 从 {属, 下属, 2-5-1, 4-5-1} 词汇里随机组装 2–4 个和弦
+        appliedReturnMode: 'simple'
     };
 
     // 强调低音的上限倍数：100% 时低音 = 原增益 ×(1 + 这个数)。
@@ -166,6 +180,59 @@
     }
 
     // ------------------------------------------------------------
+    // 离调专用拼写内核（2026-10-23）
+    //
+    //   ★ 离调和弦**不能**走 midiToSpelled：它按"调内音"查表，调外音查不到时会兜底成
+    //     LETTERS[-1] → 'C' 本位 —— 音高直接画错，而且一声不响。
+    //   改用 spellTertianChord：字母序列由"三度叠置"决定（根、三、五、七隔一个取一个），
+    //   升降号由 pc 与该字母自然音高之差唯一解出。因此
+    //     A7   → A C♯ E G     （C 比 C♯ 低半音 → acc +1）
+    //     C7   → C E G B♭     （B 比 B♭ 高半音 → acc -1）
+    //     F♯°7 → F♯ A C E♭
+    //   这不是"按音高猜名字"，而是由字母序号唯一解出，不会把 C♯ 写成 D♭。
+    // ------------------------------------------------------------
+    function normAcc(n) {
+        let a = n % 12;
+        if (a > 6) a -= 12; else if (a < -6) a += 12;
+        return a;
+    }
+
+    function spellTertianChord(rootLetter, pcs) {
+        const r = LETTERS.indexOf(rootLetter);
+        return pcs.map((pc, i) => {
+            const letter = LETTERS[((r + 2 * i) % 7 + 7) % 7];
+            return { letter, acc: normAcc(pc - LETTER_PC[letter]), pc };
+        });
+    }
+
+    // midis + 和弦音拼写 → 带八度的 notes
+    //   ★ 八度不能写 floor(m/12)-1：B♯4 与 C5 是同一个 midi，按 midi 取整会算错八度。
+    //     正确做法是用"该字母在该升降号下的自然音高"反解。
+    function spellMidis(midis, tones) {
+        return midis.map((m) => {
+            const pc = ((m % 12) + 12) % 12;
+            const t = tones.find((x) => x.pc === pc) || tones[0];
+            return {
+                letter: t.letter,
+                acc: t.acc,
+                octave: Math.floor((m - LETTER_PC[t.letter] - t.acc) / 12) - 1
+            };
+        });
+    }
+
+    // 离调和弦的 tone 表：**唯一入口**（配声 / 回溯修补 / 封面 / 辅助窗共用）
+    function appliedTones(ap) {
+        const roles = ['root', 'third', 'fifth', 'seventh'];
+        return spellTertianChord(ap.rootLetter, ap.pcs).map((t, i) => ({
+            letter: t.letter,
+            acc: t.acc,
+            pc: t.pc,
+            role: roles[i],
+            scaleDegree: ((ap.localDegree - 1 + [0, 2, 4, 6][i]) % 7) + 1
+        }));
+    }
+
+    // ------------------------------------------------------------
     // 和弦进行生成
     // ------------------------------------------------------------
 
@@ -183,8 +250,10 @@
     //   allowInversion  : 是否允许转位（false 时只有原位）
     //   allowSecondInv  : 是否允许 6₄（三和弦第二转位）。false 时三和弦只保留原位与 6
     //                     注意：只作用于三和弦；七和弦的 4₃ / 4₂ 不是 6₄，不受影响
-    function buildCandidates(scale, degree, seventh, allowInversion, allowSecondInv) {
-        const pcs = chordTonePcs(scale, degree, seventh);
+    // pcsOverride（可选，离调专用）：直接给定音级 pc 列表，绕开"按调内级数查表"。
+    //   旧调用不传 → 走 chordTonePcs，与改造前完全一致。
+    function buildCandidates(scale, degree, seventh, allowInversion, allowSecondInv, pcsOverride) {
+        const pcs = pcsOverride || chordTonePcs(scale, degree, seventh);
         const n = pcs.length;
         let invList = allowInversion ? Array.from({ length: n }, (_, i) => i) : [0];
         if (allowSecondInv === false) {
@@ -267,11 +336,11 @@
     }
 
     // 为一个和弦挑最佳配声（在最优附近随机，保留变化）
-    function chooseVoicing(scale, degree, seventh, prevMidis, allowInversion, isLast, allowSecondInv) {
-        const cands = buildCandidates(scale, degree, seventh, allowInversion, allowSecondInv);
+    function chooseVoicing(scale, degree, seventh, prevMidis, allowInversion, isLast, allowSecondInv, pcsOverride) {
+        const cands = buildCandidates(scale, degree, seventh, allowInversion, allowSecondInv, pcsOverride);
         if (cands.length === 0) {
             // 兜底：取根三五原位
-            const pcs = chordTonePcs(scale, degree, seventh);
+            const pcs = pcsOverride || chordTonePcs(scale, degree, seventh);
             let arr = [];
             let prev = null;
             for (const pc of pcs) {
@@ -373,7 +442,10 @@
     //   第一转位（6）           → 根音；根音是导音时改重复五音
     //   第二转位（6₄）          → 五音（=低音）
     //   七和弦（4 个音）        → 不重复
-    function doubledToneIndex(tones, degree, inversion) {
+    function doubledToneIndex(tones, degree, inversion, forceRoot) {
+        // forceRoot：强制重复根音。只有"离调解决到达的那一小节"会用到 ——
+        //   副调导音必须上行进主音，主音必须能在导音那个声部出现（详见 buildAppliedMap 注释）。
+        if (forceRoot) return 0;
         if (tones.length === 4) return -1;              // 七和弦 4 音全保留
         const deg = (i) => tones[i].scaleDegree;
         if (inversion === 2) return deg(2) === 7 ? -1 : 2;          // 6₄：重复五音
@@ -388,9 +460,11 @@
 
     // 生成四部候选：枚举「转位 × 低音八度 × 上方三声部八度」，逐条硬过滤
     //   relax 0=严格 1=放宽间距 2=音域±2 3=音域±4
-    function buildFourPartCandidates(scale, degree, seventh, allowInversion, allowSecondInv, relax) {
+    //   tonesOverride（可选，离调专用）：直接给定和弦音（含 role / scaleDegree），
+    //     绕开 chordToneSpelled 的"调内查表"。不传 = 旧行为。
+    function buildFourPartCandidates(scale, degree, seventh, allowInversion, allowSecondInv, relax, tonesOverride, forceRootDbl) {
         relax = relax || 0;
-        const tones = chordToneSpelled(scale, degree, seventh);
+        const tones = tonesOverride || chordToneSpelled(scale, degree, seventh);
         const n = tones.length;
 
         let invList = allowInversion ? Array.from({ length: n }, (_, i) => i) : [0];
@@ -407,7 +481,7 @@
         const seen = new Set();
 
         for (const inv of invList) {
-            const dbl = doubledToneIndex(tones, degree, inv);
+            const dbl = doubledToneIndex(tones, degree, inv, forceRootDbl);
             if (!seventh && dbl < 0) continue;
 
             const bassTone = tones[inv % n];
@@ -668,8 +742,8 @@
     }
 
     // 兜底：极端情况（4 级放宽后仍无候选）也要产出 4 个音，绝不返回空
-    function fallbackFourPart(scale, degree, seventh) {
-        const tones = chordToneSpelled(scale, degree, seventh);
+    function fallbackFourPart(scale, degree, seventh, tonesOverride) {
+        const tones = tonesOverride || chordToneSpelled(scale, degree, seventh);
         const dbl = doubledToneIndex(tones, degree, 0);
         const idx = dbl < 0 ? 0 : dbl;
         const content = seventh ? tones.slice() : tones.concat([tones[idx]]);
@@ -734,7 +808,7 @@
     //   即"放宽音域"永远优先于"放宽声部规则" —— 音域越界比声部超越轻得多。
     //   规则集：① 无平行五八度 + 无超越 + 内声部跳进 ≤ cap
     //          ② 无平行 + 无超越   ③ 只保证无平行   ④ 任意
-    function chooseFourPartVoicing(scale, degree, seventh, prevMidis, allowInversion, isLast, allowSecondInv, ctx) {
+    function chooseFourPartVoicing(scale, degree, seventh, prevMidis, allowInversion, isLast, allowSecondInv, ctx, tonesOverride, forceRootDbl, resolveReq) {
         const pick = (cands) => {
             const scored = cands.map((c) => ({ c, cost: fourPartCost(c, prevMidis, isLast, ctx) }));
             scored.sort((x, y) => x.cost - y.cost);
@@ -743,8 +817,23 @@
             return pool[Math.floor(Math.random() * pool.length)];
         };
         const build = (relax) => buildFourPartCandidates(
-            scale, degree, seventh, allowInversion, allowSecondInv, relax
+            scale, degree, seventh, allowInversion, allowSecondInv, relax, tonesOverride, forceRootDbl
         );
+
+        // 离调解决小节：副调导音所在的**那个声部**必须上行小二度进主音。
+        //   ★ 为什么不能只靠 fourPartCost 的加减分：软代价只会在"已经找到能配的候选"里挑，
+        //     而这里的阶梯一旦在第一步找到能配的候选就 return 了 —— 那批候选可能**全都**解决不了
+        //     （典型：导音在高音部，主音要落回同一声部就必然超出 S-A ≤ 12 的间距）。
+        //     所以解决小节要"带着这个硬要求逐级放宽去找"，找不到才退回普通解。
+        const rv = (resolveReq && prevMidis && prevMidis.length === 4)
+            ? prevMidis.findIndex((m) => ((m % 12) + 12) % 12 === resolveReq.leadingPc)
+            : -1;
+        const resolvesOk = (midis) => {
+            if (rv < 0) return true;
+            const mv = midis[rv] - prevMidis[rv];
+            return (mv === 1 || mv === 2)
+                && ((((midis[rv] % 12) + 12) % 12) === resolveReq.tonicPc);
+        };
 
         const needClean = !!(prevMidis && prevMidis.length === 4);
 
@@ -756,13 +845,14 @@
                 if (cands.length) return pick(cands);
             }
             FOURPART_STATS.fallback++;
-            return fallbackFourPart(scale, degree, seventh);
+            return fallbackFourPart(scale, degree, seventh, tonesOverride);
         }
 
         const a = prevMidis;
         let fbNoCap = null;         // 无平行 + 无超越
         let fbNoOverlap = null;     // 只保证无平行
         let fbAny = null;           // 任何候选
+        let fbStrict = null;        // 解决小节专用：能配、但解决不了导音的最严池
 
         for (let step = 0; step < FOUR_LADDER.length; step++) {
             const relax = FOUR_LADDER[step][0];
@@ -779,8 +869,17 @@
                 && innerLeapOk(a, c.midis, cap)
             );
             if (clean.length) {
-                FOURPART_STATS.cleanStep[step]++;
-                return pick(clean);
+                if (rv < 0) {
+                    FOURPART_STATS.cleanStep[step]++;
+                    return pick(clean);
+                }
+                const ok = clean.filter((c) => resolvesOk(c.midis));
+                if (ok.length) {
+                    FOURPART_STATS.cleanStep[step]++;
+                    return pick(ok);
+                }
+                // 能配但解决不了 → 记下最严的那一池，继续放宽去找能解决的
+                if (!fbStrict) fbStrict = clean;
             }
 
             // 记录兜底池（取最先命中、即音域最窄的那一级）
@@ -796,17 +895,22 @@
         }
 
         // 兜底顺序：先舍"跳进上限" → 再舍"无超越" → 最后舍"无平行"
+        //   ★ 解决小节优先用"最严的能配池"（哪怕导音没解决），而不是更松的兜底池 ——
+        //     声部规则比"导音这一次没上去"更重要，听起来差得少。
+        if (fbStrict) { FOURPART_STATS.fbNoCap++; return pick(fbStrict); }
         if (fbNoCap) { FOURPART_STATS.fbNoCap++; return pick(fbNoCap); }
         if (fbNoOverlap) { FOURPART_STATS.fbNoOverlap++; return pick(fbNoOverlap); }
         if (fbAny) { FOURPART_STATS.fbAny++; return pick(fbAny); }
         FOURPART_STATS.fallback++;
-        return fallbackFourPart(scale, degree, seventh);
+        return fallbackFourPart(scale, degree, seventh, tonesOverride);
     }
 
     // 把一个候选写回 chord 对象（midis / notes / doubledRole 同步）
     function applyFourPartCandidate(chord, cand, scale) {
         chord.midis = cand.midis;
-        chord.notes = cand.midis.map((m) => midiToSpelled(m, scale));
+        chord.notes = chord.applied
+            ? spellMidis(cand.midis, appliedTones(chord.applied))
+            : cand.midis.map((m) => midiToSpelled(m, scale));
         chord.doubledRole = cand.doubledRole || null;
     }
 
@@ -826,8 +930,11 @@
                 if (!hasOverlap(prev.midis, cur.midis)) continue;
 
                 // 候选池：保持各自的转位与重复音不变，只换排列
+                //   ★ 离调和弦必须带上自己的 tone 表，否则会把 5⁷/Ⅴ 当成"Ⅴ 级自然和弦"重排 → 音全错。
                 const buildFor = (chord, relax) => buildFourPartCandidates(
-                    scale, chord.degree, !!chord.seventh, true, allowSecondInv, relax
+                    scale, chord.applied ? chord.applied.localDegree : chord.degree,
+                    !!chord.seventh, true, allowSecondInv, relax,
+                    chord.applied ? appliedTones(chord.applied) : null
                 ).filter((c) => c.inv === chord.inversion);
 
                 const before = (m >= 2) ? chords[m - 2].midis : null;
@@ -871,17 +978,234 @@
         return fixed;
     }
 
-    function romanOf(degree, seventh, inversion) {
-        const base = ROMAN_MAJOR[degree - 1] || '';
+    // 转位数字（上标/下标）—— romanOf（谱面文字）与 romanParts（封面排版）共用一份。
+    //   ★ 历史上这两处曾各自维护同一套 if，改一处忘一处就会出现"谱面与卡片不一致"，
+    //     所以抽成 figuresOf 一个单点。
+    //   { sup, sub } 供封面按"右上 / 右下"排；text 是谱面那行纯文本，
+    //   ★ 注意七和弦的 4₃ / 4₂ 两个数字**都是下标**（不能当上标），这是最容易写错的一处。
+    function figuresOf(seventh, inversion) {
         if (!seventh) {
-            if (inversion === 1) return base + SUP[6];
-            if (inversion === 2) return base + SUP[6] + SUB[4];
-            return base;
+            if (inversion === 1) return { sup: '6', sub: '', text: SUP[6] };
+            if (inversion === 2) return { sup: '6', sub: '4', text: SUP[6] + SUB[4] };   // 6₄
+            return { sup: '', sub: '', text: '' };
         }
-        if (inversion === 1) return base + SUP[6] + SUB[5];
-        if (inversion === 2) return base + SUB[4] + SUB[3];
-        if (inversion === 3) return base + SUB[4] + SUB[2];
-        return base + SUP[7];
+        if (inversion === 1) return { sup: '6', sub: '5', text: SUP[6] + SUB[5] };
+        if (inversion === 2) return { sup: '4', sub: '3', text: SUB[4] + SUB[3] };
+        if (inversion === 3) return { sup: '4', sub: '2', text: SUB[4] + SUB[2] };
+        return { sup: '7', sub: '', text: SUP[7] };
+    }
+
+    // 和弦标记。
+    //   自然和弦：Ⅰ / Ⅴ⁷ / ⅱ⁶ …（与改造前逐字节一致）
+    //   离调和弦（applied 存在）：阿拉伯 = 副调内的级数，罗马 = 目标在原调的级数，斜杠分隔。
+    //     例：5/Ⅴ、5⁷/Ⅴ、5⁶₅/Ⅴ、5⁷/ⅱ
+    //   ★ 转位数字永远挂在**左边**那个（它属于副调内的和弦），与教材一致。
+    function romanOf(degree, seventh, inversion, applied) {
+        const fig = figuresOf(seventh, inversion).text;
+        if (applied) {
+            return String(applied.localDegree)
+                + fig + '/' + (ROMAN_MAJOR[applied.targetDegree - 1] || '');
+        }
+        const base = ROMAN_MAJOR[degree - 1] || '';
+        return base + fig;
+    }
+
+    // ============================================================
+    // 离调和弦（secondary / applied chords）
+    //
+    //   定义：把调内某个大/小三和弦**临时**当成主和弦，套用它那个调的属功能
+    //   （5/x）或下属功能（2/x、4/x），随后立刻回到原调 —— 不做终止、不在新调上巩固，
+    //   所以是"离调"而不是"转调"。
+    //
+    //   ★ 两个硬约束（不遵守就会生成出"假离调"）：
+    //     ① 三和弦形式下如果所有音都是调内音，那它就是个贴了离调标签的自然和弦。
+    //        典型：4/Ⅴ ≡ Ⅰ、2/Ⅴ ≡ ⅵ、4/ⅵ ≡ ⅱ、2/ⅵ ≡ ⅶ°、4/ⅲ ≡ ⅵ。
+    //        → 统一用 spec.chromatic 判定，不调外就剔除。
+    //     ② 5/Ⅳ 的三和弦就是主和弦本身（Ⅴ/Ⅳ = Ⅰ），只有 5⁷/Ⅳ（= Ⅰ⁷）才有离调色彩。
+    //        教材原话："只有下属的属七和弦，没有下属的属和弦。" → 强制七和弦。
+    //
+    //   ★ 副调音阶取"目标 pc 的大调"（目标本身可能是小三和弦，但它的大调音阶
+    //     给出的 V/x、vii°/x 与和声小调完全一致 —— 实际使用中没有差别），
+    //     所以根音 = 目标音往上 N 度，落在调内的可能性天然很高，只有变化音才出调。
+    // ============================================================
+
+    // 副调内的三度叠置：局部 2 级是小三和弦，局部 4 / 5 级是大三和弦
+    const APPLIED_QUAL = { 2: [0, 3, 7, 10], 4: [0, 4, 7, 10], 5: [0, 4, 7, 10] };
+
+    // 构造一个离调和弦的描述（不产生随机数，纯算术）
+    //   targetDegree : 被临时当成主和弦的那一级（原调级数，1..7）
+    //   localDegree  : 这个和弦在副调里的级数（2 / 4 / 5）
+    function appliedChordSpec(scale, targetDegree, localDegree, seventh) {
+        const t = scale[targetDegree - 1];
+        const qual = APPLIED_QUAL[localDegree];
+        if (!t || !qual) return null;
+        const targetPc = t.pc;
+        const rootPc = (targetPc + MAJOR_STEPS[localDegree - 1]) % 12;
+        // 字母也必须按"副调音阶的 N 级"推，不能按音高猜 —— 否则 A7 的 C♯ 会写成 D♭
+        const rootLetter = LETTERS[(LETTERS.indexOf(t.letter) + (localDegree - 1)) % 7];
+        const pcs = qual.slice(0, seventh ? 4 : 3).map((s) => (rootPc + s) % 12);
+        return {
+            targetDegree,
+            localDegree,
+            seventh: !!seventh,
+            targetPc,
+            rootPc,
+            rootLetter,
+            rootAcc: normAcc(rootPc - LETTER_PC[rootLetter]),
+            pcs,
+            // 副调导音：只有属功能和弦才含它（= 目标音下方小二度）；下属功能返回 null
+            leadingPc: localDegree === 5 ? (targetPc + MAJOR_STEPS[6]) % 12 : null,
+            chromatic: pcs.some((pc) => !scale.some((d) => d.pc === pc))
+        };
+    }
+
+    // 这个（目标, 局部级数）组合在该调里是否成立
+    //   ★ 判定用的 seventh 必须与真正生成时一致：向 Ⅳ 的属和弦强制七和弦，
+    //     否则会被自己的"全调内"规则误杀（5/Ⅳ 三和弦 = Ⅰ）。
+    function localDegValid(scale, targetDegree, localDegree) {
+        const seventh = (targetDegree === 4 && localDegree === 5);
+        const spec = appliedChordSpec(scale, targetDegree, localDegree, seventh);
+        return !!spec && spec.chromatic;
+    }
+
+    // 按「回归方式」抽一组局部级数序列（序列末位一定是属或下属，接着解决到 target）
+    function pickLocalSeq(scale, targetDegree, mode) {
+        const viable = (locals) => locals.every((L) => localDegValid(scale, targetDegree, L));
+        if (mode === 'medium' || mode === 'complex') {
+            let opts;
+            if (mode === 'medium') {
+                opts = [[2, 5], [4, 5]].filter(viable);
+            } else {
+                // 复杂档：从 {2,4,5} 词汇里现场组装 2–4 个和弦，末位必须落在 4 / 5 上
+                const len = 2 + Math.floor(Math.random() * 3);
+                const seq = [];
+                for (let i = 0; i < len; i++) {
+                    const last = (i === len - 1);
+                    const pool = (last ? [4, 5] : [2, 4, 5])
+                        .filter((L) => L !== seq[i - 1] && viable([L]));
+                    if (!pool.length) { seq.length = 0; break; }
+                    seq.push(pool[Math.floor(Math.random() * pool.length)]);
+                }
+                if (seq.length) return seq;
+                opts = [];
+            }
+            // 兜底：该目标级数下 2/x、4/x 都不成立时，退化成最简单的 5/x
+            //   （例如向 Ⅴ 离调：2/Ⅴ ≡ ⅵ、4/Ⅴ ≡ Ⅰ，都不算离调）
+            if (!opts.length) opts = [[5]].filter(viable);
+            return opts.length ? opts[Math.floor(Math.random() * opts.length)] : null;
+        }
+        const opts = [[5], [4]].filter(viable);
+        return opts.length ? opts[Math.floor(Math.random() * opts.length)] : null;
+    }
+
+    // 规划"哪几小节放离调"。返回事件数组，每个事件占 locals.length 小节，
+    //   紧接的那一小节是解决到达的目标和弦（原有的自然和弦被它取代）。
+    //   ★ 不变量：不碰第 1 小节与最后两小节、两组之间至少隔 1 小节自然和弦、
+    //     同一段里目标级数不重复。
+    function planAppliedEvents(scale, seq, settings) {
+        const N = seq.length;
+        const want = N >= 16 ? 2 : 1;
+        const targetMode = settings.appliedTargetMode || 'simple';
+        const returnMode = settings.appliedReturnMode || 'simple';
+        const poolAll = (targetMode === 'complex' ? [2, 3, 4, 5, 6] : [4, 5])
+            .filter((t) => settings.degrees && settings.degrees[t]);
+        const pool = poolAll.length ? poolAll : [4, 5];
+        const used = new Set();
+        const events = [];
+        for (let attempt = 0; attempt < want * 12 && events.length < want; attempt++) {
+            const free = pool.filter((t) => !used.has(t));
+            if (!free.length) break;
+            const target = free[Math.floor(Math.random() * free.length)];
+            const locals = pickLocalSeq(scale, target, returnMode);
+            if (!locals) continue;
+            // 解决到达的小节下标上限：目标 Ⅴ 允许落在终止的 Ⅴ 上（5/Ⅴ→Ⅴ→Ⅰ），
+            //   其它目标要留出终止 Ⅴ 与末尾 Ⅰ。
+            const maxResolve = (target === 5) ? N - 2 : N - 3;
+            const maxStart = maxResolve - locals.length;
+            if (maxStart < 2) continue;                       // 不碰第 0 / 1 小节
+            let start = 2 + Math.floor(Math.random() * (maxStart - 1));
+            if (target === 5 && Math.random() < 0.5) start = maxStart;   // 一半概率贴近终止
+            const lo = start - 1;
+            const hi = start + locals.length + 1;             // 前后各留 1 小节自然和弦
+            if (events.some((e) => lo <= e.hi && hi >= e.lo)) continue;
+            events.push({
+                start, locals, target, lo, hi,
+                groupId: 'a' + (events.length + 1)
+            });
+            used.add(target);
+        }
+        return events;
+    }
+
+    // 把事件摊平成「小节下标 → 和弦描述」。seventh 在这里一次性决定（之后不再改）。
+    //   返回 { map, resolveAt }：
+    //     map       = 离调小节（有 .applied）
+    //     resolveAt = 「解决到达」的那些小节（自然和弦，但要特殊处理，见下）
+    //   ★ 解决小节为什么必须"三和弦 + 重复根音"：
+    //     副调导音（5/x 的三音）必须上行小二度进主音。四声部里这条规则要求
+    //     **同一个声部**从导音走到主音，所以主音必须出现在导音那个声部。
+    //     如果解决小节是七和弦（四个音各一次），或者副三和弦按"重复三音"来配，
+    //     主音就只剩低音一处 —— 导音在上方声部时结构上**不可能**解决，只能错着走。
+    //     实测：不这么处理时导音上行率只有 30%（自然 Ⅴ→Ⅰ 是 68%）。
+    function buildAppliedMap(scale, seq, settings, events) {
+        const map = new Map();
+        const resolveAt = new Set();
+        for (const ev of events) {
+            for (let j = 0; j < ev.locals.length; j++) {
+                const idx = ev.start + j;
+                if (idx < 0 || idx >= seq.length) continue;
+                const L = ev.locals[j];
+                const seventh = (ev.target === 4 && L === 5)
+                    ? true
+                    : (Math.random() * 100 < (settings.seventhProb[ev.target] || 0));
+                const spec = appliedChordSpec(scale, ev.target, L, seventh);
+                if (!spec) continue;
+                spec.groupId = ev.groupId;
+                map.set(idx, spec);
+                seq[idx] = ev.target;             // 占位（配声走 applied 分支，此值仅作兜底）
+            }
+            // 解决到达的那一小节：改成目标级数
+            const r = ev.start + ev.locals.length;
+            if (r < seq.length) {
+                seq[r] = ev.target;
+                resolveAt.add(r);
+            }
+        }
+        return { map, resolveAt };
+    }
+
+    // 设置页预览行用：当前设置下能放出哪些离调和弦（以 C 大调为参照，与真实调性无关）
+    function appliedVocabulary(settings) {
+        const scale = buildScale('C');
+        const targetMode = settings.appliedTargetMode || 'simple';
+        const returnMode = settings.appliedReturnMode || 'simple';
+        const targets = (targetMode === 'complex' ? [2, 3, 4, 5, 6] : [4, 5])
+            .filter((t) => settings.degrees && settings.degrees[t]);
+        const list = [];
+        const seen = new Set();
+        const push = (t, L, seventh) => {
+            const spec = appliedChordSpec(scale, t, L, seventh);
+            if (!spec) return;
+            const label = romanOf(t, seventh, 0, spec);
+            if (seen.has(label)) return;
+            seen.add(label);
+            list.push(label);
+        };
+        const templates = returnMode === 'simple' ? [[5], [4]]
+            : (returnMode === 'medium' ? [[2, 5], [4, 5]] : [[2, 5], [4, 5], [2, 4, 5]]);
+        for (const t of targets) {
+            for (const tpl of templates) {
+                for (const L of tpl) {
+                    if (!localDegValid(scale, t, L)) continue;
+                    push(t, L, (t === 4 && L === 5));      // 向 Ⅳ 的属和弦强制七和弦
+                    // 属和弦还有七和弦形态（按该级数的七和弦概率决定出不出现）
+                    const canSeventh = !(t === 4 && L === 5) && L === 5
+                        && (settings.seventhProb ? (settings.seventhProb[t] || 0) > 0 : true);
+                    if (canSeventh) push(t, L, true);
+                }
+            }
+        }
+        return list;
     }
 
     // 生成一段和弦连接：Ⅰ 开头、Ⅰ 结尾；中间从勾选的级数里随机
@@ -921,6 +1245,16 @@
             seq[N - 2] = 5;
         }
 
+        // ---- 离调事件规划 ----
+        //   ★ 开关关着时**根本不调用**（连 Math.random() 都不消耗）—— 出题结果、
+        //     随机流位置、和声回归快照的 sha256 全部与改造前逐字节一致。
+        let appliedAt = null;
+        let appliedResolve = null;
+        if (settings.appliedEnabled) {
+            const built = buildAppliedMap(scale, seq, settings, planAppliedEvents(scale, seq, settings));
+            appliedAt = built.map;
+            appliedResolve = built.resolveAt;
+        }
         // 逐和弦配声
         const chords = [];
         let prevMidis = null;
@@ -933,38 +1267,74 @@
             prevSeventhPc: null
         };
 
+        let pendingResolve = null;    // 上一小节是副属和弦时，它留给这一小节解决要求
         for (let i = 0; i < N; i++) {
+            const ap = appliedAt ? (appliedAt.get(i) || null) : null;
+            // 这一小节是不是某个离调事件的"解决到达点"（自然和弦，但要三和弦 + 重复根音）
+            const isResolve = !!(appliedResolve && appliedResolve.has(i));
+            const resolveReq = isResolve ? pendingResolve : null;
             const degree = seq[i];
             const isFirst = (i === 0);
             const isLast = (i === N - 1);
             // 首尾强制三和弦原位（调性明确、收束干净）
-            const seventh = (isFirst || isLast)
-                ? false
-                : (Math.random() * 100 < (settings.seventhProb[degree] || 0));
+            //   ★ 离调小节的三和弦/七和弦在规划阶段就定了（buildAppliedMap），这里不再掷骰子；
+            //     解决小节同理必须是三和弦，否则导音解决不了（见 buildAppliedMap 注释）。
+            const seventh = ap
+                ? ap.seventh
+                : ((isFirst || isLast || isResolve)
+                    ? false
+                    : (Math.random() * 100 < (settings.seventhProb[degree] || 0)));
             const allowInv = settings.allowInversion && !isFirst && !isLast;
+
+            // 离调：走 pcs / tones 覆盖，绕开"按调内级数查表"
+            const apPcs = ap ? ap.pcs : null;
+            const apTones = ap ? appliedTones(ap) : null;
+            //   degree 参数传 localDegree —— 配声里的"正/副/减 → 重复哪个音"判断
+            //   看的是它在**副调**里的身份（5/x、4/x 重复根音，2/x 重复三音）
+            const vDeg = ap ? ap.localDegree : degree;
 
             const v = fourPart
                 ? chooseFourPartVoicing(
-                    scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv, ctx
+                    scale, vDeg, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv, ctx,
+                    apTones, isResolve || undefined, resolveReq
                 )
                 : chooseVoicing(
-                    scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv
+                    scale, vDeg, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv, apPcs
                 );
             prevMidis = v.midis;
-            // 记录本和弦七音 pc，供下一和弦判断"七音是否下行解决"
-            ctx.prevSeventhPc = seventh ? chordToneSpelled(scale, degree, true)[3].pc : null;
 
-            const notes = v.midis.map((m) => midiToSpelled(m, scale));
-            chords.push({
+            const notes = ap
+                ? spellMidis(v.midis, apTones)
+                : v.midis.map((m) => midiToSpelled(m, scale));
+
+            const chord = {
                 degree,
                 seventh,
                 inversion: v.inv,
                 midis: v.midis,
                 notes,
-                roman: romanOf(degree, seventh, v.inv),
+                roman: romanOf(degree, seventh, v.inv, ap),
                 doubledRole: v.doubledRole || null,
                 voices4: fourPart
-            });
+            };
+            // ★ 只在离调上加这个键。自然和弦一个键都不加 —— 基线快照 JSON 因此不变。
+            if (ap) chord.applied = ap;
+            chords.push(chord);
+
+            // ctx 描述的是**这个**和弦留给下一和弦的解决倾向：
+            //   副属和弦有自己的导音（5/x 的三音），不能用全曲导音去判；
+            //   下属功能的离调和弦没有导音 → leadingPc = null 天然不命中那条规则。
+            //   ★ 只有"下一小节就是解决到达点"时才启用这条 —— 复杂档里属和弦后面
+            //     可能还跟着别的离调和弦（[5,2,4]），那时导音不该被要求进主音。
+            const nextResolves = !!(appliedResolve && appliedResolve.has(i + 1));
+            ctx.prevSeventhPc = seventh
+                ? (ap ? apTones[3].pc : chordToneSpelled(scale, degree, true)[3].pc)
+                : null;
+            ctx.leadingPc = ap ? (nextResolves ? ap.leadingPc : null) : scale[6].pc;
+            ctx.tonicPc = ap ? ap.targetPc : scale[0].pc;
+            pendingResolve = (ap && nextResolves)
+                ? { leadingPc: ap.leadingPc, tonicPc: ap.targetPc }
+                : null;
         }
 
         // 四部模式：贪心配声偶尔会因上一小节的极端摆位而"死锁"出超越 →
@@ -1387,6 +1757,13 @@
     //   相差超过三全音（> 6 半音）就往下取一个八度，免得根音听着比整个和弦还高。
     //   scale 拿不到时退回最低音（不会出错，只是转位时提示音不够精确）。
     function chordRootMidi(chord, scale) {
+        // 离调：根音不在调内级数表里，直接用 applied.rootPc（5/Ⅴ 的根音是 D，不是 G）
+        if (chord.applied) {
+            const bass = chord.midis[0];
+            let off = (((chord.applied.rootPc - (bass % 12)) % 12) + 12) % 12;
+            if (off > 6) off -= 12;
+            return bass + off;
+        }
         const d = chord.degree;
         if (!scale || !scale[d - 1] || !chord.midis || !chord.midis.length) return chord.midis[0];
         const rootPc = scale[d - 1].pc;
@@ -2752,17 +3129,21 @@
     // 罗马数字拆成「基号 + 上标 + 下标」三段，方便在封面上按教科书的样子排。
     //   直接把 Unicode 的 ⁿ / ₙ 当正文画，字号跟着基号走就会小得看不清，
     //   所以拆开、自己控字号与位置（见 drawCover）。
-    function romanParts(degree, seventh, inversion) {
-        const base = ROMAN_MAJOR[degree - 1] || '';
-        if (!seventh) {
-            if (inversion === 1) return { base, sup: '6', sub: '' };
-            if (inversion === 2) return { base, sup: '6', sub: '4' };
-            return { base, sup: '', sub: '' };
+    //   ★ 离调档额外带一个 target（罗马基号），自然档**连这个键都不出现**，
+    //     所以旧的调用方（含锁屏封面）零影响。
+    function romanParts(degree, seventh, inversion, applied) {
+        if (applied) {
+            const f = figuresOf(seventh, inversion);
+            return {
+                base: String(applied.localDegree),
+                sup: f.sup,
+                sub: f.sub,
+                target: ROMAN_MAJOR[applied.targetDegree - 1] || ''
+            };
         }
-        if (inversion === 1) return { base, sup: '6', sub: '5' };
-        if (inversion === 2) return { base, sup: '4', sub: '3' };
-        if (inversion === 3) return { base, sup: '4', sub: '2' };
-        return { base, sup: '7', sub: '' };
+        const base = ROMAN_MAJOR[degree - 1] || '';
+        const f = figuresOf(seventh, inversion);
+        return { base, sup: f.sup, sub: f.sub };
     }
 
     // 画一张方形封面。compact = true 时只留级数基号（96px 的缩略图上别的都是糊的）。
@@ -4616,9 +4997,11 @@
         // 和弦各音的"角色"：直接复用 chordToneSpelled —— 它按调内级数推出和弦音，
         //   **转位天然正确**（角色由根音定义，跟哪个音落在低音无关）；四部重复音时
         //   同一个角色会出现两枚，这也是对的（和声学上就是重复了那个音）。
-        const ct = (data && data.scale)
-            ? chordToneSpelled(data.scale, c.degree, !!c.seventh)
-            : [];
+        //   ★ 离调和弦不能走 chordToneSpelled（它会按"目标级数的自然和弦"推音，音全错），
+        //     走 appliedTones —— 那里才是这个和弦真正的根/三/五/七。
+        const ct = c.applied
+            ? appliedTones(c.applied)
+            : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh) : []);
         c.notes.forEach((n, i) => {                   // notes 已按 MIDI 升序（低 → 高）
             const midi = midis[i];
             const pc = ((midi % 12) + 12) % 12;
@@ -5177,6 +5560,20 @@
         _buildScale: buildScale,
         _buildCandidates: buildCandidates,
         _chordToneSpelled: chordToneSpelled,
+        // 离调：拼写内核（验收用：确认 A7→A C♯ E G、C7→C E G B♭、F♯°7→F♯ A C E♭）
+        _normAcc: normAcc,
+        _spellTertianChord: spellTertianChord,
+        _spellMidis: spellMidis,
+        _appliedTones: appliedTones,
+        _romanOf: romanOf,
+        _romanParts: romanParts,
+        // 离调：词汇与规划（验收用：确认档位过滤、伪离调剔除、不碰首尾）
+        _appliedChordSpec: appliedChordSpec,
+        _localDegValid: localDegValid,
+        _appliedVocabulary: appliedVocabulary,
+        _planAppliedEvents: planAppliedEvents,
+        _defaultSettings: DEFAULT_SETTINGS,
+        _generateChordProgression: generateChordProgression,
         _doubledToneIndex: doubledToneIndex,
         _buildFourPartCandidates: buildFourPartCandidates,
         _fourPartCost: fourPartCost,
@@ -5216,7 +5613,22 @@
         _getDataBrief: () => (data ? {
             key: data.key,
             scalePc: data.scale.map((s) => s.pc),
-            chords: data.chords.map((c) => ({ degree: c.degree, inversion: c.inversion, midis: c.midis.slice() }))
+            // ★ 自然和弦的字段与改造前完全一致（只有离调才多出 roman / applied 两个键）
+            chords: data.chords.map((c) => {
+                const o = { degree: c.degree, inversion: c.inversion, midis: c.midis.slice() };
+                if (c.applied) {
+                    o.roman = c.roman;
+                    o.applied = {
+                        groupId: c.applied.groupId,
+                        localDegree: c.applied.localDegree,
+                        targetDegree: c.applied.targetDegree,
+                        rootPc: c.applied.rootPc,
+                        rootLetter: c.applied.rootLetter,
+                        pcs: c.applied.pcs.slice()
+                    };
+                }
+                return o;
+            })
         } : null),
         _getAudioEl: () => chordAudioEl,
         _getBlobUrl: () => blobUrl,
