@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=29"></script>
+<script src="chord_recognition.js?v=30"></script>
     <style>
         * {
             margin: 0;
@@ -92,7 +92,11 @@
 
         .btn,
         .app-tab,
-        .degree-card,
+        .seg__opt,
+        .toggle-pill,
+        .switch,
+        .meter,
+        .srow--btn,
         .mp-bar__btn,
         .mp-bar__open,
         .mp-icon-btn,
@@ -113,65 +117,37 @@
             margin: 0 auto;
         }
 
-        .controls {
-            display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 15px;
-            margin-bottom: 30px;
-            padding: 20px;
-            background: var(--surface);
-            border: 1px solid var(--border);
-            border-radius: var(--r-lg);
-            box-shadow: var(--shadow-md);
-        }
-
         /* ============================================================
-           播放方式：连体椭圆滑块（分段控件）
+           互斥选择：一排细边胶囊（用户 2026-10-24 截图定稿）
            ------------------------------------------------------------
-           一个胶囊轨道里嵌一块实心滑块，选中项的文字转白 —— 「三个连在一起的
-           椭圆」说的就是它。"相连"靠滑块是从轨道里滑过去（left/width 过渡），
-           而不是三个各自独立的按钮。滑块几何由 JS 按选中项的 offsetLeft/Width 写。
+           不再有"胶囊轨道 + 渐变滑块"，所以也没有 .seg__thumb ——
+           选中态就是"浅紫底 + 紫边 + 紫字"。类名沿用 .seg/.seg__opt/.active，
+           这样 markSeg 与各处 closest('.seg__opt') 的委托一行都不用改。
            ============================================================ */
         .seg {
-            position: relative;
             display: inline-flex;
             align-items: center;
-            padding: 4px;
-            background: var(--track);
-            border-radius: var(--r-pill);
-        }
-
-        .seg__thumb {
-            position: absolute;
-            top: 4px;
-            bottom: 4px;
-            left: 4px;
-            width: 0;
-            border-radius: var(--r-pill);
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
-            transition: left 0.22s ease, width 0.22s ease;
-            pointer-events: none;
+            gap: 8px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
         }
 
         .seg__opt {
-            position: relative;      /* 压在滑块之上 */
-            z-index: 1;
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
-            border: none;
-            background: none;
-            box-shadow: none;
-            padding: 9px 14px;
+            padding: 8px 14px;
             font-family: inherit;
             font-size: 15px;
             font-weight: 600;
             color: var(--text-secondary);
-            border-radius: var(--r-pill);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
             cursor: pointer;
             white-space: nowrap;
-            transition: color 0.2s ease;
+            transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
         }
 
         /* 图标：柱式 = 柱式和弦示意、分解和弦 = 斜向琶音、单音 = 单个音符。
@@ -180,8 +156,11 @@
             --ic: 16px;
         }
 
+        /* 选中态：浅紫底 + 紫边 + 紫字（比"实心渐变"轻，一屏里不会到处在喊） */
         .seg__opt.active {
-            color: #fff;
+            color: var(--accent);
+            background: var(--accent-soft);
+            border-color: #c7c9f8;
         }
 
         /* 还没生成 / 正在渲染 → 整组置灰（语义同原三个播放键的 disabled） */
@@ -190,36 +169,152 @@
             pointer-events: none;
         }
 
-        /* 设置页那两颗开关（连续播放 / 随身听模式）：
-           与上面的「播放方式」共用同一套语言 —— 椭圆胶囊，选中亮起渐变色。
-           区别是它们各自独立，所以是两颗，可以同时亮（不是三选一的分段控件）。 */
+        /* ============================================================
+           开关：拨杆（50×30）
+           ------------------------------------------------------------
+           同一个 .switch 同时吃两种元素：
+             <input type="checkbox" class="switch">   → :checked
+             <button role="switch" class="switch">    → [aria-checked="true"]
+           这样"转位 / 6₄ / 优化题库"三个原生勾选框不用改 JS（.checked 与 change 事件照旧），
+           而"音高显示 / 连续播放 / 随身听 / 启用离调"四颗按钮也不用改（JS 写 aria-checked）。
+           ============================================================ */
+        .switch {
+            --sw-w: 50px;
+            --sw-h: 30px;
+            --sw-k: 24px;
+            position: relative;
+            flex: 0 0 auto;
+            width: var(--sw-w);
+            height: var(--sw-h);
+            margin: 0;
+            padding: 0;
+            border: none;
+            border-radius: 999px;
+            background: #d9dbe3;
+            cursor: pointer;
+            -webkit-appearance: none;
+            appearance: none;
+            transition: background 0.2s ease;
+        }
+
+        .switch::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: var(--sw-k);
+            height: var(--sw-k);
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 3px rgba(16, 24, 40, 0.22);
+            transition: transform 0.2s ease;
+        }
+
+        .switch:checked,
+        .switch[aria-checked="true"] {
+            background: var(--accent);
+        }
+
+        .switch:checked::after,
+        .switch[aria-checked="true"]::after {
+            transform: translateX(calc(var(--sw-w) - var(--sw-k) - 6px));
+        }
+
+        .switch:disabled {
+            opacity: 0.4;
+            cursor: not-allowed;
+        }
+
+        /* 小号拨杆（7 个级数行里用） */
+        .switch--sm {
+            --sw-w: 42px;
+            --sw-h: 26px;
+            --sw-k: 20px;
+        }
+
+        /* ============================================================
+           四格充能条：整块就是一个按钮，点一下进一档
+           ------------------------------------------------------------
+           数字档位（速度 / 强调低音 / 七和弦概率）都是"离散几档"，
+           用原生滑块既难点准又要跟着调样式，改成点一下循环最省事。
+           填充格数由 JS 的 xx_FILL 表决定（关闭 = 0 格）。
+           ============================================================ */
+        .meter {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 4px;
+            margin: -6px -4px;
+            font-family: inherit;
+            background: none;
+            border: none;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .meter i {
+            display: block;
+            width: 32px;
+            height: 12px;
+            border-radius: 6px;
+            background: #e3e4e8;
+            transition: background 0.18s ease;
+        }
+
+        .meter i.on {
+            background: var(--accent);
+        }
+
+        .meter__val {
+            min-width: 62px;
+            text-align: right;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--text-primary);
+            font-variant-numeric: tabular-nums;
+        }
+
+        /* 小号：7 个级数行（5 档） */
+        .meter--sm {
+            gap: 6px;
+        }
+
+        .meter--sm i {
+            width: 20px;
+            height: 12px;
+            border-radius: 4px;
+        }
+
+        .meter--sm .meter__val {
+            min-width: 40px;
+            font-size: 12px;
+            color: var(--accent);
+        }
+
+        /* 多选胶囊（离调页的「和弦进行」）：与互斥胶囊同款，只是可以同时亮 */
         .toggle-row {
-            width: 100%;
             display: flex;
             flex-wrap: wrap;
-            justify-content: center;
-            gap: 10px;
+            justify-content: flex-end;
+            gap: 8px;
         }
 
         .toggle-pill {
             display: inline-flex;
             align-items: center;
+            justify-content: center;
             gap: 6px;
-            padding: 9px 16px;
+            padding: 8px 14px;
             font-family: inherit;
             font-size: 15px;
             font-weight: 600;
             color: var(--text-secondary);
-            background: var(--track);
-            border: 1px solid transparent;
-            border-radius: var(--r-pill);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 10px;
             cursor: pointer;
             white-space: nowrap;
-            transition: color 0.2s ease, background 0.2s ease, border-color 0.2s ease, transform 0.12s ease;
-        }
-
-        .toggle-pill .ic {
-            --ic: 16px;
+            transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
         }
 
         .toggle-pill:active {
@@ -228,8 +323,9 @@
 
         /* 选中态：渐变底 + 白字白图标（颜色与 .seg 的滑块一致） */
         .toggle-pill[aria-checked="true"] {
-            color: #fff;
-            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            color: var(--accent);
+            background: var(--accent-soft);
+            border-color: #c7c9f8;
         }
 
         .toggle-hint {
@@ -241,132 +337,161 @@
             color: var(--text-tertiary);
         }
 
-        .more-settings {
-            margin-bottom: 30px;
-            padding: 0 20px 20px;
+        /* ============================================================
+           设置页外壳：顶部下划线 tab + 若干张灰色分组卡
+           ============================================================ */
+        .settings-shell {
+            margin-bottom: 26px;
             background: var(--surface);
+            border: 1px solid var(--border);
             border-radius: var(--r-lg);
             box-shadow: var(--shadow-md);
-            border: 1px solid var(--border);
-            transition: border-color 0.3s ease;
+            overflow: hidden;
         }
 
-        .more-settings:hover {
-            border-color: var(--border-strong);
+        /* 页内 tab：视觉与顶部「设置 / 数据库」一致（文字变深 + 底部 3px 紫线） */
+        .kind-tabs {
+            display: flex;
+            gap: 0;
+            width: 100%;
+            border-bottom: 1px solid var(--border);
         }
 
-        .more-settings > summary {
-            list-style: none;
-            cursor: pointer;
-            padding: 14px 16px;
-            margin: 0 -16px;
-            border-radius: var(--r-md);
-            font-size: 15px;
+        .kind-tabs .seg__opt {
+            flex: 1 1 0;
+            padding: 15px 0 13px;
+            font-size: 16px;
+            color: var(--text-tertiary);
+            background: none;
+            border: none;
+            border-radius: 0;
+            box-shadow: inset 0 -3px 0 transparent;
+            transition: color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .kind-tabs .seg__opt.active {
+            color: var(--text-primary);
+            background: none;
+            box-shadow: inset 0 -3px 0 var(--accent);
+        }
+
+        .sgroup {
+            margin: 12px 12px 0;
+            padding: 2px 14px 6px;
+            background: #f5f5f7;
+            border-radius: 14px;
+        }
+
+        .sgroup:last-child {
+            margin-bottom: 12px;
+        }
+
+        .sgroup__title {
+            margin: 0;
+            padding: 12px 0 2px;
+            font-size: 13px;
             font-weight: 600;
-            color: var(--text-secondary);
-            user-select: none;
+            color: var(--text-tertiary);
+        }
+
+        .srow {
             display: flex;
             align-items: center;
-            gap: 8px;
-            transition: all 0.25s ease;
-            position: relative;
+            justify-content: space-between;
+            gap: 12px;
+            min-height: 48px;
         }
 
-        .more-settings > summary:hover {
+        .srow > span:first-child {
+            flex: 0 0 auto;
+            font-size: 15px;
+            font-weight: 600;
             color: var(--text-primary);
-            background: var(--surface-hover);
-            transform: translateX(2px);
+            white-space: nowrap;
         }
 
-        .more-settings > summary:active {
-            transform: translateX(1px) scale(0.98);
-            background: var(--border);
+        .srow__side {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 14px;
+            color: var(--text-secondary);
+            white-space: nowrap;
         }
 
-        .more-settings > summary::-webkit-details-marker {
+        .srow--btn {
+            cursor: pointer;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        .srow__chev {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: var(--surface);
+            box-shadow: 0 1px 3px rgba(16, 24, 40, 0.12);
+            color: var(--text-secondary);
+            transition: transform 0.22s ease;
+        }
+
+        /* 箭头默认朝下（收起），展开时转成朝上 */
+        .srow__chev .ic {
+            --ic: 15px;
+            transform: rotate(90deg);
+            transition: transform 0.22s ease;
+        }
+
+        #chord-degree-toggle.is-open .srow__chev .ic {
+            transform: rotate(-90deg);
+        }
+
+        /* 7 个级数行（默认折叠） */
+        .degree-list {
+            display: flex;
+            flex-direction: column;
+            padding: 2px 0 8px;
+        }
+
+        .degree-list[hidden] {
             display: none;
         }
 
-        /* 展开指示箭头 + 分区图标（原来是 content:'▶' 文本三角 + ⚙️ emoji） */
-        .more-settings > summary .ic {
-            --ic: 15px;
-        }
-
-        .more-settings > summary .ic-tri {
-            color: var(--accent);
-            transition: transform 0.3s ease, color 0.25s ease;
-        }
-
-        .more-settings > summary:hover .ic-tri {
-            color: var(--accent-hover);
-        }
-
-        .more-settings[open] > summary .ic-tri {
-            transform: rotate(90deg);
-        }
-
-        .more-settings[open] > summary {
-            color: var(--accent);
-        }
-
-        .more-settings > summary::after {
-            content: '点击展开';
-            font-size: 11px;
-            color: var(--text-tertiary);
-            font-weight: normal;
-            margin-left: auto;
-            transition: opacity 0.3s ease;
-        }
-
-        .more-settings > summary:hover::after {
-            opacity: 0.6;
-        }
-
-        .more-settings[open] > summary::after {
-            content: '点击收起';
-        }
-
-        .more-settings-grid {
+        .drow {
             display: flex;
-            flex-wrap: wrap;
-            justify-content: center;
-            gap: 15px;
-            padding-top: 10px;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            min-height: 42px;
+            transition: opacity 0.2s ease;
         }
 
-        /* 分段控件在 flex 容器里要独占一行并居中（.seg 本身是 inline-flex，不会自动撑满） */
-        .seg-row {
-            width: 100%;
-            display: flex;
-            justify-content: center;
+        .drow.off {
+            opacity: 0.45;
+        }
+
+        .drow__name {
+            flex: 0 0 34px;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
         }
 
         /* 离调页底部那行「当前可用和弦」：只读预览，用等宽感的细字，别抢控件的视觉重量 */
         .applied-preview {
-            width: 100%;
-            text-align: center;
             font-size: 13px;
             line-height: 1.7;
             color: var(--text-secondary);
-            padding: 2px 6px 4px;
+            padding: 4px 0 10px;
             word-break: break-word;
         }
 
         .applied-preview b {
             font-weight: 600;
             color: var(--text-primary);
-        }
-
-        .control-group {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        .control-group label {
-            font-size: 14px;
-            color: var(--text-secondary);
-            font-weight: 600;
         }
 
         select {
@@ -545,53 +670,6 @@
             margin-bottom: 10px;
         }
 
-        .tempo-control {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-
-        /* 标签一律不折行 —— 窄屏（390px）下宁可让滑块短一点，
-           也不要出现「速 / 度：」这种把一个词劈成两行的观感。 */
-        .control-group label,
-        .tempo-control label {
-            white-space: nowrap;
-        }
-
-        .tempo-control input[type="range"] {
-            width: 150px;
-            height: 6px;
-            -webkit-appearance: none;
-            appearance: none;
-            background: var(--track);
-            border-radius: 3px;
-            outline: none;
-        }
-
-        /* 全局滑块 thumb：统一接管所有 range 滑块（含内联样式的 4 个） */
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            appearance: none;
-            width: 18px;
-            height: 18px;
-            background: var(--accent);
-            border-radius: 50%;
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-
-        input[type="range"]::-webkit-slider-thumb:hover {
-            transform: scale(1.15);
-            box-shadow: 0 0 10px rgba(99, 102, 241, 0.5);
-        }
-
-        .tempo-value {
-            font-size: 16px;
-            font-weight: 600;
-            color: var(--accent);
-            min-width: 45px;
-        }
-
         .stats {
             display: flex;
             justify-content: center;
@@ -753,70 +831,6 @@
             height: 3px;
             border-radius: 3px 3px 0 0;
             background: linear-gradient(90deg, var(--accent), var(--accent-2));
-        }
-
-        /* ============================================================
-           和弦听辨：级数卡片网格（每级一个勾选 + 七和弦概率滑块）
-           ============================================================ */
-        .degree-grid {
-            display: grid;
-            grid-template-columns: repeat(7, minmax(84px, 1fr));
-            gap: 10px;
-            width: 100%;
-            padding-top: 6px;
-        }
-
-        @media (max-width: 768px) {
-            .degree-grid {
-                grid-template-columns: repeat(2, 1fr);
-            }
-        }
-
-        .degree-card {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            gap: 6px;
-            padding: 10px 8px;
-            border: 1px solid var(--border);
-            border-radius: var(--r-md);
-            background: var(--surface-hover);
-            transition: opacity 0.2s ease;
-        }
-
-        .degree-card.off {
-            opacity: 0.45;
-        }
-
-        .degree-name {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--text-secondary);
-            cursor: pointer;
-        }
-
-        .degree-prob {
-            width: 100%;
-            height: 6px;
-            -webkit-appearance: none;
-            appearance: none;
-            background: var(--track);
-            border-radius: 3px;
-            outline: none;
-        }
-
-        .degree-prob-val {
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--accent);
-        }
-
-        .degree-hint {
-            font-size: 11px;
-            color: var(--text-tertiary);
         }
 
         /* 和弦谱面容器（与 #sheet-music 同样式） */
@@ -1315,8 +1329,8 @@
             transition: background 0.12s ease, transform 0.12s ease, color 0.12s ease;
         }
 
-        /* 最低音：宽度略大于其它三颗（强调低音位置，但不给音高） */
-        .mp-tone:first-child { flex: 1.25 1 0; }
+        /* 最低音：明显宽于其它几颗（用户 2026-10-24：再宽 40%，实测约 153px）。 */
+        .mp-tone:first-child { flex: 2.1 1 0; }
 
         .mp-tone:active,
         .mp-tone.is-down {
@@ -1929,176 +1943,168 @@
 
         <!-- ============ 视图二：和弦听辨（默认视图） ============ -->
         <div id="view-chord">
-            <div class="controls">
-                <div class="control-group">
-                    <label>长度：</label>
-                    <div class="seg" id="chord-length-seg" role="radiogroup" aria-label="长度">
-                        <span class="seg__thumb" aria-hidden="true"></span>
-                        <button type="button" class="seg__opt" data-len="8" role="radio" aria-checked="false">8 小节</button>
-                        <button type="button" class="seg__opt" data-len="12" role="radio" aria-checked="false">12 小节</button>
-                    </div>
+            <!-- ============ 设置页 ============
+                 视觉标准 = 用户 2026-10-24 的截图：三张灰色分组卡 + 顶部下划线 tab。
+                 控件只有三种：细边胶囊（互斥）、拨杆（开关）、四格充能（连续值）。
+                 ★ 数字档位（速度 / 强调低音 / 七和弦概率）整块就是一个按钮，点一下进一档。 -->
+            <div class="settings-shell">
+                <!-- 自然 / 离调：页内 tab。类名沿用 .seg/.seg__opt，切页逻辑（markSeg）零改动 -->
+                <div class="seg kind-tabs" id="chord-kind-seg" role="tablist" aria-label="和弦类型">
+                    <button type="button" class="seg__opt" data-kind="natural" role="tab" aria-checked="false">自然和弦</button>
+                    <button type="button" class="seg__opt" data-kind="applied" role="tab" aria-checked="false">离调和弦</button>
                 </div>
 
-                <div class="control-group">
-                    <label>配声模式：</label>
-                    <div class="seg" id="chord-voicing-seg" role="radiogroup" aria-label="配声模式">
-                        <span class="seg__thumb" aria-hidden="true"></span>
-                        <button type="button" class="seg__opt" data-voicing="triad" role="radio" aria-checked="false">键盘和声</button>
-                        <button type="button" class="seg__opt" data-voicing="fourpart" role="radio" aria-checked="false">四部和声</button>
-                    </div>
-                </div>
+                <div id="chord-page-natural" style="display: contents">
+                    <section class="sgroup">
+                        <h4 class="sgroup__title">记谱</h4>
 
-                <!-- 音高显示：固定音高 = 按真实调性记谱；相对音高 = 整段搬到 C 大调（无调号）
-                     ★ 只改大谱表的记谱，音频/卡片/听辨窗/罗马数字全都不动。 -->
-                <div class="control-group">
-                    <label>音高显示：</label>
-                    <button type="button" class="toggle-pill" id="chord-relative-pitch" role="switch" aria-checked="false">
-                        <svg class="ic" aria-hidden="true"><use href="#i-note"/></svg><span id="chord-relative-pitch-label">固定音高</span>
-                    </button>
-                </div>
-
-                <div class="tempo-control">
-                    <label>速度：</label>
-                    <input type="range" id="chord-tempo" min="40" max="120" value="70">
-                    <span class="tempo-value" id="chord-tempo-val">70</span>
-                    <span style="color: var(--text-tertiary);">BPM</span>
-                </div>
-
-                <!-- 强调低音（用户 2026-10-07）：把每小节的**最低音**（谱面最下面那个音）
-                     单独提亮，帮听辨时抓住低声部。滑块 0 = 完全不强调（默认）。
-                     ★ 只作用于主播放那一段离线渲染的音频；听辨辅助窗里试听的和弦保持原样。
-                     ★ 数值 = 低音增益提升的百分比；100% 时低音约 3 倍（上限见 BASS_EMPH_MAX）。 -->
-                <div class="tempo-control">
-                    <label>强调低音：</label>
-                    <input type="range" id="chord-bass-emph" min="0" max="100" step="5" value="0">
-                    <span class="tempo-value" id="chord-bass-emph-val">0</span>
-                </div>
-
-                <!-- 播放方式：连体椭圆滑块（三选一）。点一下就切成该方式，并把当前这段按该方式重放一遍。
-                     生成新一段统一走底部常驻播放器的「下一首」；页面不再放 生成/播放/停止 三个键
-                     （用户 2026-10-06 拍板）。 -->
-                <div class="seg" id="chord-play-seg" role="radiogroup" aria-label="播放方式">
-                    <span class="seg__thumb" aria-hidden="true"></span>
-                    <button type="button" class="seg__opt" data-mode="block" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-chord-block"/></svg>柱式</button>
-                    <button type="button" class="seg__opt" data-mode="arpeggio" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-arpeggio"/></svg>分解和弦</button>
-                    <button type="button" class="seg__opt" data-mode="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>单音</button>
-                </div>
-
-                <!-- 按住卡片时显示什么：两档二选一（用户 2026-10-06 拍板）。
-                       roman = 现状（罗马数字和弦标记 + 和弦音名 + 调性底行）
-                       bass  = 只给这个和弦低音在调内的简谱级数 + 左上角第几小节，底色中性灰
-                     ★ 只管页面里「按住卡片」看到的那张画；**锁屏封面恒为 roman**，
-                       不受这个开关影响（这条是用户明确要求的）。
-                     复用 .seg 那套连体椭圆滑块，不加新 CSS。 -->
-                <!-- 标题 + 两档滑块。用户 2026-10-07：只留标题「按住卡片显示的内容」，
-                     后面那段灰字说明删掉（设置页的说明文字太多了）。 -->
-                <div class="control-group" style="width: 100%; justify-content: center;">
-                    <label>按住卡片显示的内容</label>
-                </div>
-                <div class="seg" id="chord-reveal-seg" role="radiogroup" aria-label="按住卡片显示的内容">
-                    <span class="seg__thumb" aria-hidden="true"></span>
-                    <button type="button" class="seg__opt" data-reveal="roman" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-card"/></svg>和弦标记</button>
-                    <button type="button" class="seg__opt" data-reveal="bass" role="radio" aria-checked="false"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>低音级数</button>
-                </div>
-
-                <!-- 两颗独立开关（椭圆可选项，选中点亮），可以同时开着：
-                       连续播放 = 原「自动连播」（一段播完自动换新的一段）
-                       随身听    = 每小节最后一拍只弹这个和弦的根音（听根音对级数，不用看屏幕）
-                     role=switch + aria-checked：状态只在 JS 里改属性，样式全交给 CSS 的 [aria-checked="true"] -->
-                <div class="toggle-row">
-                    <button type="button" class="toggle-pill" id="chord-auto-continue" role="switch" aria-checked="false">
-                        <svg class="ic" aria-hidden="true"><use href="#i-repeat"/></svg>连续播放
-                    </button>
-                    <button type="button" class="toggle-pill" id="chord-portable" role="switch" aria-checked="false">
-                        <svg class="ic" aria-hidden="true"><use href="#i-headphones"/></svg>随身听模式
-                    </button>
-                </div>
-            </div>
-
-            <details class="more-settings" open>
-                <summary><svg class="ic ic-tri" aria-hidden="true"><use href="#i-chevron-right"/></svg><svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>和弦设置</summary>
-                <div class="more-settings-grid">
-                    <!-- 和弦类型：自然 / 离调 两页切换（连体椭圆滑块）。
-                         ★ 用 display:contents 包住自然页那几块：既不破坏 .more-settings-grid 的
-                           flex 布局（子项仍直接参与排版），又能整块 display:none 收起来。 -->
-                    <div class="seg-row">
-                        <div class="seg" id="chord-kind-seg" role="radiogroup" aria-label="和弦类型">
-                            <span class="seg__thumb" aria-hidden="true"></span>
-                            <button type="button" class="seg__opt" data-kind="natural" role="radio" aria-checked="false">自然和弦</button>
-                            <button type="button" class="seg__opt" data-kind="applied" role="radio" aria-checked="false">离调和弦</button>
+                        <div class="srow">
+                            <span>长度</span>
+                            <div class="seg" id="chord-length-seg" role="radiogroup" aria-label="长度">
+                                <button type="button" class="seg__opt" data-len="8" role="radio" aria-checked="false">8 小节</button>
+                                <button type="button" class="seg__opt" data-len="12" role="radio" aria-checked="false">12 小节</button>
+                            </div>
                         </div>
-                    </div>
 
-                    <div id="chord-page-natural" style="display: contents">
-                    <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>参与的级数 / 各级出现七和弦的概率：</label>
-                    </div>
+                        <div class="srow">
+                            <span>配声模式</span>
+                            <div class="seg" id="chord-voicing-seg" role="radiogroup" aria-label="配声模式">
+                                <button type="button" class="seg__opt" data-voicing="triad" role="radio" aria-checked="false">键盘和声</button>
+                                <button type="button" class="seg__opt" data-voicing="fourpart" role="radio" aria-checked="false">四部和声</button>
+                            </div>
+                        </div>
 
-                    <div class="degree-grid" id="degree-grid"></div>
+                        <!-- 音高显示：固定音高 = 按真实调性记谱；相对音高 = 整段搬到 C 大调（无调号）
+                             ★ 只改大谱表的记谱，音频 / 卡片 / 听辨窗 / 罗马数字全都不动。 -->
+                        <div class="srow">
+                            <span>音高显示</span>
+                            <span class="srow__side"><span id="chord-relative-pitch-label">固定音高</span>
+                                <button type="button" class="switch" id="chord-relative-pitch" role="switch" aria-checked="false" aria-label="音高显示"></button></span>
+                        </div>
 
-                    <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>转位：</label>
-                        <input type="checkbox" id="chord-inversion" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
-                        <span style="color: var(--text-tertiary); font-size: 12px;">
-                            关闭＝全部原位；开启＝有概率转位，并做和弦间平稳连接
-                        </span>
-                    </div>
+                        <div class="srow">
+                            <span>转位</span>
+                            <input type="checkbox" class="switch" id="chord-inversion" title="关闭＝全部原位；开启＝有概率转位，并做和弦间平稳连接">
+                        </div>
 
-                    <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>6₄ 和弦（四六和弦）：</label>
-                        <input type="checkbox" id="chord-second-inv" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
-                        <span style="color: var(--text-tertiary); font-size: 12px;">
-                            不勾选＝所有级数都不出现 6₄；勾选＝允许 6₄（需先开启转位）
-                        </span>
-                    </div>
+                        <div class="srow">
+                            <span>6₄ 和弦</span>
+                            <input type="checkbox" class="switch" id="chord-second-inv" title="不勾选＝所有级数都不出现 6₄；勾选＝允许 6₄（需先开启转位）">
+                        </div>
+                    </section>
 
-                    <div class="control-group" style="width: 100%; justify-content: center;">
-                        <label>使用用户数据优化题库：</label>
-                        <input type="checkbox" id="chord-adaptive" style="width: 18px; height: 18px; cursor: pointer; accent-color: var(--accent);">
-                        <span style="color: var(--text-tertiary); font-size: 12px;">
-                            关闭＝每个级数等概率；开启＝按你的历史错误率调整出题概率（错得多的多出一点，正确率回升就自动降回来）。数据在底部「数据库」页里看
-                        </span>
-                    </div>
-                    </div><!-- /#chord-page-natural -->
+                    <section class="sgroup">
+                        <h4 class="sgroup__title">播放</h4>
 
-                    <!-- ===== 离调页 =====
-                         离调 = 把调内某个和弦临时当成主和弦，套用它那个调的属/下属功能，
-                         随后立刻回到原调（不做终止，所以不是转调）。
-                         ★ 离调是**叠加**在自然进行上的：自然页那些设置继续生效。 -->
-                    <div id="chord-page-applied" style="display: none; width: 100%">
-                        <div class="toggle-row">
-                            <button type="button" class="toggle-pill" id="chord-applied-enable" role="switch" aria-checked="false">
-                                <svg class="ic" aria-hidden="true"><use href="#i-sliders"/></svg>启用离调和弦
+                        <!-- 播放方式：三选一。生成新一段统一走迷你播放器的「下一首」，
+                             页面不再放 生成 / 播放 / 停止 三个键（用户 2026-10-06 拍板）。 -->
+                        <div class="srow">
+                            <span>播放方式</span>
+                            <div class="seg" id="chord-play-seg" role="radiogroup" aria-label="播放方式">
+                                <button type="button" class="seg__opt" data-mode="block" role="radio" aria-checked="false">柱式</button>
+                                <button type="button" class="seg__opt" data-mode="arpeggio" role="radio" aria-checked="false">分解和弦</button>
+                                <button type="button" class="seg__opt" data-mode="bass" role="radio" aria-checked="false">单音</button>
+                            </div>
+                        </div>
+
+                        <!-- 速度：40 / 50 / 65 / 80 四档，格子里不写字，右侧给读数 -->
+                        <div class="srow">
+                            <span>速度</span>
+                            <button type="button" class="meter" id="chord-tempo" aria-label="速度，点按切换下一档">
+                                <i></i><i></i><i></i><i></i><span class="meter__val" id="chord-tempo-val">65 bpm</span>
                             </button>
                         </div>
 
-                        <div class="control-group" style="width: 100%; justify-content: center;">
-                            <label>离调目标：</label>
-                            <span style="color: var(--text-tertiary); font-size: 12px;">被临时当成主和弦的那一级</span>
+                        <!-- 强调低音（用户 2026-10-07）：把每小节的**最低音**（谱面最下面那个音）
+                             单独提亮，帮听辨时抓住低声部。四档 = 关闭 / 轻微 / 中等 / 明显。
+                             ★ 只作用于主播放那一段离线渲染的音频；听辨辅助窗里试听的和弦保持原样。 -->
+                        <div class="srow">
+                            <span>强调低音</span>
+                            <button type="button" class="meter" id="chord-bass-emph" aria-label="强调低音，点按切换下一档">
+                                <i></i><i></i><i></i><i></i><span class="meter__val" id="chord-bass-emph-val">关闭</span>
+                            </button>
                         </div>
-                        <div class="seg-row">
+
+                        <!-- 两颗独立开关，可以同时开着：
+                               连续播放 = 原「自动连播」（一段播完自动换新的一段）
+                               随身听    = 每小节最后一拍只弹这个和弦的根音 -->
+                        <div class="srow">
+                            <span>连续播放</span>
+                            <button type="button" class="switch" id="chord-auto-continue" role="switch" aria-checked="false" aria-label="连续播放"></button>
+                        </div>
+
+                        <div class="srow">
+                            <span>随身听模式</span>
+                            <button type="button" class="switch" id="chord-portable" role="switch" aria-checked="false" aria-label="随身听模式"></button>
+                        </div>
+                    </section>
+
+                    <section class="sgroup">
+                        <h4 class="sgroup__title">答题</h4>
+
+                        <!-- 按住卡片时显示什么：和弦标记（罗马数字）/ 低音级数（中性灰底）
+                             ★ 只管页面里「按住卡片」那张画；锁屏封面恒为罗马数字（用户明确要求）。 -->
+                        <div class="srow">
+                            <span>按住卡片显示</span>
+                            <div class="seg" id="chord-reveal-seg" role="radiogroup" aria-label="按住卡片显示的内容">
+                                <button type="button" class="seg__opt" data-reveal="roman" role="radio" aria-checked="false">和弦标记</button>
+                                <button type="button" class="seg__opt" data-reveal="bass" role="radio" aria-checked="false">低音级数</button>
+                            </div>
+                        </div>
+
+                        <!-- 参与级数：默认折叠，收起时只给「N 项已选」；展开是 7 行（概率 + 参与） -->
+                        <div class="srow srow--btn" id="chord-degree-toggle" role="button" tabindex="0"
+                             aria-expanded="false" aria-controls="degree-grid">
+                            <span>参与级数</span>
+                            <span class="srow__side"><span id="chord-degree-count">7 项已选</span>
+                                <span class="srow__chev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-right"/></svg></span></span>
+                        </div>
+                        <div class="degree-list" id="degree-grid" hidden></div>
+
+                        <!-- 使用用户数据优化题库：关闭＝每级等概率；开启＝按历史错误率调出题权重 -->
+                        <div class="srow">
+                            <span>优化题库</span>
+                            <input type="checkbox" class="switch" id="chord-adaptive" title="关闭＝每个级数等概率；开启＝按你的历史错误率调整出题概率">
+                        </div>
+                    </section>
+                </div><!-- /#chord-page-natural -->
+
+                <!-- ===== 离调页 =====
+                     离调 = 把调内某个和弦临时当成主和弦，套用它那个调的属/下属功能，
+                     随后立刻回到原调（不做终止，所以不是转调）。
+                     ★ 离调是**叠加**在自然进行上的：自然页那些设置继续生效。 -->
+                <div id="chord-page-applied" style="display: none">
+                    <section class="sgroup">
+                        <h4 class="sgroup__title">离调</h4>
+
+                        <div class="srow">
+                            <span>启用离调和弦</span>
+                            <button type="button" class="switch" id="chord-applied-enable" role="switch" aria-checked="false" aria-label="启用离调和弦"></button>
+                        </div>
+
+                        <div class="srow">
+                            <span>离调目标</span>
                             <div class="seg" id="chord-applied-target-seg" role="radiogroup" aria-label="离调目标">
-                                <span class="seg__thumb" aria-hidden="true"></span>
                                 <button type="button" class="seg__opt" data-target="simple" role="radio" aria-checked="false">简单（Ⅳ Ⅴ）</button>
                                 <button type="button" class="seg__opt" data-target="complex" role="radio" aria-checked="false">复杂（Ⅱ—Ⅵ）</button>
                             </div>
                         </div>
 
-                        <div class="control-group" style="width: 100%; justify-content: center;">
-                            <label>和弦进行：</label>
-                            <span style="color: var(--text-tertiary); font-size: 12px;">可多选 · 离调那几小节怎么走向目标</span>
-                        </div>
-                        <div class="toggle-row" id="chord-applied-prog">
-                            <button type="button" class="toggle-pill" data-prog="5-1" role="switch" aria-checked="false">5⁷ → 1</button>
-                            <button type="button" class="toggle-pill" data-prog="2-5-1" role="switch" aria-checked="false">2⁷ → 5⁷ → 1</button>
+                        <!-- 和弦进行（多选）：至少留一项 -->
+                        <div class="srow">
+                            <span>和弦进行</span>
+                            <div class="toggle-row" id="chord-applied-prog">
+                                <button type="button" class="toggle-pill" data-prog="5-1" role="switch" aria-checked="false">5⁷ → 1</button>
+                                <button type="button" class="toggle-pill" data-prog="2-5-1" role="switch" aria-checked="false">2⁷ → 5⁷ → 1</button>
+                            </div>
                         </div>
 
                         <!-- 当前可用和弦预览：直接调生成侧的 appliedVocabulary，
                              所以预览列出来的和弦与真出题时用的**永远是同一份**。 -->
                         <div class="applied-preview" id="chord-applied-preview"></div>
-                    </div><!-- /#chord-page-applied -->
-                </div>
-            </details>
+                    </section>
+                </div><!-- /#chord-page-applied -->
+            </div><!-- /.settings-shell -->
 
             <div class="playback-info" id="chord-info">点下面的播放方式开始</div>
             <div class="playback-info" id="chord-render-info" style="display: none; color: var(--accent); min-height: 20px;"></div>

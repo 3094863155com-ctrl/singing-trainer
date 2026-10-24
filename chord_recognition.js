@@ -54,7 +54,8 @@
 
     const DEFAULT_SETTINGS = {
         length: 8,
-        tempo: 70,
+        // 速度四档 40 / 50 / 65 / 80（用户 2026-10-24 定），默认取第三档 65
+        tempo: 65,
         allowInversion: false,
         // 是否允许出现 6₄（四六和弦 = 三和弦第二转位，五音在低音）
         // 默认 false：所有级数都不出 6₄（传统和声里 6₄ 属装饰性用法，不作为独立和弦频繁出现）
@@ -1071,6 +1072,13 @@
     const APPLIED_PROGRESSIONS = { '5-1': [5], '2-5-1': [2, 5] };
     const APPLIED_PROGRESSION_KEYS = ['5-1', '2-5-1'];
 
+    // 一段里放几组离调（用户 2026-10-24：8 小节两组、12 小节三组）。
+    //   ★ 凑不满就少一组，不硬凑：每组要占"进行长度 + 1"小节（末尾那一小节是解决），
+    //     首尾还各有保护，所以 8 小节勾 2-5-1 时只能出 1 组、12 小节勾 2-5-1 时只能出 2 组。
+    const APPLIED_GROUPS_BY_LEN = { 8: 2, 12: 3 };
+    // 组与组之间强制留几小节自然和弦（0 = 允许紧挨着，离调更密）
+    const APPLIED_GROUP_GAP = 0;
+
     // 勾选的进行（过滤掉不认识的键；一项都没勾时兜底 5-1，保证一定出得东西）
     function settingsProgressions(settings) {
         const raw = (settings && Array.isArray(settings.appliedProgressions))
@@ -1129,42 +1137,86 @@
 
     // 规划"哪几小节放离调"。返回事件数组，每个事件占 locals.length 小节，
     //   紧接的那一小节是解决到达的目标和弦（原有的自然和弦被它取代）。
-    //   ★ 不变量：不碰第 1 小节与最后两小节、两组之间至少隔 1 小节自然和弦、
-    //     同一段里目标级数不重复。
+    //   ★ 不变量：不碰第 0 / 1 小节、最后一小节留终止 Ⅰ、
+    //     组与组之间不再强制留自然和弦（APPLIED_GROUP_GAP = 0）。
+    //   ★ 为什么用"先抽组、再回溯放位置"：一组要占 len+1 小节（末尾那小节是解决），
+    //     8 小节两组 5-1 只有 (2,4) 一种排法、12 小节三组 2-5-1 只有 (2,5,8)，
+    //     纯随机撒点几乎撞不进去（实测只有 1/3 能凑满）。回溯能稳定落到可行解。
     function planAppliedEvents(scale, seq, settings) {
         const N = seq.length;
-        const want = N >= 16 ? 2 : 1;
+        const want = APPLIED_GROUPS_BY_LEN[N] || 1;
         const targetMode = settings.appliedTargetMode || 'simple';
-        // 勾选的进行语料库（多选）。2-5-1 比 5-1 多占一小节，排布时按实际长度算。
         const progs = settingsProgressions(settings);
         const poolAll = (targetMode === 'complex' ? [2, 3, 4, 5, 6] : [4, 5])
             .filter((t) => settings.degrees && settings.degrees[t]);
         const pool = poolAll.length ? poolAll : [4, 5];
-        const used = new Set();
-        const events = [];
-        for (let attempt = 0; attempt < want * 12 && events.length < want; attempt++) {
-            const free = pool.filter((t) => !used.has(t));
-            if (!free.length) break;
-            const target = free[Math.floor(Math.random() * free.length)];
-            const locals = pickLocalSeq(scale, target, progs);
-            if (!locals) continue;
-            // 解决到达的小节下标上限：目标 Ⅴ 允许落在终止的 Ⅴ 上（5/Ⅴ→Ⅴ→Ⅰ），
-            //   其它目标要留出终止 Ⅴ 与末尾 Ⅰ。
-            const maxResolve = (target === 5) ? N - 2 : N - 3;
-            const maxStart = maxResolve - locals.length;
-            if (maxStart < 2) continue;                       // 不碰第 0 / 1 小节
-            let start = 2 + Math.floor(Math.random() * (maxStart - 1));
-            if (target === 5 && Math.random() < 0.5) start = maxStart;   // 一半概率贴近终止
-            const lo = start - 1;
-            const hi = start + locals.length + 1;             // 前后各留 1 小节自然和弦
-            if (events.some((e) => lo <= e.hi && hi >= e.lo)) continue;
-            events.push({
-                start, locals, target, lo, hi,
-                groupId: 'a' + (events.length + 1)
-            });
-            used.add(target);
+        const lastResolve = N - 2;          // 解决小节最晚落在这里，最后一小节留给终止 Ⅰ
+
+        const shuffle = (arr) => {
+            for (let i = arr.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+            }
+            return arr;
+        };
+
+        // 先按目标组数试，放不下就少一组（用户选的"进行优先"），最少也要凑出 1 组
+        for (let goal = want; goal >= 1; goal--) {
+            for (let round = 0; round < 30; round++) {
+                // ---- ① 抽 goal 组：目标是哪一级 + 走哪条进行 ----
+                const draft = [];
+                const usedT = new Set();
+                for (let g = 0; g < goal; g++) {
+                    let free = pool.filter((t) => !usedT.has(t));
+                    if (!free.length) free = pool.slice();   // 组数比目标池多时允许重复目标
+                    const target = free[Math.floor(Math.random() * free.length)];
+                    let locals = null;
+                    for (const key of shuffle(progs.slice())) {
+                        const cand = pickLocalSeq(scale, target, [key]);
+                        if (cand) { locals = cand; break; }
+                    }
+                    if (!locals) break;
+                    usedT.add(target);
+                    draft.push({ target, locals });
+                }
+                if (draft.length < goal) continue;
+
+                // ---- ② 回溯放起点（组数 ≤ 3、小节数 ≤ 12，穷举代价可以忽略）----
+                const placed = [];
+                const fits = (s0, len) => placed.every((q) => {
+                    const qEnd = q.start + q.locals.length + APPLIED_GROUP_GAP;
+                    const myEnd = s0 + len + APPLIED_GROUP_GAP;
+                    return s0 > qEnd || myEnd < q.start;
+                });
+                const dfs = (g) => {
+                    if (g === draft.length) return true;
+                    const len = draft[g].locals.length;
+                    const cands = [];
+                    for (let s0 = 2; s0 + len <= lastResolve; s0++) cands.push(s0);
+                    shuffle(cands);
+                    for (let i = 0; i < cands.length; i++) {
+                        const s0 = cands[i];
+                        if (!fits(s0, len)) continue;
+                        placed.push({ start: s0, locals: draft[g].locals, target: draft[g].target });
+                        if (dfs(g + 1)) return true;
+                        placed.pop();
+                    }
+                    return false;
+                };
+                if (!dfs(0)) continue;
+
+                placed.sort((a, b) => a.start - b.start);
+                return placed.map((q, i) => ({
+                    start: q.start,
+                    locals: q.locals,
+                    target: q.target,
+                    lo: q.start,
+                    hi: q.start + q.locals.length + APPLIED_GROUP_GAP,
+                    groupId: 'a' + (i + 1)
+                }));
+            }
         }
-        return events;
+        return [];
     }
 
     // 把事件摊平成「小节下标 → 和弦描述」。seventh 在这里一次性决定（之后不再改）。
@@ -2385,7 +2437,10 @@
         //     迁移只在**这一层**做，生成层保持"传多少用多少"（验收脚本会直接传 16）。
         if (s.length === 8 || s.length === 12) settings.length = s.length;
         else if (s.length === 16) settings.length = 12;
-        if (typeof s.tempo === 'number' && s.tempo >= 40 && s.tempo <= 120) settings.tempo = s.tempo;
+        // 速度只剩 40 / 50 / 65 / 80 四档（用户 2026-10-24）：旧配置的连续值就近落档
+        if (typeof s.tempo === 'number' && isFinite(s.tempo)) {
+            settings.tempo = TEMPO_STEPS[tempoIndex(Math.max(40, Math.min(120, s.tempo)))];
+        }
         if (typeof s.allowInversion === 'boolean') settings.allowInversion = s.allowInversion;
         if (typeof s.allowSecondInv === 'boolean') settings.allowSecondInv = s.allowSecondInv;
         if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
@@ -2394,9 +2449,10 @@
         if (typeof s.adaptiveFromStats === 'boolean') settings.adaptiveFromStats = s.adaptiveFromStats;
         // ★ 白名单登记：枚举值一定要显式收，否则 localStorage 里存着也会被悄悄丢掉。
         if (s.revealMode === 'roman' || s.revealMode === 'bass') settings.revealMode = s.revealMode;
-        // 强调低音（0..100，整数；老配置里没有这个键就是默认 0）
+        // 强调低音只剩四档 0 / 10 / 30 / 75（关闭 / 轻微 / 中等 / 明显）：旧值就近落档
         if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
-            settings.bassEmphasis = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
+            const v = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
+            settings.bassEmphasis = EMPH_STEPS[emphIndex(v)];
         }
         // ---- 离调和弦（三个键都要登记，否则被静默丢弃 → 刷新后设置"自己变回去了"）----
         if (typeof s.appliedEnabled === 'boolean') settings.appliedEnabled = s.appliedEnabled;
@@ -2424,6 +2480,9 @@
         if (s.seventhProb && typeof s.seventhProb === 'object') {
             for (let d = 1; d <= 7; d++) {
                 const v = parseInt(s.seventhProb[d]);
+                // ★ 不在这里吸附到五档：默认值本来就是 40 / 10 / 70 / 30，
+                //   吸附会改掉生成结果（回归基线会跟着变）。读数按真实值显示，
+                //   充能格按最近的档显示，点一下才真正落到档位上。
                 if (!isNaN(v)) settings.seventhProb[d] = Math.max(0, Math.min(100, v));
             }
         }
@@ -2918,10 +2977,74 @@
 
     let els = null;
 
+    // ============================================================
+    // 数字档位（用户 2026-10-24）：速度 / 强调低音 / 七和弦概率
+    // ------------------------------------------------------------
+    // 都改成「四格（或五格）充能条 + 右侧读数」，整块是一个按钮：
+    // 点一下进一档，到头循环回第一档。不用原生滑块（难点准、样式还得另养一套）。
+    // 想改档位只动下面这几张表。
+    // ============================================================
+    const TEMPO_STEPS = [40, 50, 65, 80];
+    const EMPH_STEPS = [0, 10, 30, 75];
+    const EMPH_LABELS = ['关闭', '轻微', '中等', '明显'];
+    const EMPH_FILL = [0, 1, 2, 4];          // 关闭 0 格 / 轻微 1 / 中等 2 / 明显 4
+    const TEMPO_FILL = [1, 2, 3, 4];
+    const DEG_STEPS = [0, 25, 50, 75, 100];
+    const DEG_FILL = [0, 1, 2, 3, 4];
+
+    function tempoLabel(v) { return v + ' bpm'; }
+
+    function emphIndex(v) {
+        const at = EMPH_STEPS.indexOf(v);
+        if (at >= 0) return at;
+        // 旧配置（0..100 连续值）就近落到四档
+        let best = 0;
+        for (let i = 1; i < EMPH_STEPS.length; i++) {
+            if (Math.abs(EMPH_STEPS[i] - v) < Math.abs(EMPH_STEPS[best] - v)) best = i;
+        }
+        return best;
+    }
+
+    function tempoIndex(v) {
+        const at = TEMPO_STEPS.indexOf(v);
+        if (at >= 0) return at;
+        let best = 0;
+        for (let i = 1; i < TEMPO_STEPS.length; i++) {
+            if (Math.abs(TEMPO_STEPS[i] - v) < Math.abs(TEMPO_STEPS[best] - v)) best = i;
+        }
+        return best;
+    }
+
+    function degIndex(v) {
+        const at = DEG_STEPS.indexOf(v);
+        if (at >= 0) return at;
+        let best = 0;
+        for (let i = 1; i < DEG_STEPS.length; i++) {
+            if (Math.abs(DEG_STEPS[i] - v) < Math.abs(DEG_STEPS[best] - v)) best = i;
+        }
+        return best;
+    }
+
+    // 按 fill 表给前 N 格加 .on（格数由档位表决定，不按百分比算）
+    function paintMeter(btn, idx, fill) {
+        if (!btn) return;
+        const cells = btn.querySelectorAll('i');
+        const n = fill[idx] || 0;
+        for (let i = 0; i < cells.length; i++) {
+            cells[i].classList.toggle('on', i < n);
+        }
+    }
+
+    function cycleMeter(btn, steps, cur, done) {
+        const i = (steps.indexOf(cur) >= 0) ? steps.indexOf(cur) : 0;
+        done(steps[(i + 1) % steps.length]);
+    }
+
     function cacheEls() {
         els = {
             lengthSeg: document.getElementById('chord-length-seg'),
-            tempo: document.getElementById('chord-tempo'),
+            // 速度：四格充能条（整块是按钮，点一下进一档）+ 右侧读数
+            tempoMeter: document.getElementById('chord-tempo'),
             tempoVal: document.getElementById('chord-tempo-val'),
             voicingSeg: document.getElementById('chord-voicing-seg'),
             // 音高显示：固定音高 / 相对音高（一颗 toggle-pill，role=switch）
@@ -2931,13 +3054,16 @@
             playSeg: document.getElementById('chord-play-seg'),
             // 按住卡片显示什么：两档连体椭圆滑块（roman / bass）
             revealSeg: document.getElementById('chord-reveal-seg'),
-            // 强调低音：滑块 + 右侧读数
-            bassEmph: document.getElementById('chord-bass-emph'),
+            // 强调低音：四格充能条 + 右侧档名
+            bassEmphMeter: document.getElementById('chord-bass-emph'),
             bassEmphVal: document.getElementById('chord-bass-emph-val'),
             // 两颗椭圆开关（都是 button[role=switch]，不是 checkbox —— 用户 2026-10-06 拍板）
             autoContinue: document.getElementById('chord-auto-continue'),
             portable: document.getElementById('chord-portable'),
             grid: document.getElementById('degree-grid'),
+            // 「参与级数」折叠行：收起时只显示 N 项已选
+            degreeToggle: document.getElementById('chord-degree-toggle'),
+            degreeCount: document.getElementById('chord-degree-count'),
             inversion: document.getElementById('chord-inversion'),
             secondInv: document.getElementById('chord-second-inv'),
             adaptive: document.getElementById('chord-adaptive'),
@@ -2998,62 +3124,80 @@
         };
     }
 
+    // 级数配置：7 行（用户 2026-10-24 截图定稿）
+    //   [级数]  [五格概率条 · 点一下进一档]  [百分比]  [参与拨杆]
+    //   整块默认折叠，收起时那一行只显示「N 项已选」。
     function buildDegreeGrid() {
         if (!els.grid) return;
         els.grid.innerHTML = '';
         for (let d = 1; d <= 7; d++) {
-            const card = document.createElement('div');
-            card.className = 'degree-card';
-            card.dataset.degree = String(d);
+            const row = document.createElement('div');
+            row.className = 'drow';
+            row.dataset.degree = String(d);
 
-            const nameLabel = document.createElement('label');
-            nameLabel.className = 'degree-name';
+            const name = document.createElement('span');
+            name.className = 'drow__name';
+            name.textContent = DEGREE_CHOICES[d - 1];
+
+            const prob = document.createElement('button');
+            prob.type = 'button';
+            prob.className = 'meter meter--sm';
+            prob.dataset.role = 'prob';
+            prob.dataset.degree = String(d);
+            for (let i = 0; i < DEG_STEPS.length; i++) prob.appendChild(document.createElement('i'));
+            const val = document.createElement('span');
+            val.className = 'meter__val';
+            val.dataset.role = 'probVal';
+            val.dataset.degree = String(d);
+            prob.appendChild(val);
+
             const cb = document.createElement('input');
             cb.type = 'checkbox';
+            cb.className = 'switch switch--sm';
             cb.dataset.role = 'pick';
             cb.dataset.degree = String(d);
             cb.checked = !!settings.degrees[d];
-            cb.style.cssText = 'width:16px;height:16px;cursor:pointer;accent-color:var(--accent);';
+            cb.setAttribute('aria-label', '第 ' + d + ' 级是否参与');
             if (d === 1) { cb.checked = true; cb.disabled = true; }
-            const span = document.createElement('span');
-            span.textContent = DEGREE_CHOICES[d - 1];
-            nameLabel.appendChild(cb);
-            nameLabel.appendChild(span);
 
-            const prob = document.createElement('input');
-            prob.type = 'range';
-            prob.className = 'degree-prob';
-            prob.dataset.role = 'prob';
-            prob.dataset.degree = String(d);
-            prob.min = '0';
-            prob.max = '100';
-            prob.step = '5';
-            prob.value = String(settings.seventhProb[d] || 0);
+            row.appendChild(name);
+            row.appendChild(prob);
+            row.appendChild(cb);
+            els.grid.appendChild(row);
 
-            const val = document.createElement('span');
-            val.className = 'degree-prob-val';
-            val.dataset.role = 'probVal';
-            val.dataset.degree = String(d);
-            val.textContent = (settings.seventhProb[d] || 0) + '%';
-
-            const hint = document.createElement('span');
-            hint.className = 'degree-hint';
-            hint.textContent = '七和弦概率';
-
-            card.appendChild(nameLabel);
-            card.appendChild(prob);
-            card.appendChild(val);
-            card.appendChild(hint);
-            els.grid.appendChild(card);
-
+            paintDegreeRow(d);
             syncCard(d);
         }
+        updateDegreeCount();
+    }
+
+    // 单行的概率条与百分比
+    //   ★ 读数写**真实值**（默认值 40/10/70/30 不在五档上），格数按最近的档画；
+    //     点一下才会真正落到 0 / 25 / 50 / 75 / 100。
+    function paintDegreeRow(d) {
+        if (!els.grid) return;
+        const row = els.grid.querySelector(`.drow[data-degree="${d}"]`);
+        if (!row) return;
+        const raw = settings.seventhProb[d] || 0;
+        // 默认值 40/10/70/30 不在五档上：非零至少亮一格，否则"10% 却全空"看着自相矛盾
+        const idx = raw > 0 ? Math.max(1, degIndex(raw)) : 0;
+        paintMeter(row.querySelector('[data-role="prob"]'), idx, DEG_FILL);
+        const val = row.querySelector('[data-role="probVal"]');
+        if (val) val.textContent = raw + '%';
     }
 
     function syncCard(d) {
         if (!els.grid) return;
-        const card = els.grid.querySelector(`.degree-card[data-degree="${d}"]`);
+        const card = els.grid.querySelector(`.drow[data-degree="${d}"]`);
         if (card) card.classList.toggle('off', !settings.degrees[d] && d !== 1);
+    }
+
+    // 折叠行右侧的「N 项已选」
+    function updateDegreeCount() {
+        if (!els.degreeCount) return;
+        let n = 0;
+        for (let d = 1; d <= 7; d++) if (settings.degrees[d]) n++;
+        els.degreeCount.textContent = n + ' 项已选';
     }
 
     function renderInfoText(text, isError) {
@@ -3461,6 +3605,9 @@
             b.dataset.idx = String(i);
             b.textContent = String(i + 1);
             b.setAttribute('aria-label', '第 ' + (i + 1) + ' 个音（从低到高）· 试听');
+            // 最低音那颗明显更宽（用户 2026-10-24：再宽 40%）。
+            //   4 音时 flex 2.1 ≈ 153px；3 音（键盘和声）时用 1.6，免得一颗占掉一半以上。
+            if (i === 0) b.style.flex = (midis.length >= 4) ? '2.1 1 0' : '1.6 1 0';
             b.addEventListener('pointerdown', (e) => {
                 // 拦掉后续 click：这一排只负责发声，不触发任何"跳小节"之类的导航
                 e.preventDefault();
@@ -4380,38 +4527,51 @@
             markSeg(els.voicingSeg, (b) => b.dataset.voicing === settings.voicingMode);
         }
 
-        if (els.tempo) {
-            els.tempo.value = String(settings.tempo);
-            if (els.tempoVal) els.tempoVal.textContent = String(settings.tempo);
-            els.tempo.addEventListener('input', (e) => {
-                settings.tempo = parseInt(e.target.value, 10);
-                if (els.tempoVal) els.tempoVal.textContent = String(settings.tempo);
-                saveSettings();
-                updateHint();
-                invalidateRenderedAudio('速度已改为 ' + settings.tempo + ' BPM，点播放键重新渲染');
+        // 速度：四格充能条，点一下进一档（40 → 50 → 65 → 80 → 40）
+        //   以前是原生滑块，input 事件每次都 invalidateRenderedAudio + 停播；
+        //   现在只有"落定一档"才作废一次，且不再有拖动中反复停播的问题。
+        if (els.tempoMeter) {
+            const paintTempo = () => {
+                const i = tempoIndex(settings.tempo);
+                paintMeter(els.tempoMeter, i, TEMPO_FILL);
+                if (els.tempoVal) els.tempoVal.textContent = tempoLabel(TEMPO_STEPS[i]);
+                els.tempoMeter.setAttribute('aria-label', '速度 ' + TEMPO_STEPS[i] + ' BPM，点按切换下一档');
+            };
+            paintTempo();
+            els.tempoMeter.addEventListener('click', () => {
+                cycleMeter(els.tempoMeter, TEMPO_STEPS, settings.tempo, (v) => {
+                    settings.tempo = v;
+                    paintTempo();
+                    saveSettings();
+                    updateHint();
+                    invalidateRenderedAudio('速度已改为 ' + v + ' BPM，点播放键重新渲染');
+                });
             });
         }
 
-        // 强调低音（0..100）。拖动中只改读数（不重渲染 —— 每动一格渲染一次会卡）；
-        //   松手（change）才落盘，并按"在播就地重渲染续播 / 没播作废待播"处理。
-        //   音频是**离线渲染**好的成品，改任何音量参数都必须重渲染才听得出来。
-        if (els.bassEmph) {
-            els.bassEmph.value = String(settings.bassEmphasis);
-            if (els.bassEmphVal) els.bassEmphVal.textContent = String(settings.bassEmphasis);
-            const readEmph = (e) => {
-                settings.bassEmphasis = Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0));
-                if (els.bassEmphVal) els.bassEmphVal.textContent = String(settings.bassEmphasis);
+        // 强调低音：四格 = 关闭 / 轻微 / 中等 / 明显（0 / 10 / 30 / 75）
+        //   音频是**离线渲染**好的成品，改任何音量参数都必须重渲染才听得出来；
+        //   在播就地重渲染续播，没播就作废待播。
+        if (els.bassEmphMeter) {
+            const paintEmph = () => {
+                const i = emphIndex(settings.bassEmphasis);
+                paintMeter(els.bassEmphMeter, i, EMPH_FILL);
+                if (els.bassEmphVal) els.bassEmphVal.textContent = EMPH_LABELS[i];
+                els.bassEmphMeter.setAttribute('aria-label', '强调低音 ' + EMPH_LABELS[i] + '，点按切换下一档');
             };
-            els.bassEmph.addEventListener('input', readEmph);
-            els.bassEmph.addEventListener('change', (e) => {
-                readEmph(e);
-                saveSettings();
-                if (mpIsPlaying()) {
-                    const at = Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()));
-                    doPlay(lastPlayMode, at);
-                } else {
-                    invalidateRenderedAudio('强调低音已改为 ' + settings.bassEmphasis + '%，点播放键用新设置重新渲染');
-                }
+            paintEmph();
+            els.bassEmphMeter.addEventListener('click', () => {
+                cycleMeter(els.bassEmphMeter, EMPH_STEPS, settings.bassEmphasis, (v) => {
+                    settings.bassEmphasis = v;
+                    paintEmph();
+                    saveSettings();
+                    if (mpIsPlaying()) {
+                        const at = Math.max(0, Math.floor(chordAudioEl.currentTime / measureDuration()));
+                        doPlay(lastPlayMode, at);
+                    } else {
+                        invalidateRenderedAudio('强调低音已改为「' + EMPH_LABELS[emphIndex(v)] + '」，点播放键用新设置重新渲染');
+                    }
+                });
             });
         }
 
@@ -4430,7 +4590,7 @@
             if (!els.secondInv) return;
             const usable = settings.allowInversion;
             els.secondInv.disabled = !usable;
-            const wrap = els.secondInv.closest('.control-group');
+            const wrap = els.secondInv.closest('.srow');
             if (wrap) wrap.style.opacity = usable ? '' : '0.45';
         }
 
@@ -4462,18 +4622,36 @@
                 const d = parseInt(t.dataset.degree, 10);
                 settings.degrees[d] = t.checked;
                 syncCard(d);
+                updateDegreeCount();
                 saveSettings();
                 updateAppliedPreview();     // 目标级数池跟着自然页的勾选走
             });
-            els.grid.addEventListener('input', (e) => {
-                const t = e.target;
-                if (t.dataset.role !== 'prob') return;
-                const d = parseInt(t.dataset.degree, 10);
-                settings.seventhProb[d] = parseInt(t.value, 10);
-                const val = els.grid.querySelector(`[data-role="probVal"][data-degree="${d}"]`);
-                if (val) val.textContent = t.value + '%';
-                saveSettings();
-                updateAppliedPreview();
+            // 七和弦概率：五格条点一下进一档（0 / 25 / 50 / 75 / 100）
+            els.grid.addEventListener('click', (e) => {
+                const hit = e.target.closest ? e.target.closest('[data-role="prob"]') : null;
+                if (!hit) return;
+                const d = parseInt(hit.dataset.degree, 10);
+                const raw = settings.seventhProb[d] || 0;
+                cycleMeter(hit, DEG_STEPS, DEG_STEPS[degIndex(raw)], (v) => {
+                    settings.seventhProb[d] = v;
+                    paintDegreeRow(d);
+                    saveSettings();
+                    updateAppliedPreview();
+                });
+            });
+        }
+
+        // 参与级数：折叠行（收起时只显示「N 项已选」）
+        if (els.degreeToggle && els.grid) {
+            const toggleDegrees = () => {
+                const open = els.grid.hidden;
+                els.grid.hidden = !open;
+                els.degreeToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+                els.degreeToggle.classList.toggle('is-open', open);
+            };
+            els.degreeToggle.addEventListener('click', toggleDegrees);
+            els.degreeToggle.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDegrees(); }
             });
         }
 
@@ -6176,6 +6354,19 @@
         _groupViable: groupViable,
         _settingsProgressions: settingsProgressions,
         _appliedProgressions: APPLIED_PROGRESSIONS,
+        _appliedGroupsByLen: APPLIED_GROUPS_BY_LEN,
+        _appliedGroupGap: APPLIED_GROUP_GAP,
+        // 数字档位（验收用）：速度 4 档 / 强调低音 4 档 / 七和弦概率 5 档
+        _tempoSteps: TEMPO_STEPS,
+        _emphSteps: EMPH_STEPS,
+        _emphLabels: EMPH_LABELS,
+        _emphFill: EMPH_FILL,
+        _degSteps: DEG_STEPS,
+        _degFill: DEG_FILL,
+        _tempoIndex: tempoIndex,
+        _emphIndex: emphIndex,
+        _degIndex: degIndex,
+        _bassEmphasisFactor: bassEmphasisFactor,
         _appliedVocabulary: appliedVocabulary,
         _planAppliedEvents: planAppliedEvents,
         _getAppliedBrackets: () => appliedBrackets.slice(),
