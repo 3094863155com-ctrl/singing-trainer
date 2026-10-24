@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=33"></script>
+<script src="chord_recognition.js?v=34"></script>
     <style>
         * {
             margin: 0;
@@ -239,7 +239,18 @@
            用原生滑块既难点准又要跟着调样式，改成点一下循环最省事。
            填充格数由 JS 的 xx_FILL 表决定（关闭 = 0 格）。
            ============================================================ */
+        /* ------------------------------------------------------------
+           滑块（第三十三轮，用户 2026-10-24 给了 iOS 风的参考图）
+           ------------------------------------------------------------
+           原来的「四格充能条」改成一条细轨 + 刻度 + 白色圆形把手：
+             ────●────┼────┼────┼────
+           语义没变：仍是"离散几档"，点第几段就到第几档；
+             额外支持**按住拖动**（pointermove 逐档跟随），拖动结束不会重复落档。
+           ★ `i` 仍是"档位标记"（现在是 1.5px 刻度线，位置 = 档位中心）——
+             `meterIndexAt` 的"离哪个格心最近"算法因此一行都不用改。
+           ============================================================ */
         .meter {
+            --meter-pad: 9px;
             display: inline-flex;
             align-items: center;
             gap: 10px;
@@ -250,19 +261,62 @@
             border: none;
             cursor: pointer;
             -webkit-tap-highlight-color: transparent;
+            touch-action: none;          /* 拖动滑块时别让页面跟着滚 */
+        }
+
+        .meter__track {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            width: 150px;
+            height: 22px;
+            padding: 0 var(--meter-pad);  /* 留出把手的半径，两端落档时不溢出 */
+        }
+
+        /* 细轨：贯穿首尾刻度 */
+        .meter__track::before {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            top: 50%;
+            height: 1.5px;
+            margin-top: -0.75px;
+            border-radius: 1px;
+            background: #cfd1d8;
         }
 
         .meter i {
+            position: relative;
             display: block;
-            width: 32px;
-            height: 12px;
-            border-radius: 6px;
-            background: #e3e4e8;
+            width: 1.5px;
+            height: 10px;
+            border-radius: 1px;
+            background: #b6b8c1;
             transition: background 0.18s ease;
         }
 
+        /* 走过的刻度（保留 .on 语义，视觉上压暗到接近轨道，避免抢把手的焦点） */
         .meter i.on {
-            background: var(--accent);
+            background: #9c9ea8;
+        }
+
+        /* 把手：白色圆点 + 轻微投影（浅灰底上不能只靠白 */
+        .meter__thumb {
+            position: absolute;
+            top: 50%;
+            left: 9px;
+            width: 18px;
+            height: 18px;
+            margin: -9px 0 0 -9px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow:
+                0 1px 3px rgba(16, 24, 40, 0.26),
+                0 0 0 0.5px rgba(16, 24, 40, 0.10);
+            transition: left 0.16s cubic-bezier(0.4, 0, 0.2, 1);
+            pointer-events: none;
         }
 
         .meter__val {
@@ -276,13 +330,23 @@
 
         /* 小号：7 个级数行（5 档） */
         .meter--sm {
-            gap: 6px;
+            --meter-pad: 7px;
+            gap: 8px;
+        }
+
+        .meter--sm .meter__track {
+            width: 96px;
+            height: 18px;
         }
 
         .meter--sm i {
-            width: 20px;
-            height: 12px;
-            border-radius: 4px;
+            height: 8px;
+        }
+
+        .meter--sm .meter__thumb {
+            width: 14px;
+            height: 14px;
+            margin: -7px 0 0 -7px;
         }
 
         .meter--sm .meter__val {
@@ -2246,6 +2310,13 @@
                                 <button type="button" class="seg__opt" data-voicing="fourpart" role="radio" aria-checked="false">四部和声</button>
                             </div>
                         </div>
+
+                        <!-- 八度内排列（第三十三轮）：低音不动，其余音塞进低音上方一个八度并重排
+                             （5 4 2 7 → 5 7 2 4）；与低音同音名的音会被去掉，四音可能变三音。 -->
+                        <div class="srow">
+                            <span>八度内排列</span>
+                            <button type="button" class="switch" id="chord-stack-octave" role="switch" aria-checked="false" aria-label="八度内排列"></button>
+                        </div>
                     </div>
                 </section>
 
@@ -2270,8 +2341,8 @@
                         <!-- 速度：40 / 50 / 65 / 80 四档。★ 指哪打哪：点第 N 格 = 第 N 档 -->
                         <div class="srow">
                             <span>速度</span>
-                            <button type="button" class="meter" id="chord-tempo" aria-label="速度，点第几格就到第几档">
-                                <i></i><i></i><i></i><i></i><span class="meter__val" id="chord-tempo-val">65 bpm</span>
+                            <button type="button" class="meter" id="chord-tempo" aria-label="速度，点第几段就到第几档">
+                                <span class="meter__track"><i></i><i></i><i></i><i></i><b class="meter__thumb"></b></span><span class="meter__val" id="chord-tempo-val">65 bpm</span>
                             </button>
                         </div>
 
@@ -2279,8 +2350,8 @@
                              只作用于主播放那一段离线渲染的音频。 -->
                         <div class="srow">
                             <span>强调低音</span>
-                            <button type="button" class="meter" id="chord-bass-emph" aria-label="强调低音，点第几格就到第几档">
-                                <i></i><i></i><i></i><span class="meter__val" id="chord-bass-emph-val">关闭</span>
+                            <button type="button" class="meter" id="chord-bass-emph" aria-label="强调低音，点第几段就到第几档">
+                                <span class="meter__track"><i></i><i></i><i></i><b class="meter__thumb"></b></span><span class="meter__val" id="chord-bass-emph-val">关闭</span>
                             </button>
                         </div>
 

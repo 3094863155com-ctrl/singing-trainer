@@ -78,6 +78,11 @@
         // 用途是"不看屏幕也能对答案"：最后一拍给根音，听出根音是几级 = 这个和弦是几级。
         // 三种播放方式统一生效（柱式/分解/单音的末拍都换成根音单音）。
         portable: false,
+        // 八度内排列（第三十三轮，默认关）：「通用」里的独立开关。
+        //   打开后每个和弦**低音不动**，其余音全部移到低音上方最近的八度并按音高重排
+        //   （5 4 2 7 → 5 7 2 4）；与低音同音名的音直接去掉，所以四音可能变三音。
+        //   实现在 doGenerate 后面那一段 stackProgressionWithinOctave，整块可摘除。
+        stackOctave: false,
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
         // 各级出现七和弦的概率（%）
@@ -1573,6 +1578,58 @@
         return { q, pcs, tones };
     }
 
+    // ------------------------------------------------------------
+    // 「八度内排列」（第三十三轮，用户 2026-10-24）
+    //   低音**不动**，其余和弦音各移到低音上方最近的八度位置，再按音高从低到高重排：
+    //     5 4 2 7（低→高、跨八度）→ 5 7 2 4（全挤在低音上方一个八度内）
+    //   规则（用户敲定）：
+    //     · 与低音同音名的音**直接去掉**（四部重复根音很常见）→ 四音可能变三音；
+    //       三和弦本来不重复，恒为三音。
+    //     · 只改八度，不改音名 / 升降号：拼写沿用原 notes，八度按"显示后的字母 + 升降号"反解。
+    //   ★ 这是**最终排列**的后处理，不参与配声决策（chooseVoicing / 四部配声一个字节不动），
+    //     所以整块能单独摘掉；摘掉后行为与之前逐字节一致。
+    function tuneNoteOctave(note, midi) {
+        if (!note) return null;
+        const base = LETTER_PC[note.letter];
+        const acc = note.acc || 0;
+        if (base == null) return { letter: note.letter, acc: acc, octave: note.octave };
+        return {
+            letter: note.letter,
+            acc: acc,
+            octave: Math.floor((midi - base - acc) / 12) - 1
+        };
+    }
+
+    function stackChordWithinOctave(chord) {
+        const midis = chord.midis || [];
+        const notes = chord.notes || [];
+        if (midis.length < 2) return chord;
+        const bass = midis[0];
+        const bassPc = ((bass % 12) + 12) % 12;
+        const kept = [{ midi: bass, note: notes[0] || null }];
+        // ★ 任何重复音名都只留一个（不只是"与低音同音名"的那个）：
+        //   压缩到同一个八度后，重复音必然变成同度叠音 —— 谱面两个音头重叠、发声键出现两个一样的音。
+        //   用户 2026-10-24：重复音直接去掉，四音变三音，三和弦恒为三音。
+        const seenPc = {};
+        seenPc[bassPc] = true;
+        for (let i = 1; i < midis.length; i++) {
+            const pc = ((midis[i] % 12) + 12) % 12;
+            if (seenPc[pc]) continue;
+            seenPc[pc] = true;
+            kept.push({ midi: bass + ((pc - bassPc + 12) % 12), note: notes[i] || null });
+        }
+        kept.sort((a, b) => a.midi - b.midi);
+        chord.midis = kept.map((k) => k.midi);
+        chord.notes = kept.map((k) => tuneNoteOctave(k.note, k.midi));
+        chord.doubledRole = null;                 // 重复音没了，"加倍声部"随之失效
+        return chord;
+    }
+
+    function stackProgressionWithinOctave(chords) {
+        if (!chords) return;
+        for (const c of chords) stackChordWithinOctave(c);
+    }
+
     function buildAtonalSchedule(settings) {
         const N = settings.length;
         // 性质池：勾了的才可能出现；一项都没勾时兜底大三（UI 上不允许清空，这里只防脏数据）
@@ -1935,22 +1992,30 @@
             bass.draw();
 
             const chord = chords[m];
-            const notes = chord.notes;                 // 升序：[0]=B [1]=T [2]=A [3]=S
+            // 升序：[0] 低音 … 最后一个是最高音。
+            // ★ 「八度内排列」会把重复音去掉（四音可能变三音），所以**不能**再假定恒 4 个音：
+            //   按下谱表 ⌊n/2⌋、上谱表其余来分配（n=4 → 2+2，n=3 → 1+2，n=2 → 1+1）。
+            const notes = (chord.notes || []).filter((n) => n && n.letter);
             const keyOf = (n) => `${pitchName(n.letter, n.acc)}/${n.octave}`;
+            const lowerN = Math.max(1, Math.floor(notes.length / 2));
+            const lowerNotes = notes.slice(0, lowerN);
+            const upperNotes = notes.slice(lowerN);
 
-            // 上谱表记 A + S，下谱表记 B + T。
+            // 上谱表记上方声部，下谱表记低音侧。
             // 全音符没有符干，所以"两个声部合成一个和弦"与分开画在视觉上完全等价，
             // 合成一个 StaveNote 更稳（少一层 formatter，不会出现上下错位）。
             // ★ 必须显式声明 clef：StaveNote 默认按高音谱表算 y，不传的话低音声部
             //   会整体下移 60 个单位（多出一串加线）。已用受控实验取证。
             const upper = new Vex.StaveNote({
-                keys: [keyOf(notes[2]), keyOf(notes[3])], duration: '1n', clef: 'treble'
+                keys: upperNotes.map(keyOf), duration: '1n', clef: 'treble'
             });
             const lower = new Vex.StaveNote({
-                keys: [keyOf(notes[0]), keyOf(notes[1])], duration: '1n', clef: 'bass'
+                keys: lowerNotes.map(keyOf), duration: '1n', clef: 'bass'
             });
-            [[upper, notes[2], 0], [upper, notes[3], 1],
-             [lower, notes[0], 0], [lower, notes[1], 1]].forEach(([nt, n, idx]) => {
+            const mods = [];
+            upperNotes.forEach((n, idx) => mods.push([upper, n, idx]));
+            lowerNotes.forEach((n, idx) => mods.push([lower, n, idx]));
+            mods.forEach(([nt, n, idx]) => {
                 const acc = accidentalOf(n.letter, n.acc, shownKeySig);
                 if (acc) nt.addModifier(new accClass(acc), idx);
             });
@@ -3237,7 +3302,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 33;
+    const APP_VERSION = 34;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -3316,32 +3381,86 @@
         return best;
     }
 
-    // 按 fill 表给前 N 格加 .on（格数由档位表决定，不按百分比算）
+    // 按档位摆把手（第三十三轮：原来是"给前 N 格加 .on 的充能条"）。
+    //   ★ 位置用 calc(内边距 + (轨道宽 − 两端内边距) × 比例) 表达，**不读 offsetLeft** ——
+    //     级数行默认折叠（display:none）时 offsetLeft 恒为 0，展开后会全跑到最左边。
+    //   fill 表保留（调用点不用改成块可摘），只用来点亮"走过的刻度"。
     function paintMeter(btn, idx, fill) {
         if (!btn) return;
         const cells = btn.querySelectorAll('i');
-        const n = fill[idx] || 0;
-        for (let i = 0; i < cells.length; i++) {
-            cells[i].classList.toggle('on', i < n);
+        const n = cells.length;
+        if (!n) return;
+        const k = Math.max(0, Math.min(n - 1, idx || 0));
+        const thumb = btn.querySelector('.meter__thumb');
+        if (thumb) {
+            const r = (n > 1) ? (k / (n - 1)) : 0;
+            thumb.style.left = 'calc(var(--meter-pad) + (100% - var(--meter-pad) * 2) * ' + r.toFixed(4) + ')';
+        }
+        const lit = fill ? (fill[k] || 0) : k + 1;
+        for (let i = 0; i < n; i++) {
+            cells[i].classList.toggle('on', i < lit);
         }
     }
 
-    // 指哪打哪（用户 2026-10-24）：按点击横坐标判断落在第几格。
-    //   取"离哪个格心最近"而不是按等分算 —— 格子之间有 gap，等分算会把缝隙算进前一格。
-    //   点在格子区域外（比如右侧读数上）返回 -1，表示"这一下不算改档"。
-    function meterIndexAt(btn, clientX) {
+    // 指哪打哪（用户 2026-10-24）：按点击横坐标判断落在第几档。
+    //   取"离哪个刻度最近"而不是按等分算 —— 刻度之间有空隙，等分算会偏。
+    //   点在轨道区域外返回 -1，表示"这一下不算改档"（clamp=true 时则夹到两端，
+    //   拖动时手指滑出轨道也能贴住头/尾档）。
+    function meterIndexAt(btn, clientX, clamp) {
         const cells = btn.querySelectorAll('i');
         if (!cells.length) return -1;
         const first = cells[0].getBoundingClientRect();
         const last = cells[cells.length - 1].getBoundingClientRect();
-        if (clientX < first.left - 4 || clientX > last.right + 4) return -1;
+        let x = clientX;
+        if (clamp) {
+            x = Math.max(first.left, Math.min(last.right, x));
+        } else if (clientX < first.left - 4 || clientX > last.right + 4) {
+            return -1;
+        }
         let best = 0, bestD = Infinity;
         for (let i = 0; i < cells.length; i++) {
             const r = cells[i].getBoundingClientRect();
-            const d = Math.abs(clientX - (r.left + r.right) / 2);
+            const d = Math.abs(x - (r.left + r.right) / 2);
             if (d < bestD) { bestD = d; best = i; }
         }
         return best;
+    }
+
+    // 滑块交互（第三十三轮）：点击落档 + 按住拖动逐档跟随。
+    //   ★ 拖动走 pointermove；真的拖过（|dx| ≥ 5px）就吃掉随后那一下 click，
+    //     否则会重复落档（虽然同档幂等，但会多刷一次应用条 / 多画一次）。
+    //   host 上做事件委托，selector 选到滑块按钮本身 —— 点刻度、点把手、点轨道都算。
+    function bindSliderDrag(host, selector, apply) {
+        if (!host) return;
+        let btn = null, moved = false, startX = 0;
+        const pickAt = (el, clientX, clamp) => {
+            const i = meterIndexAt(el, clientX, clamp);
+            if (i >= 0) apply(el, i);
+        };
+        host.addEventListener('pointerdown', (e) => {
+            btn = (e.target.closest ? e.target.closest(selector) : null) || null;
+            if (!btn) return;
+            moved = false;
+            startX = e.clientX;
+            try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+        });
+        host.addEventListener('pointermove', (e) => {
+            if (!btn) return;
+            if (!moved && Math.abs(e.clientX - startX) < 5) return;
+            moved = true;
+            pickAt(btn, e.clientX, true);      // 拖出轨道也贴住头/尾档
+        });
+        const end = () => {
+            btn = null;
+            setTimeout(() => { moved = false; }, 0);
+        };
+        host.addEventListener('pointerup', end);
+        host.addEventListener('pointercancel', end);
+        host.addEventListener('click', (e) => {
+            if (moved) { moved = false; return; }     // 拖动过程中已经落过档
+            const hit = e.target.closest ? e.target.closest(selector) : null;
+            if (hit) pickAt(hit, e.clientX);
+        });
     }
 
     function cacheEls() {
@@ -3362,6 +3481,7 @@
             // 两颗椭圆开关（都是 button[role=switch]，不是 checkbox —— 用户 2026-10-06 拍板）
             autoContinue: document.getElementById('chord-auto-continue'),
             portable: document.getElementById('chord-portable'),
+            stackOctave: document.getElementById('chord-stack-octave'),
             grid: document.getElementById('degree-grid'),
             // 「参与级数」折叠行：收起时只显示 N 项已选
             degreeToggle: document.getElementById('chord-degree-toggle'),
@@ -3463,7 +3583,14 @@
             prob.className = 'meter meter--sm';
             prob.dataset.role = 'prob';
             prob.dataset.degree = String(d);
-            for (let i = 0; i < DEG_STEPS.length; i++) prob.appendChild(document.createElement('i'));
+            // 滑块结构：刻度（i）× 档数 + 把手（第三十三轮）
+            const track = document.createElement('span');
+            track.className = 'meter__track';
+            for (let i = 0; i < DEG_STEPS.length; i++) track.appendChild(document.createElement('i'));
+            const knob = document.createElement('b');
+            knob.className = 'meter__thumb';
+            track.appendChild(knob);
+            prob.appendChild(track);
             const val = document.createElement('span');
             val.className = 'meter__val';
             val.dataset.role = 'probVal';
@@ -4386,6 +4513,7 @@
         if (!els) return;
         if (els.autoContinue) els.autoContinue.setAttribute('aria-checked', pv('autoContinue') ? 'true' : 'false');
         if (els.portable) els.portable.setAttribute('aria-checked', pv('portable') ? 'true' : 'false');
+        if (els.stackOctave) els.stackOctave.setAttribute('aria-checked', pv('stackOctave') ? 'true' : 'false');
         if (els.relativePitch) {
             const rel = (pv('pitchMode') === 'relative');
             els.relativePitch.setAttribute('aria-checked', rel ? 'true' : 'false');
@@ -4599,6 +4727,9 @@
         data = practiceMode
             ? practiceProgression()
             : (settings.atonal ? buildAtonalSchedule(settings) : generateChordProgression(settings));
+        // 「八度内排列」（第三十三轮）：只改最终排列，不参与配声决策 → 整块可单独摘除。
+        //   放在 renderChordSheet 之前：谱面、卡片、发声键、辅助窗、音频都读这份 midis/notes。
+        if (settings.stackOctave && data && data.chords) stackProgressionWithinOctave(data.chords);
         // 无调性没有调、没有谱表：renderChordSheet 会把 undefined 当调号画（还会读
         // chord.roman.length）→ 直接跳过，谱表页在无调性下也整个不出现。
         if (!data.atonal) renderChordSheet(data);
@@ -4995,18 +5126,16 @@
             markSeg(els.voicingSeg, (b) => b.dataset.voicing === pv('voicingMode'));
         }
 
-        // 速度：四格充能条。★ 指哪打哪：点第 N 格 = 第 N 档（用户 2026-10-24）。
+        // 速度：四档滑块（点第几段 = 第几档，也能按住拖）。
         if (els.tempoMeter) {
             paintTempo = () => {
                 const i = tempoIndex(pv('tempo'));
                 paintMeter(els.tempoMeter, i, TEMPO_FILL);
                 if (els.tempoVal) els.tempoVal.textContent = tempoLabel(TEMPO_STEPS[i]);
-                els.tempoMeter.setAttribute('aria-label', '速度 ' + TEMPO_STEPS[i] + ' BPM，点第几格就到第几档');
+                els.tempoMeter.setAttribute('aria-label', '速度 ' + TEMPO_STEPS[i] + ' BPM，点第几段就到第几档');
             };
             paintTempo();
-            els.tempoMeter.addEventListener('click', (e) => {
-                const i = meterIndexAt(els.tempoMeter, e.clientX);
-                if (i < 0) return;
+            bindSliderDrag(els.tempoMeter, '.meter', (btn, i) => {
                 const v = TEMPO_STEPS[i];
                 if (v === pv('tempo')) return;
                 stageSetting('tempo', v, 'audio');
@@ -5014,19 +5143,17 @@
             });
         }
 
-        // 强调低音：三格 = 关闭 / 中等 / 明显（0 / 30 / 75）。同样指哪打哪。
+        // 强调低音：三档滑块 = 关闭 / 中等 / 明显（0 / 30 / 75）。
         //   ★ 改它只影响离线渲染出来的音频 → 算"声音类"，点应用才重算。
         if (els.bassEmphMeter) {
             paintEmph = () => {
                 const i = emphIndex(pv('bassEmphasis'));
                 paintMeter(els.bassEmphMeter, i, EMPH_FILL);
                 if (els.bassEmphVal) els.bassEmphVal.textContent = EMPH_LABELS[i];
-                els.bassEmphMeter.setAttribute('aria-label', '强调低音 ' + EMPH_LABELS[i] + '，点第几格就到第几档');
+                els.bassEmphMeter.setAttribute('aria-label', '强调低音 ' + EMPH_LABELS[i] + '，点第几段就到第几档');
             };
             paintEmph();
-            els.bassEmphMeter.addEventListener('click', (e) => {
-                const i = meterIndexAt(els.bassEmphMeter, e.clientX);
-                if (i < 0) return;
+            bindSliderDrag(els.bassEmphMeter, '.meter', (btn, i) => {
                 const v = EMPH_STEPS[i];
                 if (v === pv('bassEmphasis')) return;
                 stageSetting('bassEmphasis', v, 'audio');
@@ -5081,13 +5208,9 @@
                 updateDegreeCount();
                 updateAppliedPreview();     // 目标级数池跟着自然和弦的勾选走
             });
-            // 七和弦概率：五格条，指哪打哪（0 / 25 / 50 / 75 / 100）
-            els.grid.addEventListener('click', (e) => {
-                const hit = e.target.closest ? e.target.closest('[data-role="prob"]') : null;
-                if (!hit) return;
-                const i = meterIndexAt(hit, e.clientX);
-                if (i < 0) return;
-                const d = parseInt(hit.dataset.degree, 10);
+            // 七和弦概率：五档滑块，点第几段就到第几段（0 / 25 / 50 / 75 / 100），也能拖
+            bindSliderDrag(els.grid, '[data-role="prob"]', (btn, i) => {
+                const d = parseInt(btn.dataset.degree, 10);
                 if ((pv('seventhProb')[d] || 0) === DEG_STEPS[i]) return;
                 const next = Object.assign({}, pv('seventhProb'));
                 next[d] = DEG_STEPS[i];
@@ -5280,6 +5403,15 @@
         if (els.portable) {
             els.portable.addEventListener('click', () => {
                 stageSetting('portable', !pv('portable'), 'audio');
+                syncTogglePills();
+            });
+        }
+
+        // 「八度内排列」：改的是**和弦音的排列本身**（谱面 / 卡片 / 发声键 / 辅助窗 / 音频全变），
+        //   所以按「内容类」进待应用 —— 只重排不可逆（原始八度已经丢了），重出题最稳。
+        if (els.stackOctave) {
+            els.stackOctave.addEventListener('click', () => {
+                stageSetting('stackOctave', !pv('stackOctave'), 'content');
                 syncTogglePills();
             });
         }
@@ -6962,6 +7094,9 @@
         _buildAtonalSchedule: buildAtonalSchedule,
         _atonalTones: (rootPc, qKey) => atonalTones(rootPc, qKey),
         _ATONAL_QUALITIES: ATONAL_QUALITIES,
+        // 「八度内排列」（验收用）：纯函数，传入一个 chord 就地重排
+        _stackChordWithinOctave: stackChordWithinOctave,
+        _stackProgressionWithinOctave: stackProgressionWithinOctave,
         _getSettings: () => settings,
         // ---- 「未应用的设置」机制（验收用）----
         _getPending: () => (pending ? JSON.parse(JSON.stringify(pending)) : null),
