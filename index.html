@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=28"></script>
+<script src="chord_recognition.js?v=29"></script>
     <style>
         * {
             margin: 0;
@@ -1288,13 +1288,52 @@
             display: none;
         }
 
-        /* 手势提示行（发现性：不然没人知道能上下滑/左滑） */
-        .mp-sheet__hint {
+        /* 当前和弦的各音：一排可发声的按钮（用户 2026-10-24 定）
+           不写音高，只写 1 2 3 4（从低到高的序号）；最低音那颗略宽一点。 */
+        .mp-tones {
+            flex: 0 0 auto;
+            display: flex;
+            gap: 8px;
+        }
+
+        .mp-tone {
+            flex: 1 1 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 46px;
+            padding: 0;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-radius: var(--r-md);
+            cursor: pointer;
+            touch-action: manipulation;
+            transition: background 0.12s ease, transform 0.12s ease, color 0.12s ease;
+        }
+
+        /* 最低音：宽度略大于其它三颗（强调低音位置，但不给音高） */
+        .mp-tone:first-child { flex: 1.25 1 0; }
+
+        .mp-tone:active,
+        .mp-tone.is-down {
+            background: var(--track);
+            color: var(--text-primary);
+            transform: scale(0.97);
+        }
+
+        /* 错题练习模式下的一句小字（取代原来整行的手势提示） */
+        .mp-sheet__mode {
             flex: 0 0 auto;
             text-align: center;
             font-size: 12px;
             color: var(--text-tertiary);
         }
+
+        .mp-sheet__mode[hidden] { display: none; }
 
         /* 一行两键：上一个（宽，常用）/ 下一个 */
         .mp-sheet__actions {
@@ -1893,18 +1932,29 @@
             <div class="controls">
                 <div class="control-group">
                     <label>长度：</label>
-                    <select id="chord-length">
-                        <option value="8" selected>8 小节</option>
-                        <option value="16">16 小节</option>
-                    </select>
+                    <div class="seg" id="chord-length-seg" role="radiogroup" aria-label="长度">
+                        <span class="seg__thumb" aria-hidden="true"></span>
+                        <button type="button" class="seg__opt" data-len="8" role="radio" aria-checked="false">8 小节</button>
+                        <button type="button" class="seg__opt" data-len="12" role="radio" aria-checked="false">12 小节</button>
+                    </div>
                 </div>
 
                 <div class="control-group">
                     <label>配声模式：</label>
-                    <select id="chord-voicing-mode">
-                        <option value="triad">三和弦（单行谱 · 3 音）</option>
-                        <option value="fourpart" selected>四部和声（大谱表 · 4 音）</option>
-                    </select>
+                    <div class="seg" id="chord-voicing-seg" role="radiogroup" aria-label="配声模式">
+                        <span class="seg__thumb" aria-hidden="true"></span>
+                        <button type="button" class="seg__opt" data-voicing="triad" role="radio" aria-checked="false">键盘和声</button>
+                        <button type="button" class="seg__opt" data-voicing="fourpart" role="radio" aria-checked="false">四部和声</button>
+                    </div>
+                </div>
+
+                <!-- 音高显示：固定音高 = 按真实调性记谱；相对音高 = 整段搬到 C 大调（无调号）
+                     ★ 只改大谱表的记谱，音频/卡片/听辨窗/罗马数字全都不动。 -->
+                <div class="control-group">
+                    <label>音高显示：</label>
+                    <button type="button" class="toggle-pill" id="chord-relative-pitch" role="switch" aria-checked="false">
+                        <svg class="ic" aria-hidden="true"><use href="#i-note"/></svg><span id="chord-relative-pitch-label">固定音高</span>
+                    </button>
                 </div>
 
                 <div class="tempo-control">
@@ -2035,16 +2085,12 @@
                         </div>
 
                         <div class="control-group" style="width: 100%; justify-content: center;">
-                            <label>回归方式：</label>
-                            <span style="color: var(--text-tertiary); font-size: 12px;">离调之后怎么走回原调</span>
+                            <label>和弦进行：</label>
+                            <span style="color: var(--text-tertiary); font-size: 12px;">可多选 · 离调那几小节怎么走向目标</span>
                         </div>
-                        <div class="seg-row">
-                            <div class="seg" id="chord-applied-return-seg" role="radiogroup" aria-label="回归方式">
-                                <span class="seg__thumb" aria-hidden="true"></span>
-                                <button type="button" class="seg__opt" data-return="simple" role="radio" aria-checked="false">简单</button>
-                                <button type="button" class="seg__opt" data-return="medium" role="radio" aria-checked="false">中等</button>
-                                <button type="button" class="seg__opt" data-return="complex" role="radio" aria-checked="false">复杂</button>
-                            </div>
+                        <div class="toggle-row" id="chord-applied-prog">
+                            <button type="button" class="toggle-pill" data-prog="5-1" role="switch" aria-checked="false">5⁷ → 1</button>
+                            <button type="button" class="toggle-pill" data-prog="2-5-1" role="switch" aria-checked="false">2⁷ → 5⁷ → 1</button>
                         </div>
 
                         <!-- 当前可用和弦预览：直接调生成侧的 appliedVocabulary，
@@ -2175,7 +2221,10 @@
                 </div>
             </div>
 
-            <div class="mp-sheet__hint" id="chord-mp-hint">按住看答案 · 按住上滑报错 · 按住下滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表</div>
+            <!-- 当前和弦的各音：从低到高的发声按钮（不写音高，按下去出声、可多指同时按）
+                 按钮数量跟实际音数走（键盘和声三和弦 3 个 / 七和弦 4 个）。 -->
+            <div class="mp-tones" id="chord-mp-tones" role="group" aria-label="当前和弦的各音（从低到高）"></div>
+            <div class="mp-sheet__mode" id="chord-mp-mode-note" hidden></div>
 
             <div class="mp-sheet__actions">
                 <button class="mp-action-btn" id="chord-mp-prev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-left"/></svg>上一个</button>

@@ -105,11 +105,17 @@
         //   'complex' = Ⅱ Ⅲ Ⅳ Ⅴ Ⅵ（排除 Ⅰ 与 ⅶ°：向 Ⅰ 离调等于没有离调，
         //               ⅶ° 是减三和弦，当不了稳定的临时主）
         appliedTargetMode: 'simple',
-        // 回归方式（离调之后怎么走回来）：
-        //   'simple'  = 5/x→x（正格）、4/x→x（变格）
-        //   'medium'  = 固定短模板 2/x→5/x→x、4/x→5/x→x
-        //   'complex' = 从 {属, 下属, 2-5-1, 4-5-1} 词汇里随机组装 2–4 个和弦
-        appliedReturnMode: 'simple'
+        // 和弦进行（离调那几小节怎么走向目标）——**多选**，从语料库里勾：
+        //   '5-1'   = 5⁷/x → x
+        //   '2-5-1' = 2⁷/x → 5⁷/x → x
+        //   ★ 2026-10-24 用户定：取消原来的"简单/中等/复杂"三档，改成直接勾进行。
+        //     两项都不勾时按 ['5-1'] 兜底（见 settingsProgressions）。
+        appliedProgressions: ['5-1', '2-5-1'],
+        // ---- 音高显示（2026-10-24 新增）----
+        //   'fixed'    = 固定音高：谱表按真实调性记谱（默认，= 改造前行为）
+        //   'relative' = 相对音高：整段按"级数不变"平移到 C 大调记谱（无调号）
+        //   ★ 只影响**大谱表渲染**：音频、卡片（已改级数）、听辨窗、罗马数字全都不变。
+        pitchMode: 'fixed'
     };
 
     // 强调低音的上限倍数：100% 时低音 = 原增益 ×(1 + 这个数)。
@@ -162,11 +168,34 @@
         const sig = Object.prototype.hasOwnProperty.call(keySig, letter) ? keySig[letter] : 0;
         if (acc === sig) return null;
         if (acc === 0) return 'n';
-        return acc > 0 ? '#' : 'b';
+        // ★ 重升/重降也要画全（VexFlow 认 '##' / 'bb'）。以前只输出一个记号，
+        //   遇到 F𝄪 会静默画成 F♯（音高差半音），而新的级数标签写的是 ♯2 → 自相矛盾。
+        return acc > 0 ? new Array(acc + 1).join('#') : new Array(-acc + 1).join('b');
     }
 
     function pitchName(letter, acc) {
-        return letter + (acc > 0 ? '#' : (acc < 0 ? 'b' : ''));
+        if (acc > 0) return letter + new Array(acc + 1).join('#');
+        if (acc < 0) return letter + new Array(-acc + 1).join('b');
+        return letter;
+    }
+
+    // 一个音 → 调内级数 + 变化记号。**卡片音高行与听辨辅助窗共用的唯一实现。**
+    //   ★ 为什么不用 scale.findIndex(pc)：变化音（离调必有）在音阶里查不到 →
+    //     旧代码退化成音名 "F#"，用户 2026-10-24 报的正是这个。
+    //   做法：按「这个音的字母相对主音字母走了几个字母」定级数，
+    //         再用 pc 与"该级在调内的 pc"之差解升降号 —— 与 relativeSheet 同一套心算。
+    //   返回 { num: 1..7, alter: -1|0|1, text: '♯4' | '4' }
+    function degreeOfNote(note, scale) {
+        if (!note || !scale || scale.length !== 7) return { num: 0, alter: 0, text: '' };
+        const deg = ((LETTERS.indexOf(note.letter) - LETTERS.indexOf(scale[0].letter)) % 7 + 7) % 7;
+        const pc = ((LETTER_PC[note.letter] + note.acc) % 12 + 12) % 12;
+        const alter = ((pc - scale[deg].pc) % 12 + 12) % 12;
+        const acc = alter === 1 ? 1 : (alter === 11 ? -1 : 0);
+        return {
+            num: deg + 1,
+            alter: acc,
+            text: (acc === 1 ? '♯' : (acc === -1 ? '♭' : '')) + (deg + 1)
+        };
     }
 
     // midi -> { letter, acc, octave }（和弦音一定落在音阶内，故必能命中）
@@ -1029,13 +1058,32 @@
     //     所以根音 = 目标音往上 N 度，落在调内的可能性天然很高，只有变化音才出调。
     // ============================================================
 
-    // 副调内的三度叠置：局部 2 级是小三和弦，局部 4 / 5 级是大三和弦
+    // 副调内的三度叠置：局部 2 级是小三和弦（m7），局部 4 / 5 级是大三和弦（属七）
+    //   ★ 2026-10-24 用户定：**离调和弦一律七和弦**。
+    //     251 = 2⁷ → 5⁷ → 目标；目标那个和弦本身不一定是七和弦，它跟「自然和弦」页走。
+    //     七和弦化之后 "5/Ⅳ 三和弦 ≡ Ⅰ" 这类伪离调**自动消失**（5⁷/Ⅳ = Ⅰ⁷，含 ♭7 是调外音），
+    //     所以以前那套 `target===4 && L===5` 的特例全部可以删掉。
     const APPLIED_QUAL = { 2: [0, 3, 7, 10], 4: [0, 4, 7, 10], 5: [0, 4, 7, 10] };
+
+    // 进行语料库：键 = 设置页勾选项；值 = 副调内的局部级数序列
+    //   ★ 末位一定是 5（属七），紧接着解决到目标。2-5-1 的首位 2 在副调里是小七。
+    //     设置页只勾其中一项或两项都勾（多选）—— 不再有"简单/中等/复杂"档位。
+    const APPLIED_PROGRESSIONS = { '5-1': [5], '2-5-1': [2, 5] };
+    const APPLIED_PROGRESSION_KEYS = ['5-1', '2-5-1'];
+
+    // 勾选的进行（过滤掉不认识的键；一项都没勾时兜底 5-1，保证一定出得东西）
+    function settingsProgressions(settings) {
+        const raw = (settings && Array.isArray(settings.appliedProgressions))
+            ? settings.appliedProgressions : [];
+        const picked = raw.filter((k) => APPLIED_PROGRESSIONS[k]);
+        return picked.length ? picked : ['5-1'];
+    }
 
     // 构造一个离调和弦的描述（不产生随机数，纯算术）
     //   targetDegree : 被临时当成主和弦的那一级（原调级数，1..7）
     //   localDegree  : 这个和弦在副调里的级数（2 / 4 / 5）
-    function appliedChordSpec(scale, targetDegree, localDegree, seventh) {
+    //   ★ 恒为七和弦（4 个音）。第 4 个参数是历史遗留的位置参数，忽略。
+    function appliedChordSpec(scale, targetDegree, localDegree) {
         const t = scale[targetDegree - 1];
         const qual = APPLIED_QUAL[localDegree];
         if (!t || !qual) return null;
@@ -1043,11 +1091,11 @@
         const rootPc = (targetPc + MAJOR_STEPS[localDegree - 1]) % 12;
         // 字母也必须按"副调音阶的 N 级"推，不能按音高猜 —— 否则 A7 的 C♯ 会写成 D♭
         const rootLetter = LETTERS[(LETTERS.indexOf(t.letter) + (localDegree - 1)) % 7];
-        const pcs = qual.slice(0, seventh ? 4 : 3).map((s) => (rootPc + s) % 12);
+        const pcs = qual.map((s) => (rootPc + s) % 12);
         return {
             targetDegree,
             localDegree,
-            seventh: !!seventh,
+            seventh: true,
             targetPc,
             rootPc,
             rootLetter,
@@ -1059,43 +1107,24 @@
         };
     }
 
-    // 这个（目标, 局部级数）组合在该调里是否成立
-    //   ★ 判定用的 seventh 必须与真正生成时一致：向 Ⅳ 的属和弦强制七和弦，
-    //     否则会被自己的"全调内"规则误杀（5/Ⅳ 三和弦 = Ⅰ）。
-    function localDegValid(scale, targetDegree, localDegree) {
-        const seventh = (targetDegree === 4 && localDegree === 5);
-        const spec = appliedChordSpec(scale, targetDegree, localDegree, seventh);
-        return !!spec && spec.chromatic;
+    // 这一组（目标 + 一串局部级数）在该调里是否算"真的离调"
+    //   ★ 判定在**组**层面，不在单和弦层面：
+    //     2-5-1 里的 ii⁷ 常常本身就是调内七和弦（C 调的 2⁷/Ⅴ = Am7 = ⅵ⁷），
+    //     但整组因为有 5⁷/x（必含副调导音 = 调外音）照样是离调 —— 这是 251 的常态。
+    //     反过来 5⁷/x 永远含调外音，所以"只勾 5-1"时组级判定等价于原来的单和弦判定。
+    function groupViable(scale, targetDegree, locals) {
+        const specs = locals.map((L) => appliedChordSpec(scale, targetDegree, L));
+        if (specs.some((s) => !s)) return false;
+        return specs.some((s) => s.chromatic);
     }
 
-    // 按「回归方式」抽一组局部级数序列（序列末位一定是属或下属，接着解决到 target）
-    function pickLocalSeq(scale, targetDegree, mode) {
-        const viable = (locals) => locals.every((L) => localDegValid(scale, targetDegree, L));
-        if (mode === 'medium' || mode === 'complex') {
-            let opts;
-            if (mode === 'medium') {
-                opts = [[2, 5], [4, 5]].filter(viable);
-            } else {
-                // 复杂档：从 {2,4,5} 词汇里现场组装 2–4 个和弦，末位必须落在 4 / 5 上
-                const len = 2 + Math.floor(Math.random() * 3);
-                const seq = [];
-                for (let i = 0; i < len; i++) {
-                    const last = (i === len - 1);
-                    const pool = (last ? [4, 5] : [2, 4, 5])
-                        .filter((L) => L !== seq[i - 1] && viable([L]));
-                    if (!pool.length) { seq.length = 0; break; }
-                    seq.push(pool[Math.floor(Math.random() * pool.length)]);
-                }
-                if (seq.length) return seq;
-                opts = [];
-            }
-            // 兜底：该目标级数下 2/x、4/x 都不成立时，退化成最简单的 5/x
-            //   （例如向 Ⅴ 离调：2/Ⅴ ≡ ⅵ、4/Ⅴ ≡ Ⅰ，都不算离调）
-            if (!opts.length) opts = [[5]].filter(viable);
-            return opts.length ? opts[Math.floor(Math.random() * opts.length)] : null;
-        }
-        const opts = [[5], [4]].filter(viable);
-        return opts.length ? opts[Math.floor(Math.random() * opts.length)] : null;
+    // 从勾选的语料库里抽一条进行（返回局部级数序列；该目标级下全都不可行 → null）
+    function pickLocalSeq(scale, targetDegree, progs) {
+        const opts = progs
+            .map((k) => APPLIED_PROGRESSIONS[k])
+            .filter((seq) => seq && groupViable(scale, targetDegree, seq));
+        if (!opts.length) return null;
+        return opts[Math.floor(Math.random() * opts.length)];
     }
 
     // 规划"哪几小节放离调"。返回事件数组，每个事件占 locals.length 小节，
@@ -1106,7 +1135,8 @@
         const N = seq.length;
         const want = N >= 16 ? 2 : 1;
         const targetMode = settings.appliedTargetMode || 'simple';
-        const returnMode = settings.appliedReturnMode || 'simple';
+        // 勾选的进行语料库（多选）。2-5-1 比 5-1 多占一小节，排布时按实际长度算。
+        const progs = settingsProgressions(settings);
         const poolAll = (targetMode === 'complex' ? [2, 3, 4, 5, 6] : [4, 5])
             .filter((t) => settings.degrees && settings.degrees[t]);
         const pool = poolAll.length ? poolAll : [4, 5];
@@ -1116,7 +1146,7 @@
             const free = pool.filter((t) => !used.has(t));
             if (!free.length) break;
             const target = free[Math.floor(Math.random() * free.length)];
-            const locals = pickLocalSeq(scale, target, returnMode);
+            const locals = pickLocalSeq(scale, target, progs);
             if (!locals) continue;
             // 解决到达的小节下标上限：目标 Ⅴ 允许落在终止的 Ⅴ 上（5/Ⅴ→Ⅴ→Ⅰ），
             //   其它目标要留出终止 Ⅴ 与末尾 Ⅰ。
@@ -1155,10 +1185,8 @@
                 const idx = ev.start + j;
                 if (idx < 0 || idx >= seq.length) continue;
                 const L = ev.locals[j];
-                const seventh = (ev.target === 4 && L === 5)
-                    ? true
-                    : (Math.random() * 100 < (settings.seventhProb[ev.target] || 0));
-                const spec = appliedChordSpec(scale, ev.target, L, seventh);
+                // ★ 离调小节一律七和弦（用户 2026-10-24 定），不再按 seventhProb 掷骰
+                const spec = appliedChordSpec(scale, ev.target, L);
                 if (!spec) continue;
                 spec.groupId = ev.groupId;
                 map.set(idx, spec);
@@ -1175,33 +1203,26 @@
     }
 
     // 设置页预览行用：当前设置下能放出哪些离调和弦（以 C 大调为参照，与真实调性无关）
+    //   ★ 与出题同源：走同一套 groupViable / APPLIED_PROGRESSIONS，预览永远不会和真实出题脱节。
     function appliedVocabulary(settings) {
         const scale = buildScale('C');
         const targetMode = settings.appliedTargetMode || 'simple';
-        const returnMode = settings.appliedReturnMode || 'simple';
+        const progs = settingsProgressions(settings);
         const targets = (targetMode === 'complex' ? [2, 3, 4, 5, 6] : [4, 5])
             .filter((t) => settings.degrees && settings.degrees[t]);
         const list = [];
         const seen = new Set();
-        const push = (t, L, seventh) => {
-            const spec = appliedChordSpec(scale, t, L, seventh);
-            if (!spec) return;
-            const label = romanOf(t, seventh, 0, spec);
-            if (seen.has(label)) return;
-            seen.add(label);
-            list.push(label);
-        };
-        const templates = returnMode === 'simple' ? [[5], [4]]
-            : (returnMode === 'medium' ? [[2, 5], [4, 5]] : [[2, 5], [4, 5], [2, 4, 5]]);
         for (const t of targets) {
-            for (const tpl of templates) {
-                for (const L of tpl) {
-                    if (!localDegValid(scale, t, L)) continue;
-                    push(t, L, (t === 4 && L === 5));      // 向 Ⅳ 的属和弦强制七和弦
-                    // 属和弦还有七和弦形态（按该级数的七和弦概率决定出不出现）
-                    const canSeventh = !(t === 4 && L === 5) && L === 5
-                        && (settings.seventhProb ? (settings.seventhProb[t] || 0) > 0 : true);
-                    if (canSeventh) push(t, L, true);
+            for (const k of progs) {
+                const locals = APPLIED_PROGRESSIONS[k];
+                if (!groupViable(scale, t, locals)) continue;
+                for (const L of locals) {
+                    const spec = appliedChordSpec(scale, t, L);
+                    if (!spec) continue;
+                    const label = romanOf(t, true, 0, spec);
+                    if (seen.has(label)) continue;
+                    seen.add(label);
+                    list.push(label);
                 }
             }
         }
@@ -1331,9 +1352,15 @@
             //     解决小节同理必须是三和弦，否则导音解决不了（见 buildAppliedMap 注释）。
             const seventh = ap
                 ? ap.seventh
-                : ((isFirst || isLast || isResolve)
+                : ((isFirst || isLast)
                     ? false
                     : (Math.random() * 100 < (settings.seventhProb[degree] || 0)));
+            // ★ 解决到达的那一小节也是**自然和弦**，所以它的三/七和弦跟「自然和弦」页走
+            //   （用户 2026-10-24 明确：目标不一定是七和弦，规则听自然页的）。
+            //   代价：如果它是七和弦，四个音各一次 → 主音只剩低音一处，
+            //   副调导音**结构上无法**上行解决。所以只有它真是三和弦时才提导音硬要求。
+            const resolveIsTriad = isResolve && !seventh;
+            const resolveReqUse = resolveIsTriad ? resolveReq : null;
             const allowInv = settings.allowInversion && !isFirst && !isLast;
 
             // 离调：走 pcs / tones 覆盖，绕开"按调内级数查表"
@@ -1346,7 +1373,7 @@
             const v = fourPart
                 ? chooseFourPartVoicing(
                     scale, vDeg, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv, ctx,
-                    apTones, isResolve || undefined, resolveReq
+                    apTones, resolveIsTriad || undefined, resolveReqUse
                 )
                 : chooseVoicing(
                     scale, vDeg, seventh, prevMidis, allowInv, isLast, settings.allowSecondInv, apPcs
@@ -1462,6 +1489,59 @@
     //   记谱始终是「每小节 1 个全音符柱式和弦」；实际弹奏方式见 buildChordSchedule
     // ------------------------------------------------------------
 
+    // ------------------------------------------------------------
+    // 相对音高（首调）显示：把整段按「级数不变」搬到 C 大调记谱（2026-10-24）
+    //
+    //   ★ 只产出**显示用**的和弦副本，绝不修改 data.chords ——
+    //     卡片（已改级数，无调性）、听辨辅助窗、音频（midis）都还在用原拼写。
+    //   ★ 返回的 chord 是 Object.assign 浅拷贝 → .degree / .roman / .applied 全保留，
+    //     罗马数字标注与离调括号因此零改动。
+    //   ★ 拼写不能写成 midiToSpelled(midi + delta, buildScale('C'))：
+    //     那个函数对调外音走兜底分支会把音名静默写成 C 本位，离调小节必错。
+    //     这里按「字母相对主音的位移」定级数，再用 pc 差解升降号 —— 12 调 × 全和弦穷举
+    //     验证过 alter 只可能 0 / 1 / 11，不会冒出双升双降。
+    // ------------------------------------------------------------
+    function relativeSheet(src) {
+        const scale = (src && src.scale) || [];
+        if (scale.length !== 7 || !src.chords) return null;
+        const tonicIdx = LETTERS.indexOf(scale[0].letter);
+        const tonicPc = scale[0].pc;
+        // 就近八度：整体位移不超过三全音，避免 B / ♭A 调整体沉到低音谱表下面去
+        let delta = ((12 - tonicPc) % 12);
+        if (delta > 6) delta -= 12;
+        const chords = src.chords.map((c) => {
+            const notes = c.notes.map((n, i) => {
+                const deg = ((LETTERS.indexOf(n.letter) - tonicIdx) % 7 + 7) % 7;
+                const letter = 'CDEFGAB'.charAt(deg);
+                const pc = ((LETTER_PC[n.letter] + n.acc) % 12 + 12) % 12;
+                const alter = ((pc - scale[deg].pc) % 12 + 12) % 12;
+                const acc = alter === 1 ? 1 : (alter === 11 ? -1 : 0);
+                const midi = (c.midis && c.midis[i] != null)
+                    ? c.midis[i] + delta
+                    : (n.octave + 1) * 12 + LETTER_PC[n.letter] + n.acc + delta;
+                // ★ 八度必须用**显示后**的字母/升降号反解（用原 letter 会静默错八度）
+                return {
+                    letter: letter,
+                    acc: acc,
+                    octave: Math.floor((midi - LETTER_PC[letter] - acc) / 12) - 1
+                };
+            });
+            return Object.assign({}, c, {
+                notes: notes,
+                // 只影响符干方向（全音符无符干），保持"整段平移"的自洽
+                midis: (c.midis || []).map((m) => m + delta)
+            });
+        });
+        return { key: 'C', keySig: {}, chords: chords };
+    }
+
+    // 只重画谱面（显示类设置改完调它）：不重新出题、不动音频、不作废已渲染的 WAV。
+    function repaintSheet() {
+        if (!data) return;
+        renderChordSheet(data);
+        if (mpExpanded && mpStageView === 'sheet') requestAnimationFrame(fitSheetPage);
+    }
+
     function renderChordSheet(data) {
         const container = document.getElementById('chord-sheet-music');
         if (!container) return;
@@ -1473,7 +1553,12 @@
             return;
         }
 
-        const { key, keySig, chords } = data;
+        const { key, keySig } = data;
+        // 相对音高：整段搬到 C 大调显示（只在渲染层生效，data 本身一个字节都不动）
+        const rel = (settings.pitchMode === 'relative') ? relativeSheet(data) : null;
+        const shownKey = rel ? rel.key : key;
+        const shownKeySig = rel ? rel.keySig : keySig;
+        const chords = rel ? rel.chords : data.chords;   // 同名覆盖 → 下游绘制代码零改动
         const fourPart = (data.voicingMode === 'fourpart');
         const beatsPerMeasure = 4;
         // 全音符每小节只占很窄一格，一行放 4 小节（16 小节 = 4 行，8 小节 = 2 行）
@@ -1527,7 +1612,7 @@
             const stave = new Vex.Stave(x, g.y, staveWidth);
             stave.setContext(ctx);
             if (isFirstInLine) {
-                stave.addClef('treble').addKeySignature(key);
+                stave.addClef('treble').addKeySignature(shownKey);
                 if (m === 0) stave.setTimeSignature('4/4');
             }
             if (m === totalMeasures - 1) {
@@ -1544,7 +1629,7 @@
             // 全音符没有符干，谱面干净；临时记号照常加在最左
             const note = new Vex.StaveNote({ keys: keys, duration: '1n' });
             chord.notes.forEach((n, idx) => {
-                const acc = accidentalOf(n.letter, n.acc, keySig);
+                const acc = accidentalOf(n.letter, n.acc, shownKeySig);
                 if (acc) note.addModifier(new accClass(acc), idx);
             });
             note.setStemDirection(stemDir);
@@ -1606,8 +1691,8 @@
             bass.setContext(ctx);
 
             if (isFirstInLine) {
-                treble.addClef('treble').addKeySignature(key);
-                bass.addClef('bass').addKeySignature(key);
+                treble.addClef('treble').addKeySignature(shownKey);
+                bass.addClef('bass').addKeySignature(shownKey);
                 if (m === 0) {
                     // 拍号两个谱表都要记（标准大谱表写法）。只记上谱表的话，
                     // 该行的下谱表音符起始会比上谱表早 33 个单位。
@@ -1644,7 +1729,7 @@
             });
             [[upper, notes[2], 0], [upper, notes[3], 1],
              [lower, notes[0], 0], [lower, notes[1], 1]].forEach(([nt, n, idx]) => {
-                const acc = accidentalOf(n.letter, n.acc, keySig);
+                const acc = accidentalOf(n.letter, n.acc, shownKeySig);
                 if (acc) nt.addModifier(new accClass(acc), idx);
             });
             upper.setStemDirection(1);    // 高音声部符干向上（全音符不可见，留给后续扩展）
@@ -2295,7 +2380,11 @@
         try { s = JSON.parse(raw); } catch (e) { return; }
         if (!s || typeof s !== 'object') return;
 
-        if (s.length === 8 || s.length === 16) settings.length = s.length;
+        // ★ 白名单登记：枚举值一定要显式收，否则 localStorage 里存着也会被悄悄丢掉。
+        //   ★ 长度只剩 8 / 12（16 已取消）：老配置存的是 16 就收敛到 12 ——
+        //     迁移只在**这一层**做，生成层保持"传多少用多少"（验收脚本会直接传 16）。
+        if (s.length === 8 || s.length === 12) settings.length = s.length;
+        else if (s.length === 16) settings.length = 12;
         if (typeof s.tempo === 'number' && s.tempo >= 40 && s.tempo <= 120) settings.tempo = s.tempo;
         if (typeof s.allowInversion === 'boolean') settings.allowInversion = s.allowInversion;
         if (typeof s.allowSecondInv === 'boolean') settings.allowSecondInv = s.allowSecondInv;
@@ -2314,10 +2403,18 @@
         if (s.appliedTargetMode === 'simple' || s.appliedTargetMode === 'complex') {
             settings.appliedTargetMode = s.appliedTargetMode;
         }
-        if (s.appliedReturnMode === 'simple' || s.appliedReturnMode === 'medium'
-            || s.appliedReturnMode === 'complex') {
-            settings.appliedReturnMode = s.appliedReturnMode;
+        // 和弦进行（多选数组）。老配置只有 appliedReturnMode → 按档位折算成进行，
+        //   折算规则只用来"接住旧设置"，新配置一律以数组为准。
+        if (Array.isArray(s.appliedProgressions)) {
+            const picked = s.appliedProgressions.filter((k) => APPLIED_PROGRESSIONS[k]);
+            settings.appliedProgressions = picked.length ? picked : ['5-1'];
+        } else if (s.appliedReturnMode === 'medium' || s.appliedReturnMode === 'complex') {
+            settings.appliedProgressions = ['5-1', '2-5-1'];
+        } else if (s.appliedReturnMode === 'simple') {
+            settings.appliedProgressions = ['5-1'];
         }
+        // 音高显示：只认两个字面值，缺省落 'fixed'（= 改造前行为）
+        if (s.pitchMode === 'fixed' || s.pitchMode === 'relative') settings.pitchMode = s.pitchMode;
         // 连奏已固定 1.0（用户 2026-10-06 拍板，滑块已删）：localStorage 里的旧值一律忽略
         if (s.degrees && typeof s.degrees === 'object') {
             for (let d = 1; d <= 7; d++) {
@@ -2794,7 +2891,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 28;
+    const APP_VERSION = 29;
     (function mountVersionTag() {
         function place() {
             try {
@@ -2823,10 +2920,13 @@
 
     function cacheEls() {
         els = {
-            length: document.getElementById('chord-length'),
+            lengthSeg: document.getElementById('chord-length-seg'),
             tempo: document.getElementById('chord-tempo'),
             tempoVal: document.getElementById('chord-tempo-val'),
-            voicingMode: document.getElementById('chord-voicing-mode'),
+            voicingSeg: document.getElementById('chord-voicing-seg'),
+            // 音高显示：固定音高 / 相对音高（一颗 toggle-pill，role=switch）
+            relativePitch: document.getElementById('chord-relative-pitch'),
+            relativePitchLabel: document.getElementById('chord-relative-pitch-label'),
             // 播放方式改成了连体椭圆滑块（原 generate / play / playArp / playBass / stop 五个键已删）
             playSeg: document.getElementById('chord-play-seg'),
             // 按住卡片显示什么：两档连体椭圆滑块（roman / bass）
@@ -2847,7 +2947,8 @@
             naturalPage: document.getElementById('chord-page-natural'),
             appliedEnable: document.getElementById('chord-applied-enable'),
             appliedTargetSeg: document.getElementById('chord-applied-target-seg'),
-            appliedReturnSeg: document.getElementById('chord-applied-return-seg'),
+            appliedProgPills: Array.prototype.slice.call(
+                document.querySelectorAll('#chord-applied-prog [data-prog]')),
             appliedPreview: document.getElementById('chord-applied-preview'),
             info: document.getElementById('chord-info'),
             renderInfo: document.getElementById('chord-render-info'),
@@ -2872,7 +2973,9 @@
             mpNext: document.getElementById('chord-mp-next'),
             mpGenerate: document.getElementById('chord-mp-generate'),
             mpExitPractice: document.getElementById('chord-mp-exit-practice'),
-            mpHint: document.getElementById('chord-mp-hint'),
+            // 当前和弦各音的发声按钮（取代原来那行手势提示）
+            mpTones: document.getElementById('chord-mp-tones'),
+            mpModeNote: document.getElementById('chord-mp-mode-note'),
             mpError: document.getElementById('chord-mp-error'),
             mpErrorGrid: document.getElementById('chord-mp-error-grid'),
             mpErrorNone: document.getElementById('chord-mp-error-none'),
@@ -3334,10 +3437,56 @@
     }
 
     // 换封面（-1 不动手：保持锁屏上最后一张，避免把封面清成空）
+    // 当前和弦各音的发声按钮（2026-10-24，取代原来那行手势提示）
+    //   ★ 只写 1 2 3 4（从低到高的序号），**不写音高** —— 用户明确要求；
+    //     数量跟实际音数走（键盘和声三音和弦 3 颗 / 七和弦 4 颗）。
+    //   ★ 走 playInstantChord（实时 Web Audio，音源直接从 bufferCache 取），
+    //     完全不经 chordAudioEl → 不可能把主播放的起播位置/叠音问题带回来。
+    //   ★ 多指可同时按（每个按钮各自 pointerdown），按几个响几个。
+    function mpPaintToneButtons(m) {
+        if (!els || !els.mpTones) return;
+        const c = (data && data.chords) ? data.chords[m] : null;
+        const midis = (c && c.midis) ? c.midis : [];
+        const box = els.mpTones;
+        // 和弦或小节变了才重建（避免每帧重排 DOM）
+        if (box.__data === data && box.dataset.measure === String(m)
+            && box.childNodes.length === midis.length) {
+            return;
+        }
+        box.innerHTML = '';
+        for (let i = 0; i < midis.length; i++) {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'mp-tone';
+            b.dataset.idx = String(i);
+            b.textContent = String(i + 1);
+            b.setAttribute('aria-label', '第 ' + (i + 1) + ' 个音（从低到高）· 试听');
+            b.addEventListener('pointerdown', (e) => {
+                // 拦掉后续 click：这一排只负责发声，不触发任何"跳小节"之类的导航
+                e.preventDefault();
+                const cur = (data && data.chords) ? data.chords[m] : null;
+                if (!cur || !cur.midis) return;
+                const midi = cur.midis[i];
+                if (midi == null) return;
+                b.classList.add('is-down');
+                unlockAudioNow();
+                playInstantChord([midi], 'note').catch(() => {});
+            });
+            const up = () => b.classList.remove('is-down');
+            b.addEventListener('pointerup', up);
+            b.addEventListener('pointercancel', up);
+            b.addEventListener('pointerleave', up);
+            box.appendChild(b);
+        }
+        box.__data = data;
+        box.dataset.measure = String(m);
+    }
+
     function setCoverMeasure(m) {
         if (m === coverMeasure) return;
         coverMeasure = m;
         if (m >= 0) updateNowPlaying(m);
+        mpPaintToneButtons(m);
     }
 
     function artSupported() {
@@ -3484,9 +3633,10 @@
 
         if (compact) return;
 
-        // 和弦音名
+        // 和弦音：调内级数（如「2  ♯4  6  1」），从左到右、低 → 高。
+        //   比音名串窄约三成，所以字号略放大、间距加宽，与上行大罗马数字重量相配。
         g.textAlign = 'center';
-        g.font = '500 ' + (size * 0.082) + 'px ' + ART_SANS;
+        g.font = '500 ' + (size * 0.090) + 'px ' + ART_SANS;
         g.fillStyle = pal.sub;
         g.fillText(info.tones, size / 2, size * 0.715);
 
@@ -3591,8 +3741,12 @@
                     groupId: c.applied.groupId
                 }
                 : null,
-            tones: c.notes.map((n) => pitchName(n.letter, n.acc)).join('  '),
-            footer: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
+            // 和弦音：用**调内级数**（阿拉伯数字，变化音带 ♯/♭）而不是音名 ——
+            //   与听辨辅助窗同一套写法，且天然不暴露调性（用户 2026-10-24 定）。
+            //   重复音不去重（四部里常常 1 3 5 1，重复的是哪个音本身就是信息）。
+            tones: (data.scale ? c.notes.map((n) => degreeOfNote(n, data.scale).text) : []).join('   '),
+            // ★ 去掉调名（用户 2026-10-24：「索性去掉调性」）：只留配声方式。
+            footer: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
             pos: (m + 1) + ' / ' + data.chords.length,
             // 低音在调内的级数（简谱数字，字符串；查不到时是音名）
             bassDegree: bassScale ? String(bassScale.degree)
@@ -3646,7 +3800,7 @@
         const c = data.chords[m];
         host.setNowPlaying({
             title: '第 ' + (m + 1) + ' 小节 · ' + c.roman,
-            artist: data.key + ' 大调 · ' + ((data.voicingMode === 'fourpart') ? '四部和声' : '三和弦'),
+            artist: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
             album: '和弦听辨',
             artwork: art
         });
@@ -3688,6 +3842,12 @@
         if (els.autoContinue) els.autoContinue.setAttribute('aria-checked', settings.autoContinue ? 'true' : 'false');
         if (els.portable) els.portable.setAttribute('aria-checked', settings.portable ? 'true' : 'false');
         if (els.appliedEnable) els.appliedEnable.setAttribute('aria-checked', settings.appliedEnabled ? 'true' : 'false');
+        if (els.relativePitch) {
+            const rel = (settings.pitchMode === 'relative');
+            els.relativePitch.setAttribute('aria-checked', rel ? 'true' : 'false');
+            // 开关的正文就是当前状态（固定音高 / 相对音高），一眼看得出现在是哪个
+            if (els.relativePitchLabel) els.relativePitchLabel.textContent = rel ? '相对音高' : '固定音高';
+        }
     }
 
     // ---- 离调设置页：滑块位置 / 页面切换 / 预览行 ----
@@ -3728,7 +3888,7 @@
         updateKindSeg();
         if (chordSettingsPage === 'applied') {
             updateAppliedTargetSeg();
-            updateAppliedReturnSeg();
+            updateAppliedProgPills();
         }
     }
 
@@ -3743,11 +3903,14 @@
         markSeg(els.appliedTargetSeg, (b) => b.dataset.target === cur);
     }
 
-    function updateAppliedReturnSeg() {
-        if (!els || !els.appliedReturnSeg) return;
-        const cur = ['simple', 'medium', 'complex'].indexOf(settings.appliedReturnMode) >= 0
-            ? settings.appliedReturnMode : 'simple';
-        markSeg(els.appliedReturnSeg, (b) => b.dataset.return === cur);
+    // 「和弦进行」是多选（5-1 / 2-5-1），所以不用 .seg 那套单选滑块，
+    //   改成一排 .toggle-pill：外观全交给 CSS，JS 只手写 aria-checked。
+    function updateAppliedProgPills() {
+        if (!els || !els.appliedProgPills) return;
+        const picked = settingsProgressions(settings);
+        els.appliedProgPills.forEach((b) => {
+            b.setAttribute('aria-checked', picked.indexOf(b.dataset.prog) >= 0 ? 'true' : 'false');
+        });
     }
 
     // 「当前可用和弦」预览：直接调生成侧那份词汇表 → 预览与出题永远不会脱节。
@@ -3813,18 +3976,20 @@
 
     function updateHint() {
         if (!els.hint || !data) return;
+        // ★ 2026-10-24 用户定：「索性去掉调性」—— 提示行不再写调名（谱面也不写），
+        //   只留小节数 / 配声方式 / 速度 / 转位 / 是否含离调。
         if (practiceMode) {
             els.hint.textContent =
-                `错题练习：${data.key} 大调 · ${data.chords.length} 小节 · ${settings.tempo} BPM · 正确率不计入统计`;
+                `错题练习：${data.chords.length} 小节 · ${settings.tempo} BPM · 正确率不计入统计`;
             return;
         }
         const invText = settings.allowInversion ? '开启转位（和弦间平稳连接）' : '全部原位';
         const modeText = (data.voicingMode === 'fourpart')
             ? '四部和声 · 大谱表'
-            : '三和弦 · 单行谱';
+            : '键盘和声 · 单行谱';
         const appliedText = settings.appliedEnabled ? ' · 含离调' : '';
         els.hint.textContent =
-            `本段：${data.key} 大调 · ${data.chords.length} 小节 · ${settings.tempo} BPM · ${modeText} · ${invText}${appliedText}`;
+            `本段：${data.chords.length} 小节 · ${settings.tempo} BPM · ${modeText} · ${invText}${appliedText}`;
     }
 
     async function doGenerate(auto) {
@@ -4184,22 +4349,35 @@
     }
 
     function bindUI() {
-        if (els.length) {
-            els.length.value = String(settings.length);
-            els.length.addEventListener('change', (e) => {
-                settings.length = parseInt(e.target.value, 10);
+        // 长度：8 / 12（连体椭圆滑块）。点同值不重掷，避免白换一段。
+        if (els.lengthSeg) {
+            els.lengthSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.len) return;
+                const v = parseInt(opt.dataset.len, 10);
+                if (v !== 8 && v !== 12) return;
+                if (v === settings.length) return;
+                settings.length = v;
                 saveSettings();
+                markSeg(els.lengthSeg, (b) => parseInt(b.dataset.len, 10) === settings.length);
                 doGenerate(true);
             });
+            markSeg(els.lengthSeg, (b) => parseInt(b.dataset.len, 10) === settings.length);
         }
 
-        if (els.voicingMode) {
-            els.voicingMode.value = (settings.voicingMode === 'triad') ? 'triad' : 'fourpart';
-            els.voicingMode.addEventListener('change', (e) => {
-                settings.voicingMode = (e.target.value === 'triad') ? 'triad' : 'fourpart';
+        // 配声模式：键盘和声（triad，单行谱 3 音）/ 四部和声（fourpart，大谱表 4 音）
+        if (els.voicingSeg) {
+            els.voicingSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!opt || !opt.dataset.voicing) return;
+                const v = (opt.dataset.voicing === 'fourpart') ? 'fourpart' : 'triad';
+                if (v === settings.voicingMode) return;
+                settings.voicingMode = v;
                 saveSettings();
+                markSeg(els.voicingSeg, (b) => b.dataset.voicing === settings.voicingMode);
                 doGenerate(true);
             });
+            markSeg(els.voicingSeg, (b) => b.dataset.voicing === settings.voicingMode);
         }
 
         if (els.tempo) {
@@ -4319,6 +4497,16 @@
                 doGenerate(true);
             });
         }
+        // 音高显示：固定音高 ⇄ 相对音高。只重画谱面 —— 不出题、不停播、不作废已渲染音频。
+        if (els.relativePitch) {
+            els.relativePitch.addEventListener('click', () => {
+                settings.pitchMode = (settings.pitchMode === 'relative') ? 'fixed' : 'relative';
+                saveSettings();
+                syncTogglePills();
+                repaintSheet();
+                updateHint();
+            });
+        }
         if (els.appliedTargetSeg) {
             els.appliedTargetSeg.addEventListener('click', (e) => {
                 const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
@@ -4330,15 +4518,29 @@
                 if (settings.appliedEnabled) doGenerate(true);
             });
         }
-        if (els.appliedReturnSeg) {
-            els.appliedReturnSeg.addEventListener('click', (e) => {
-                const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
-                if (!opt || !opt.dataset.return) return;
-                settings.appliedReturnMode = opt.dataset.return;
-                updateAppliedReturnSeg();
-                saveSettings();
-                updateAppliedPreview();
-                if (settings.appliedEnabled) doGenerate(true);
+        // 和弦进行（多选 pill）：至少留一项 —— 全点掉时把刚点的那项留回去。
+        if (els.appliedProgPills && els.appliedProgPills.length) {
+            els.appliedProgPills.forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    const k = btn.dataset.prog;
+                    if (!APPLIED_PROGRESSIONS[k]) return;
+                    let picked = settingsProgressions(settings).slice();
+                    const at = picked.indexOf(k);
+                    if (at >= 0) {
+                        if (picked.length === 1) {          // 不能一项都不选
+                            updateAppliedProgPills();
+                            return;
+                        }
+                        picked.splice(at, 1);
+                    } else {
+                        picked.push(k);
+                    }
+                    settings.appliedProgressions = APPLIED_PROGRESSION_KEYS.filter((x) => picked.indexOf(x) >= 0);
+                    updateAppliedProgPills();
+                    saveSettings();
+                    updateAppliedPreview();
+                    if (settings.appliedEnabled) doGenerate(true);
+                });
             });
         }
         applySettingsPage();
@@ -4713,6 +4915,8 @@
     //   改成量"装它的那个舞台"，取能放下的最大正方形，再用行内样式把它钉死。
     function mpPaintCover() {
         if (!els || !els.mpCover) return;
+        // 面板每次展开 / 切小节都会走到这里 → 顺便把发声按钮同步到当前小节
+        mpPaintToneButtons(mpMeasure);
         // ★ 冻结期间画的是"按住那一刻的快照"，不是当前小节 —— 这就是"报错对象锁定"的一半。
         //   （另一半在 mpOpenError：它也只认这份快照。）
         const info = mpFreeze ? mpFreeze.info : buildCoverInfo(mpMeasure);
@@ -5400,9 +5604,10 @@
         c.notes.forEach((n, i) => {                   // notes 已按 MIDI 升序（低 → 高）
             const midi = midis[i];
             const pc = ((midi % 12) + 12) % 12;
-            const k = (data && data.scale) ? data.scale.findIndex((s) => s.pc === pc) : -1;
-            // 调内级数；万一碰上变化音（理论上不会），退回显示音名，不显示空白
-            const digit = (k >= 0) ? String(k + 1) : pitchName(n.letter, n.acc);
+            // ★ 级数走 degreeOfNote（卡片同一套）：变化音显示 ♯4 而不是音名 F#。
+            const dg = (data && data.scale)
+                ? degreeOfNote(n, data.scale) : { num: 0, alter: 0, text: '' };
+            const digit = dg.text || pitchName(n.letter, n.acc);
             const t = ct.find((x) => x.pc === pc);
             const role = t ? (AID_ROLE_LABEL[t.role] || '') : '';
 
@@ -5421,7 +5626,9 @@
             b.appendChild(num);
             b.appendChild(label);
             b.setAttribute('aria-label',
-                pitchName(n.letter, n.acc) + ' · 第 ' + digit + ' 级 · ' + role + ' · 试听');
+                pitchName(n.letter, n.acc) + ' · 第 ' + (dg.num || digit) + ' 级'
+                + (dg.alter > 0 ? '（升高半音）' : (dg.alter < 0 ? '（降低半音）' : ''))
+                + ' · ' + role + ' · 试听');
             els.mpAidTones.appendChild(b);
         });
     }
@@ -5644,11 +5851,10 @@
     // 错题练习模式（复用迷你播放器，正确率不计入数据库，不设报错）
     // ============================================================
 
-    // ★ 用户 2026-10-07：上下手势对调（上滑=报错 / 下滑=辅助），提示文案跟着换。
-    const MP_HINT_NORMAL = '按住看答案 · 按住上滑报错 · 按住下滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表';
-    const MP_HINT_PRACTICE = '错题练习：按住看答案 · 按住下滑辅助 · 按住左/右滑上一个/下一个 · 顶行按钮切换谱表（不计统计 · 无报错）';
+    // ★ 2026-10-24：原来那一整行手势提示被"一排发声按钮"取代了，文案只留错题练习的一句。
+    const MP_MODE_NOTE_PRACTICE = '错题练习：不计统计 · 无报错';
 
-    // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 提示文案 / 收起条前缀 / 退出按钮
+    // 切换错题模式的 UI 痕迹：报错键 / 下滑手势 / 模式小字 / 收起条前缀 / 退出按钮
     function applyPracticeUi(on) {
         // 错题练习开关：恒显，靠 is-on 高亮 + 文案区分开/关
         if (els && els.mpExitPractice) {
@@ -5658,7 +5864,10 @@
             els.mpExitPractice.classList.toggle('is-on', !!on);
         }
         if (els && els.dbPractice) els.dbPractice.disabled = !!on;   // 错题中禁用数据库页入口（已在错题里）
-        if (els && els.mpHint) els.mpHint.textContent = on ? MP_HINT_PRACTICE : MP_HINT_NORMAL;
+        if (els && els.mpModeNote) {
+            els.mpModeNote.textContent = MP_MODE_NOTE_PRACTICE;
+            els.mpModeNote.hidden = !on;
+        }
         mpPaintProgress();
         updateHint();
     }
@@ -5964,11 +6173,18 @@
         _romanParts: romanParts,
         // 离调：词汇与规划（验收用：确认档位过滤、伪离调剔除、不碰首尾）
         _appliedChordSpec: appliedChordSpec,
-        _localDegValid: localDegValid,
+        _groupViable: groupViable,
+        _settingsProgressions: settingsProgressions,
+        _appliedProgressions: APPLIED_PROGRESSIONS,
         _appliedVocabulary: appliedVocabulary,
         _planAppliedEvents: planAppliedEvents,
         _getAppliedBrackets: () => appliedBrackets.slice(),
         _measureRomanWidth: measureRomanWidth,
+        // 级数显示 / 相对音高（验收用）
+        _degreeOfNote: degreeOfNote,
+        _pitchName: pitchName,
+        _relativeSheet: relativeSheet,
+        _accidentalOf: accidentalOf,
         _defaultSettings: DEFAULT_SETTINGS,
         _generateChordProgression: generateChordProgression,
         _doubledToneIndex: doubledToneIndex,
