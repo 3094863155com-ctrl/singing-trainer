@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=32"></script>
+<script src="chord_recognition.js?v=33"></script>
     <style>
         * {
             margin: 0;
@@ -326,6 +326,32 @@
             color: var(--accent);
             background: var(--accent-soft);
             border-color: #c7c9f8;
+        }
+
+        /* ---- 无调性记号里的「空格子」（用户 2026-10-24）----
+           和弦标记法不写根音字母，用一个空长方框占位：□ / □m / □M7 / □° …
+           方框是**画出来的**（不是 □ 字符），这样它和字体大小、颜色、粗细都能一起走。
+           尺寸用 em：pill 里是小号，卡片里会在 canvas 上按同一比例另画一份。 */
+        .qbox {
+            display: inline-block;
+            flex: 0 0 auto;
+            width: 0.60em;
+            height: 1.00em;
+            border: 1.6px solid currentColor;
+            border-radius: 0.14em;
+            vertical-align: -0.15em;
+            margin-right: 0.04em;
+        }
+
+        /* 性质范围那排 pill：方框要和后面的后缀贴紧（.toggle-pill 本身 gap 是 6px） */
+        #chord-atonal-qualities .toggle-pill {
+            gap: 0;
+            padding: 7px 11px;
+        }
+
+        /* 只剩最后一项时给它压暗：点不掉（"至少保留一项"） */
+        #chord-atonal-qualities .toggle-pill.is-last-on {
+            opacity: 0.72;
         }
 
         .toggle-hint {
@@ -1597,6 +1623,40 @@
             grid-column: 1 / -1;
         }
 
+        /* ---- 无调性的性质格（用户 2026-10-24）----
+           内容 = 画出来的空格子 + 性质后缀；字号比罗马数字小一档
+           （后缀是拉丁字母，26px 会显得比罗马数字抢眼）。 */
+        .mp-error__opt--quality {
+            font-size: 22px;
+            letter-spacing: 0.3px;
+        }
+
+        /* 点完之后：正确的那格描一圈，选错的那格压暗 */
+        .mp-error__opt.is-right {
+            box-shadow: 0 0 0 2.5px var(--accent) inset;
+        }
+
+        .mp-error__opt.is-wrong {
+            opacity: 0.40;
+        }
+
+        /* 即时反馈条（只在无调性出现） */
+        .mp-error__feedback {
+            padding: 10px 12px;
+            font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            line-height: 1.55;
+            text-align: center;
+            color: var(--text-primary);
+            background: var(--surface-hover);
+            border-radius: var(--r-md);
+        }
+
+        .mp-error__feedback[hidden] { display: none; }
+        .mp-error__feedback[data-ok="1"] { color: #17683a; background: #e6f5eb; }
+        .mp-error__feedback[data-ok="0"] { color: #9c2f1b; background: #fcece7; }
+
         .mp-error__hole {
             visibility: hidden;      /* 占位但看不见：后面的格子因此不会往前补位 */
             min-height: var(--mp-btn);
@@ -2245,6 +2305,12 @@
                     </button>
                     <div class="sgroup__body" id="grp-chord">
 
+                        <!-- 有调性 ⇄ 无调性：总开关。打开后整块换另一套设置（下方两块互斥显示） -->
+                        <div class="srow">
+                            <span>无调性模式</span>
+                            <button type="button" class="switch" id="chord-atonal" role="switch" aria-checked="false" aria-label="无调性模式"></button>
+                        </div>
+
                         <div id="chord-tonal">
 
                             <!-- 相对音高只对"有调性"成立（无调性没有调可移），所以放在这里而不是「通用」 -->
@@ -2321,6 +2387,46 @@
                                 </div>
                             </div>
                         </div><!-- /#chord-tonal -->
+
+                        <!-- 无调性：不考"调内第几级"，只考"这是什么性质的和弦"。
+                             记号用和弦标记法，根音用一个空长方框占位（不暴露根音）。
+                             ★ 与 #chord-tonal 互斥显示，由 applySettingsPage() 同步。 -->
+                        <div id="chord-atonal-panel" hidden>
+                            <div class="ssub">
+                                <button type="button" class="ssub__head" id="grp-head-qualities"
+                                        aria-expanded="true" aria-controls="grp-qualities" data-sub="qualities">
+                                    <span>和弦性质</span>
+                                    <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span>
+                                </button>
+                                <div class="ssub__body" id="grp-qualities">
+
+                                    <!-- 顺序 = 报错浮窗的行优先顺序：常用在左、同类相邻。
+                                         7 种全勾 = 等概率；至少留一项（最后一项不可取消）。 -->
+                                    <div class="srow">
+                                        <span>性质范围</span>
+                                        <div class="toggle-row" id="chord-atonal-qualities">
+                                            <button type="button" class="toggle-pill" data-q="maj" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i></button>
+                                            <button type="button" class="toggle-pill" data-q="maj7" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i>M7</button>
+                                            <button type="button" class="toggle-pill" data-q="min" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i>m</button>
+                                            <button type="button" class="toggle-pill" data-q="min7" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i>m7</button>
+                                            <button type="button" class="toggle-pill" data-q="dom7" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i>7</button>
+                                            <button type="button" class="toggle-pill" data-q="hdim7" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i>ø7</button>
+                                            <button type="button" class="toggle-pill" data-q="dim" role="switch" aria-checked="true"><i class="qbox" aria-hidden="true"></i>°</button>
+                                        </div>
+                                    </div>
+
+                                    <div class="srow">
+                                        <span>转位</span>
+                                        <input type="checkbox" class="switch" id="chord-inversion-atonal" title="关闭＝全部原位；开启＝有概率转位（首小节仍用原位）">
+                                    </div>
+
+                                    <div class="srow" id="row-second-inv-atonal">
+                                        <span>6₄ 和弦</span>
+                                        <input type="checkbox" class="switch" id="chord-second-inv-atonal" title="不勾选＝三和弦不出现 6₄；勾选＝允许（需先开启转位）">
+                                    </div>
+                                </div>
+                            </div>
+                        </div><!-- /#chord-atonal-panel -->
                     </div>
                 </section>
             </div><!-- /.settings-shell -->
@@ -2473,8 +2579,11 @@
     <!-- 报错浮窗：按住上滑 → 选一个「我听成了哪个级数」（2026-10-07 与辅助窗对调） -->
     <div id="chord-mp-error" class="mp-error" role="dialog" aria-modal="true" hidden>
         <div class="mp-error__panel">
-            <div class="mp-error__title">你听成了哪个级数？</div>
+            <div class="mp-error__title" id="chord-mp-error-title">你听成了哪个级数？</div>
             <div class="mp-error__grid" id="chord-mp-error-grid"></div>
+            <!-- 无调性才有：点完立刻给「对 / 错 + 正确答案」，1.4 秒后自动关窗续播。
+                 有调性保持原样（只记账，不弹对错）。 -->
+            <div class="mp-error__feedback" id="chord-mp-error-feedback" hidden></div>
             <button class="mp-error__none" id="chord-mp-error-none">没听出来</button>
         </div>
     </div>

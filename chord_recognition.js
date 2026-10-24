@@ -57,8 +57,8 @@
         // 速度四档 40 / 50 / 65 / 80（用户 2026-10-24 定），默认取第三档 65
         tempo: 65,
         // ---- 转位 / 6₄：2026-10-24 第三十一轮拆成三套互不影响的开关 ----
-        //   自然和弦、离调和弦各一套（用户在设置页里分别控制）；
-        //   无调性模式另有 atonalInversion / atonalSecondInv（见文件末尾）。
+        //   自然和弦、离调和弦、无调性各一套（用户在设置页里分别控制）。
+        //   见 allowInversionNatural / allowInversionApplied / allowInversionAtonal。
         //   ★ allowSecondInvApplied 现在恒 false 且不提供 UI：离调的七和弦转位叫
         //     65/43/42，而组末那个"解决和弦"严禁 46（用户 2026-10-24 明确）。
         allowInversionNatural: false,
@@ -117,7 +117,21 @@
         //     现在它也走「应用变更」那一套（改了不立刻重放，等用户点应用）。
         playMode: 'block',
         // 设置页折叠状态（哪几个板块是展开的）。它是 UI 状态，但存这里最省事。
-        uiOpen: { general: true, play: true, chord: true, natural: true, qualities: true }
+        uiOpen: { general: true, play: true, chord: true, natural: true, qualities: true },
+        // ---- 无调性模式（2026-10-24，用户逐项拍板）----
+        //   总开关：打开后「和弦」板块换成另一套设置，题目从"调内第几级"
+        //   变成"这是什么性质的和弦"，答案卡片改用和弦标记（□ / □m / □M7 …）。
+        //   ★ 缺省 false：老 localStorage 与回归脚本都没有这个键 → 走有调性分支，
+        //     有调性出题路径逐字节不变（回归快照靠这条）。
+        atonal: false,
+        // 性质范围（多选）。7 种全勾 = 等概率；至少留一项（UI 上最后一项禁用）。
+        atonalQualities: {
+            maj: true, min: true, dim: true,
+            maj7: true, min7: true, dom7: true, hdim7: true
+        },
+        // 无调性也有自己的一套转位 / 6₄（与自然、离调两套互不影响）
+        allowInversionAtonal: false,
+        allowSecondInvAtonal: false
     };
 
     // 强调低音的上限倍数：100% 时低音 = 原增益 ×(1 + 这个数)。
@@ -967,7 +981,10 @@
                 const buildFor = (chord, relax) => buildFourPartCandidates(
                     scale, chord.applied ? chord.applied.localDegree : chord.degree,
                     !!chord.seventh, true, chord.applied ? false : allowSecondInv, relax,
-                    chord.applied ? appliedTones(chord.applied) : null
+                    // 音集覆盖：离调用自己的 tone 表；无调性按 rootPc + 性质现算；
+                    // 自然和弦传 null → 内部按调内级数查表（有调性路径一个字节都没变）。
+                    chord.applied ? appliedTones(chord.applied)
+                        : (chord.rootPc != null ? atonalTones(chord.rootPc, chord.quality).tones : null)
                 ).filter((c) => c.inv === chord.inversion);
 
                 const before = (m >= 2) ? chords[m - 2].midis : null;
@@ -1507,6 +1524,130 @@
         return { key, scale, keySig, chords, voicingMode: fourPart ? 'fourpart' : 'triad' };
     }
 
+    // ------------------------------------------------------------
+    // 无调性模式（用户 2026-10-24）
+    //   考查对象从"调内第几级"换成"这是什么性质的和弦"：
+    //   每小节独立抽根音 pc（12 等概率）+ 性质（勾选项等概率），
+    //   唯一约束是相邻两小节不得"根音与性质都相同"。
+    //   配声不新写：复用 chooseVoicing / chooseFourPartVoicing，
+    //   把"按调内级数查音集"换成"按根音 pc + 性质算音集"（pcsOverride / tonesOverride）。
+    // ------------------------------------------------------------
+    // 记号与音集：offsets 是相对根音的半音偏移（升序 = 三度叠置的顺序）
+    const ATONAL_QUALITIES = [
+        { key: 'maj', suffix: '', offsets: [0, 4, 7] },
+        { key: 'min', suffix: 'm', offsets: [0, 3, 7] },
+        { key: 'dim', suffix: '°', offsets: [0, 3, 6] },
+        { key: 'maj7', suffix: 'M7', offsets: [0, 4, 7, 11] },
+        { key: 'min7', suffix: 'm7', offsets: [0, 3, 7, 10] },
+        { key: 'dom7', suffix: '7', offsets: [0, 4, 7, 10] },
+        { key: 'hdim7', suffix: 'ø7', offsets: [0, 3, 6, 10] }
+    ];
+    // 根音字母：同一个 pc 有两种拼法，按性质挑"不出现重升重降、且符合作曲习惯"的那一套。
+    //   小和弦 / 减和弦 → 升号体系：C♯m7 比 D♭m7 常见得多，C♯° = C♯ E G 也不用重降。
+    //   大和弦 / 属七   → 降号体系：D♭M7、E♭7、B♭7 是通行写法。
+    //   两套表都验证过：12 个 pc × 7 种性质，全部 ≤ 1 个升降号，不出现 𝄪 / 𝄫。
+    const ATONAL_ROOT_LETTER_SHARP = ['C', 'C', 'D', 'D', 'E', 'F', 'F', 'G', 'G', 'A', 'A', 'B'];
+    const ATONAL_ROOT_LETTER_FLAT  = ['C', 'D', 'D', 'E', 'E', 'F', 'G', 'G', 'A', 'A', 'B', 'B'];
+
+    function atonalQualityOf(key) {
+        for (const q of ATONAL_QUALITIES) if (q.key === key) return q;
+        return ATONAL_QUALITIES[0];
+    }
+
+    // 根音 pc + 性质 → { q, pcs, tones }
+    //   tones 的 shape 与 appliedTones() 一致（letter / acc / pc / role），
+    //   于是配声、封面、辅助窗、拼写全都能复用同一条通路。
+    function atonalTones(rootPc, qKey) {
+        const q = atonalQualityOf(qKey);
+        const pc0 = ((rootPc % 12) + 12) % 12;
+        const sharp = (q.key === 'dim' || q.key === 'hdim7'
+            || q.key === 'min' || q.key === 'min7');
+        const letter = (sharp ? ATONAL_ROOT_LETTER_SHARP : ATONAL_ROOT_LETTER_FLAT)[pc0];
+        const pcs = q.offsets.map((o) => (pc0 + o) % 12);
+        const tones = spellTertianChord(letter, pcs).map((t, i) => ({
+            letter: t.letter,
+            acc: t.acc,
+            pc: t.pc,
+            role: ['root', 'third', 'fifth', 'seventh'][i]
+        }));
+        return { q, pcs, tones };
+    }
+
+    function buildAtonalSchedule(settings) {
+        const N = settings.length;
+        // 性质池：勾了的才可能出现；一项都没勾时兜底大三（UI 上不允许清空，这里只防脏数据）
+        const picked = ATONAL_QUALITIES.filter((q) =>
+            !settings.atonalQualities || settings.atonalQualities[q.key] !== false);
+        const pool = picked.length ? picked : [ATONAL_QUALITIES[0]];
+        const fourPart = (settings.voicingMode === 'fourpart');
+        // 配声只在这一处用到 scale（音集全走 override），给个固定脚手架即可 ——
+        //   ★ 绝不能把它挂到 data.scale 上：那样 chordRootMidi 会把全曲根音算成同一个 pc，
+        //     随身听模式末拍的根音整段错。根音改由每个 chord 的 rootPc 携带。
+        const scale = buildScale('C');
+        const chords = [];
+        let prevMidis = null;
+        let prevRootPc = -1;
+        let prevQ = '';
+        // ★ 无调性没有"导音解决"这回事：leadingPc / tonicPc 必须传 null，
+        //   否则每个和弦都被一条不存在的导音规则罚分（fourPartCost 的 ctx 分支）。
+        //   prevSeventhPc 仍传真实七音 —— 七音下行解决是通用倾向，不是调性专属。
+        const ctx = { leadingPc: null, tonicPc: null, prevSeventhPc: null };
+
+        for (let i = 0; i < N; i++) {
+            let rootPc = 0;
+            let q = pool[0];
+            // 相邻不重复：根音与性质**都**相同才重抽。guard 防"只勾了一项且根音撞车"时抖死。
+            for (let guard = 0; guard < 24; guard++) {
+                rootPc = Math.floor(Math.random() * 12);
+                q = pool[Math.floor(Math.random() * pool.length)];
+                if (!(rootPc === prevRootPc && q.key === prevQ)) break;
+            }
+            prevRootPc = rootPc;
+            prevQ = q.key;
+
+            const t = atonalTones(rootPc, q.key);
+            const seventh = (t.pcs.length === 4);
+            const isLast = (i === N - 1);
+            // 首小节不加转位（"起手用原位"是通用惯例，也是听辨的锚点）
+            const allowInv = !!settings.allowInversionAtonal && i > 0 && !isLast;
+            const allowSecondInv = !!settings.allowSecondInvAtonal;
+
+            const v = fourPart
+                ? chooseFourPartVoicing(
+                    scale, 1, seventh, prevMidis, allowInv, isLast, allowSecondInv, ctx, t.tones
+                )
+                : chooseVoicing(
+                    scale, 1, seventh, prevMidis, allowInv, isLast, allowSecondInv, t.pcs
+                );
+            prevMidis = v.midis;
+            ctx.prevSeventhPc = seventh ? t.tones[3].pc : null;
+
+            chords.push({
+                // degree 固定 1 —— 只为让"重复音规则"落到根音上（doubledToneIndex 按级数判断）。
+                //   无调性的答题维度不用它，配色由 quality 决定（见 drawCover）。
+                degree: 1,
+                seventh,
+                inversion: v.inv,
+                midis: v.midis,
+                notes: spellMidis(v.midis, t.tones),
+                roman: '',        // 无调性不画谱面、不写罗马数字；留空串防任何人读 .length
+                doubledRole: v.doubledRole || null,
+                voices4: fourPart,
+                rootPc: ((rootPc % 12) + 12) % 12,
+                quality: q.key
+            });
+        }
+
+        if (fourPart) repairFourPartOverlaps(scale, chords, !!settings.allowSecondInvAtonal);
+
+        return {
+            key: null, scale: null, keySig: null,
+            chords,
+            voicingMode: fourPart ? 'fourpart' : 'triad',
+            atonal: true
+        };
+    }
+
     // 按给定级数序列配声（错题练习专用：错误组合 + Ⅰ 胶水）。
     //   配声循环与 generateChordProgression 的 916-964 行同构 —— 但**绝对不动本体**，
     //   否则和声回归基线（triad 快照 sha256）会漂。
@@ -1618,7 +1759,7 @@
 
     // 只重画谱面（显示类设置改完调它）：不重新出题、不动音频、不作废已渲染的 WAV。
     function repaintSheet() {
-        if (!data) return;
+        if (!data || data.atonal) return;   // 无调性没有谱表，别去画
         renderChordSheet(data);
         if (mpExpanded && mpStageView === 'sheet') requestAnimationFrame(fitSheetPage);
     }
@@ -2066,9 +2207,12 @@
     //   scale 拿不到时退回最低音（不会出错，只是转位时提示音不够精确）。
     function chordRootMidi(chord, scale) {
         // 离调：根音不在调内级数表里，直接用 applied.rootPc（5/Ⅴ 的根音是 D，不是 G）
-        if (chord.applied) {
+        // 无调性：同理走 chord.rootPc（整段没有调，scale 是 null）
+        const rootPcFixed = chord.applied ? chord.applied.rootPc
+            : (chord.rootPc != null ? chord.rootPc : null);
+        if (rootPcFixed != null) {
             const bass = chord.midis[0];
-            let off = (((chord.applied.rootPc - (bass % 12)) % 12) + 12) % 12;
+            let off = (((rootPcFixed - (bass % 12)) % 12) + 12) % 12;
             if (off > 6) off -= 12;
             return bass + off;
         }
@@ -2733,8 +2877,16 @@
     // 某一小节"完整听完了" → 计入 seen 与错误组合榜的分母。
     //   口径是**播完才算**：在 setMeasureHighlight 里，当高亮从 m 跳到 m+1 时记 m。
     //   （"进入就算"在点小节跳转 / seek / 连播换段时会误计，而且会让"永远第一小节的 Ⅰ"被高估。）
+    // 统计闸门（用户 2026-10-24）：**错题练习**与**无调性模式**都不记账。
+    //   ★ 不能只堵 flushStats 的落盘处：recordHeard / recordReport 是"先就地改内存里的
+    //     statsAll / statsSession，再 markStatsDirty"，堵在落盘只会"不持久化"，
+    //     数据库页当场就是脏的（每小节都被记成 seen[1]，混淆矩阵第 1 行被灌满）。
+    function statsAllowed() {
+        return !practiceMode && !(settings && settings.atonal);
+    }
+
     function recordHeard(m) {
-        if (practiceMode) return;   // 错题练习的正确率不计入数据库
+        if (!statsAllowed()) return;   // 错题练习 / 无调性不计入数据库
         if (!data || m < 0 || m >= data.chords.length) return;
         const d = data.chords[m].degree;
         const scopes = [statsAll, statsSession];
@@ -2759,7 +2911,7 @@
     // 一次报错 → 混淆矩阵 + 该级错误次数 + 错误组合榜（长度 2/3/4 的窗口各计一次错）
     //   ★ 方向性：窗口按时间顺序拼 key（…前和弦 → 出错和弦），逆向 ≠ 正向。
     function recordReport(rec) {
-        if (practiceMode) return;   // 错题练习不计入数据库
+        if (!statsAllowed()) return;   // 错题练习 / 无调性不计入数据库
         const guessedKey = (rec.guessed == null) ? '0' : String(rec.guessed);
         const actualKey = String(rec.actual);
         const scopes = [statsAll, statsSession];
@@ -3007,6 +3159,9 @@
     let mpGesture = null;         // 长按手势记录（null = 无手势）
     let mpReports = [];           // 报错明细（内存，上限 MP_REPORTS_MAX；聚合统计另有持久化）
     let mpErrorCtx = null;        // 报错浮窗那一刻的快照，防作答时小节已漂移
+    // 无调性的"对/错"反馈会延迟 1.4 秒再关窗。这个令牌用来作废过期的定时器：
+    //   期间用户自己点窗外关掉了、或又开了新窗，旧的定时器不该再动一次。
+    let mpErrorFeedbackToken = 0;
     // 「换一段」之后要不要顺手接着播？迷你播放器的定位是连续刷题 → 默认接着播。
     // 想让它跟页面上那颗「下一首」一样"只生成不播"，把这个常量改成 false 即可。
     const MP_AUTOPLAY_AFTER_GENERATE = true;
@@ -3082,7 +3237,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 32;
+    const APP_VERSION = 33;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -3211,11 +3366,19 @@
             // 「参与级数」折叠行：收起时只显示 N 项已选
             degreeToggle: document.getElementById('chord-degree-toggle'),
             degreeCount: document.getElementById('chord-degree-count'),
-            // 转位 / 6₄：自然、离调各一套（无调性那一套在第二步加）
+            // 转位 / 6₄：自然、离调、无调性各一套
             invNatural: document.getElementById('chord-inversion-natural'),
             secondInvNatural: document.getElementById('chord-second-inv-natural'),
             rowSecondInvNatural: document.getElementById('row-second-inv-natural'),
             invApplied: document.getElementById('chord-inversion-applied'),
+            // ---- 无调性（第三步：总开关 + 性质范围 + 自己那套转位）----
+            atonalSwitch: document.getElementById('chord-atonal'),
+            atonalPanel: document.getElementById('chord-atonal-panel'),
+            atonalQualityPills: Array.prototype.slice.call(
+                document.querySelectorAll('#chord-atonal-qualities [data-q]')),
+            invAtonal: document.getElementById('chord-inversion-atonal'),
+            secondInvAtonal: document.getElementById('chord-second-inv-atonal'),
+            rowSecondInvAtonal: document.getElementById('row-second-inv-atonal'),
             // ---- 和弦板块 ----
             tonalPanel: document.getElementById('chord-tonal'),
             appliedEnable: document.getElementById('chord-applied-enable'),
@@ -3259,6 +3422,8 @@
             mpError: document.getElementById('chord-mp-error'),
             mpErrorGrid: document.getElementById('chord-mp-error-grid'),
             mpErrorNone: document.getElementById('chord-mp-error-none'),
+            mpErrorTitle: document.getElementById('chord-mp-error-title'),
+            mpErrorFeedback: document.getElementById('chord-mp-error-feedback'),
             mpAid: document.getElementById('chord-mp-aid'),
             mpAidBlock: document.getElementById('chord-mp-aid-block'),
             mpAidTones: document.getElementById('chord-mp-aid-tones'),
@@ -3826,6 +3991,69 @@
     //        罗马数字（含转位）、和弦音名、调性底行**全跳过**。
     //   ★ 锁屏封面走 coverBlobUrl → drawCover(不带 opts)，所以恒为罗马数字那档。
     function drawCover(g, size, info, compact, opts) {
+        // ---------------- 无调性档（先于其它分支：它没有 degree / roman，下面的色板会 NaN）----------------
+        //   主字符 =「□ + 性质后缀」，方框是**画出来的**圆角矩形（不是 □ 字符），
+        //   与后缀一起居中；保留左上角小节号；不画调性、不画音名、不画转位数字。
+        if (info && info.atonal) {
+            const qIdx = (function () {
+                const i = ATONAL_QUALITIES.findIndex((q) => q.key === info.quality);
+                return i < 0 ? 0 : i;
+            })();
+            const aPal = ART_PALETTE[qIdx % ART_PALETTE.length];
+            const grad0 = g.createLinearGradient(0, 0, 0, size);
+            grad0.addColorStop(0, aPal.top);
+            grad0.addColorStop(1, aPal.bottom);
+            g.fillStyle = grad0;
+            g.fillRect(0, 0, size, size);
+
+            const suffix = info.suffix || '';
+            const boxWAt = (px) => px * 0.60;
+            const gapAt = (px) => (suffix ? px * 0.10 : 0);
+            const sufW = (px) => {
+                if (!suffix) return 0;
+                g.font = '700 ' + px + 'px ' + ART_SERIF;
+                return g.measureText(suffix).width;
+            };
+            const totalAt = (px) => boxWAt(px) + gapAt(px) + sufW(px);
+
+            let fs = size * (compact ? 0.58 : 0.50);
+            while (fs > size * 0.16 && totalAt(fs) > size * 0.82) fs -= size * 0.02;
+
+            const x0 = (size - totalAt(fs)) / 2;
+            const cyA = compact ? size * 0.5 : size * 0.44;
+            const bw = boxWAt(fs);
+            const bh = fs * 1.02;
+            g.strokeStyle = aPal.ink;
+            g.lineWidth = Math.max(1, fs * 0.085);
+            roundRectPath(g, x0, cyA - bh / 2, bw, bh, fs * 0.12);
+            g.stroke();
+            if (suffix) {
+                g.fillStyle = aPal.ink;
+                g.textAlign = 'left';
+                g.textBaseline = 'middle';
+                g.font = '700 ' + fs + 'px ' + ART_SERIF;
+                g.fillText(suffix, x0 + bw + gapAt(fs), cyA);
+            }
+
+            if (compact) return;
+
+            // 底行只留配声方式（无调性没有调可写）
+            if (info.footer) {
+                g.textAlign = 'center';
+                g.font = '400 ' + (size * 0.056) + 'px ' + ART_SANS;
+                g.fillStyle = aPal.sub;
+                g.fillText(info.footer, size / 2, size * 0.842);
+            }
+
+            g.textAlign = 'left';
+            g.globalAlpha = 0.85;
+            g.fillStyle = aPal.ink;
+            g.font = '600 ' + (size * 0.06) + 'px ' + ART_SANS;
+            g.fillText(info.pos, size * 0.065, size * 0.088);
+            g.globalAlpha = 1;
+            return;
+        }
+
         const bassOnly = !!(opts && opts.bassOnly);
         const isApplied = !bassOnly && !!(info && info.applied);
         const pal = bassOnly
@@ -4021,6 +4249,17 @@
     function buildCoverInfo(m) {
         if (!data || m < 0 || m >= data.chords.length) return null;
         const c = data.chords[m];
+        // 无调性：只有「性质」是答案，其余（级数、调性、音名、转位数字）一律不出现。
+        if (data.atonal) {
+            const q = atonalQualityOf(c.quality);
+            return {
+                atonal: true,
+                quality: q.key,
+                suffix: q.suffix,
+                footer: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
+                pos: (m + 1) + ' / ' + data.chords.length
+            };
+        }
         const parts = romanParts(c.degree, c.seventh, c.inversion, c.applied);
         // 「按住卡片只显示低音级数」那一档要用：这个和弦**低音**在调内的简谱数字。
         //   低音 = midis[0]（转位时就是那个转位音）。和弦音全来自调内音级 → 一定能在
@@ -4100,8 +4339,12 @@
         const art = artCache[m];
         if (!art || !art.length) { pendingArtPush = m; return; }
         const c = data.chords[m];
+        // 无调性：锁屏标题写和弦记号（□ 用字符，锁屏是纯文本）
+        const label = data.atonal
+            ? ('□' + atonalQualityOf(c.quality).suffix)
+            : c.roman;
         host.setNowPlaying({
-            title: '第 ' + (m + 1) + ' 小节 · ' + c.roman,
+            title: '第 ' + (m + 1) + ' 小节 · ' + label,
             artist: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
             album: '和弦听辨',
             artwork: art
@@ -4184,7 +4427,58 @@
         syncAppliedBody();
         syncAppliedScopePills();
         updateAppliedProgPills();
+        syncAtonalPanel();
         syncFoldHeads();
+    }
+
+    // 有调性 ⇄ 无调性：总开关 + 两块面板互斥显示 + 性质 pill 勾选态
+    function syncAtonalPanel() {
+        if (!els) return;
+        const on = !!pv('atonal');
+        if (els.atonalSwitch) els.atonalSwitch.setAttribute('aria-checked', on ? 'true' : 'false');
+        if (els.tonalPanel) els.tonalPanel.hidden = on;
+        if (els.atonalPanel) els.atonalPanel.hidden = !on;
+        syncAtonalQualityPills();
+    }
+
+    // 勾选了的性质键（**不兜底**，用于"至少留一项"的判定 —— 兜底会让空集永远查不出来）
+    function atonalQualityKeys(src) {
+        const q = (src && src.atonalQualities) || {};
+        const out = [];
+        ATONAL_QUALITIES.forEach((item) => {
+            if (q[item.key] !== false) out.push(item.key);
+        });
+        return out;
+    }
+
+    // 显示用：空集时兜底成大三（生成侧 buildAtonalSchedule 也这样兜底，两边一致）
+    function atonalPickedQualities(src) {
+        const keys = atonalQualityKeys(src);
+        return keys.length ? keys : ['maj'];
+    }
+
+    // 性质范围是多选，至少留一项：只剩一项时那颗 pill 压暗且点不掉
+    function syncAtonalQualityPills() {
+        if (!els || !els.atonalQualityPills) return;
+        const picked = atonalPickedQualities(Object.assign({}, settings, pending || {}));
+        els.atonalQualityPills.forEach((b) => {
+            const on = picked.indexOf(b.dataset.q) >= 0;
+            b.setAttribute('aria-checked', on ? 'true' : 'false');
+            b.classList.toggle('is-last-on', on && picked.length === 1);
+        });
+    }
+
+    // 切换性质时用：返回新对象（不改 settings / pending 里的引用）；不许把最后一项关掉
+    function withQualityToggled(key, on) {
+        const cur = (pending && pending.atonalQualities) || settings.atonalQualities;
+        const next = Object.assign({}, cur);
+        // ★ 判定必须在**改之前**做，而且不能用会兜底的那个函数：
+        //   否则"已空"会被兜底成 ['maj']，"至少留一项"永远不生效。
+        if (!on && atonalQualityKeys({ atonalQualities: cur }).length <= 1 && cur[key] !== false) {
+            return null;
+        }
+        next[key] = on;
+        return next;
     }
 
     function syncAppliedBody() {
@@ -4279,12 +4573,20 @@
                 `错题练习：${data.chords.length} 小节 · ${settings.tempo} BPM · 正确率不计入统计`;
             return;
         }
-        const invText = (settings.allowInversionNatural || settings.allowInversionApplied)
+        const invText = (data.atonal
+            ? settings.allowInversionAtonal
+            : (settings.allowInversionNatural || settings.allowInversionApplied))
             ? '开启转位（和弦间平稳连接）' : '全部原位';
         const modeText = (data.voicingMode === 'fourpart')
             ? '四部和声 · 大谱表'
             : '键盘和声 · 单行谱';
-        const appliedText = settings.appliedEnabled ? ' · 含离调' : '';
+        const appliedText = (!data.atonal && settings.appliedEnabled) ? ' · 含离调' : '';
+        // 无调性：没有调、也不谈级数，写成"无调性 · 只看和弦性质"
+        if (data.atonal) {
+            els.hint.textContent = `本段：${data.chords.length} 小节 · ${settings.tempo} BPM · ${modeText}`
+                + ` · 无调性 · ${invText}`;
+            return;
+        }
         els.hint.textContent =
             `本段：${data.chords.length} 小节 · ${settings.tempo} BPM · ${modeText} · ${invText}${appliedText}`;
     }
@@ -4293,8 +4595,13 @@
         stopChordPlayback();
         mpPauseJumpTo = -1;             // 换了新的一段 → "暂停态切过和弦"的待重定位作废
         // 错题练习：出题换成"错误组合 + Ⅰ 胶水"的固定序列（每次进入重洗一次顺序）
-        data = practiceMode ? practiceProgression() : generateChordProgression(settings);
-        renderChordSheet(data);
+        // ★ 无调性走独立入口：不与有调性共享控制流，所以有调性的出题路径一个字节都没动。
+        data = practiceMode
+            ? practiceProgression()
+            : (settings.atonal ? buildAtonalSchedule(settings) : generateChordProgression(settings));
+        // 无调性没有调、没有谱表：renderChordSheet 会把 undefined 当调号画（还会读
+        // chord.roman.length）→ 直接跳过，谱表页在无调性下也整个不出现。
+        if (!data.atonal) renderChordSheet(data);
         updateHint();
         setPlayButtonsEnabled(true);
         // 换了一段 → 之前渲染的音频与高亮全部作废（不然点小节会跳到旧音频上）
@@ -4307,6 +4614,13 @@
         //   它会在"用户正长按看答案"时只更新 mpLiveMeasure、不动显示，
         //   于是自动连播换段也不会把用户按住的那个答案换掉。
         mpOnMeasure(0);
+        // 无调性没有谱表页：切换键直接不出现（否则点进去是一张空白页）
+        if (data.atonal) {
+            if (mpStageView === 'sheet') mpSetStageView('card');
+        }
+        if (els && els.mpSheetToggle) els.mpSheetToggle.hidden = !!data.atonal;
+        // 无调性不记账 → 错题练习入口要跟着置灰（换段后刷一次，切换模式才生效）
+        applyPracticeUi(practiceMode);
         // 顺便把整段的锁屏封面画好（异步）。等用户点播放时早就绪了，切小节零延迟。
         buildChordArtwork();
         if (!auto) renderInfoText('已生成新的一段，点击“播放”');
@@ -4651,6 +4965,7 @@
         let paintEmph = function () {};
         let syncInvNatural = function () {};
         let syncInvApplied = function () {};
+        let syncInvAtonal = function () {};
 
         // 长度：8 / 12（连体椭圆滑块）。点同值不重掷，避免白换一段。
         if (els.lengthSeg) {
@@ -4881,6 +5196,31 @@
 
         if (els.applyBtn) els.applyBtn.addEventListener('click', applyPending);
 
+        // ---- 无调性（2026-10-24）----
+        //   总开关切的是**题库本身**（调内级数 → 和弦性质），所以走 content 脏值：
+        //   点应用才重出题，没点之前照旧用有调性那一段播。
+        if (els.atonalSwitch) {
+            els.atonalSwitch.addEventListener('click', () => {
+                const on = els.atonalSwitch.getAttribute('aria-checked') !== 'true';
+                stageSetting('atonal', on, 'content');
+                syncAtonalPanel();
+            });
+        }
+        if (els.atonalQualityPills && els.atonalQualityPills.length) {
+            els.atonalQualityPills.forEach((pill) => {
+                pill.addEventListener('click', () => {
+                    const key = pill.dataset.q;
+                    const on = pill.getAttribute('aria-checked') !== 'true';
+                    const next = withQualityToggled(key, on);
+                    if (!next) return;                 // 至少保留一项
+                    stageSetting('atonalQualities', next, 'content');
+                    syncAtonalQualityPills();
+                });
+            });
+        }
+        syncInvAtonal = bindInvPair(els.invAtonal, els.secondInvAtonal, els.rowSecondInvAtonal,
+                                    'allowInversionAtonal', 'allowSecondInvAtonal');
+
         repaintSettings = () => {
             markSeg(els.lengthSeg, (b) => parseInt(b.dataset.len, 10) === settings.length);
             markSeg(els.voicingSeg, (b) => b.dataset.voicing === settings.voicingMode);
@@ -4888,10 +5228,12 @@
             paintEmph();
             syncInvNatural();
             syncInvApplied();
+            syncInvAtonal();
             buildDegreeGrid();
             syncAppliedBody();
             syncAppliedScopePills();
             updateAppliedProgPills();
+            syncAtonalPanel();
             syncTogglePills();
             updateSegActive();
             updateAppliedPreview();
@@ -5056,8 +5398,10 @@
         }
         if (els.mpErrorGrid) {
             els.mpErrorGrid.addEventListener('click', (e) => {
-                const b = e.target.closest ? e.target.closest('[data-degree]') : null;
-                if (!b) return;
+                const b = e.target.closest ? e.target.closest('[data-degree], [data-quality]') : null;
+                if (!b || b.disabled) return;
+                // 无调性的格子用 data-quality（字符串性质键），有调性用 data-degree（数字级数）
+                if (b.dataset.quality != null) { mpSubmitReport(b.dataset.quality); return; }
                 mpSubmitReport(parseInt(b.dataset.degree, 10));
             });
         }
@@ -5163,6 +5507,8 @@
     // 舞台两页切换：'card'（级数卡片/长按热区）⇄ 'sheet'（五线谱）。
     //   谱表页没有长按揭示那套东西 —— 它自己的交互只有"点小节跳转"。
     function mpSetStageView(v) {
+        // ★ 无调性没有谱表页（没有调、也没有罗马数字可画）：一律退化成卡片页
+        if (data && data.atonal) v = 'card';
         v = (v === 'sheet') ? 'sheet' : 'card';
         if (v === mpStageView) return;
         mpCancelGesture();            // 切页瞬间作废在途手势
@@ -5795,6 +6141,26 @@
     //   会自动落到 Ⅶ 下面新的一排，版式不用动。
     const MP_ERROR_SLOTS = [1, 2, 4, 3, 5, 6, 7];
 
+    // 无调性的槽位顺序（行优先，两列）：常用在左、同类相邻。
+    //     左列 = □ □m □7 □°    右列 = □M7 □m7 □ø7
+    //   ★ 与 ATONAL_QUALITIES（数据定义顺序）不是一回事，别混用。
+    const ATONAL_SLOT_ORDER = ['maj', 'maj7', 'min', 'min7', 'dom7', 'hdim7', 'dim'];
+
+    // 和弦记号的纯文本形式（锁屏标题 / 反馈条用字符 □；卡片与按钮上是画出来的方框）
+    function atonalMarkText(key) {
+        return '□' + atonalQualityOf(key).suffix;
+    }
+
+    // 无调性的性质格配色：沿用封面那 7 套色板，按**槽位顺序**取色，
+    //   这样浮窗里从左到右的颜色和卡片上的卡片色一致。
+    function paintQualityChip(el, key) {
+        const i = ATONAL_SLOT_ORDER.indexOf(key);
+        const pal = ART_PALETTE[(i < 0 ? 0 : i) % ART_PALETTE.length];
+        el.style.background = 'linear-gradient(135deg, ' + pal.top + ', ' + pal.bottom + ')';
+        el.style.color = pal.ink;
+        el.style.borderColor = 'rgba(16, 24, 40, 0.10)';
+    }
+
     // 报错浮窗的选项：设置里勾选的级数（Ⅰ 永远有 —— 它本来就强制参与）+「没听出来」。
     //   每次打开都重建，所以改了设置里的勾选，下次打开就跟着变。
     //
@@ -5803,6 +6169,25 @@
     function mpBuildErrorOptions() {
         if (!els || !els.mpErrorGrid) return;
         els.mpErrorGrid.innerHTML = '';
+
+        // ---- 无调性：格子是 7 种性质，不是 7 个级数 ----
+        //   未勾的性质**直接不出现**（性质是"范围"而不是"位置记忆"，
+        //   跟有调性留隐形占位格的做法不同）。
+        if (data && data.atonal) {
+            const picked = atonalPickedQualities(data);
+            ATONAL_SLOT_ORDER.forEach((k) => {
+                if (picked.indexOf(k) < 0) return;
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'mp-error__opt mp-error__opt--quality';
+                b.dataset.quality = k;
+                b.innerHTML = '<i class="qbox" aria-hidden="true"></i>' + atonalQualityOf(k).suffix;
+                paintQualityChip(b, k);
+                els.mpErrorGrid.appendChild(b);
+            });
+            return;
+        }
+
         for (let i = 0; i < MP_ERROR_SLOTS.length; i++) {
             const d = MP_ERROR_SLOTS[i];
             const off = (d !== 1 && !settings.degrees[d]);   // Ⅰ 恒在
@@ -5854,17 +6239,38 @@
         }
         mpErrorCtx = {
             measure: m,
-            actual: deg,
+            // 无调性：答案是「性质」而不是「级数」。actual 于是存性质键（字符串），
+            //   级数那套（actualRoman / prev2 / prev3）仍照常填 —— 统计闸门会挡掉它们。
+            atonal: !!(data && data.atonal),
+            actual: (data && data.atonal) ? (data.chords[m] || {}).quality : deg,
             actualRoman: rom,
             prev2: prev2 || [null, null],
             prev3: prev3 || [null, null, null]
         };
         mpBuildErrorOptions();
+        if (els.mpErrorTitle) {
+            els.mpErrorTitle.textContent = mpErrorCtx.atonal ? '这是什么性质的和弦？' : '你听成了哪个级数？';
+        }
+        if (els.mpErrorFeedback) { els.mpErrorFeedback.hidden = true; els.mpErrorFeedback.textContent = ''; }
         if (els.mpError) els.mpError.hidden = false;
     }
 
     function mpCloseError() {
         if (els && els.mpError) els.mpError.hidden = true;
+        // 清掉上一轮的作答痕迹（只有无调性会留下"对/错"），否则下次打开还挂着
+        mpErrorFeedbackToken++;
+        if (els && els.mpErrorFeedback) {
+            els.mpErrorFeedback.hidden = true;
+            els.mpErrorFeedback.textContent = '';
+            els.mpErrorFeedback.removeAttribute('data-ok');
+        }
+        if (els && els.mpErrorGrid) {
+            Array.prototype.forEach.call(els.mpErrorGrid.children, (b) => {
+                b.classList.remove('is-right', 'is-wrong');
+                b.disabled = false;
+            });
+        }
+        if (els && els.mpErrorNone) els.mpErrorNone.disabled = false;
     }
 
     // ---------------- 听辩辅助窗（长按 + 下滑） ----------------
@@ -5933,9 +6339,12 @@
         //   同一个角色会出现两枚，这也是对的（和声学上就是重复了那个音）。
         //   ★ 离调和弦不能走 chordToneSpelled（它会按"目标级数的自然和弦"推音，音全错），
         //     走 appliedTones —— 那里才是这个和弦真正的根/三/五/七。
+        //   ★ 无调性同理走 atonalTones（data.scale 是 null，chordToneSpelled 会空表）。
         const ct = c.applied
             ? appliedTones(c.applied)
-            : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh) : []);
+            : (c.rootPc != null
+                ? atonalTones(c.rootPc, c.quality).tones
+                : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh) : []));
         c.notes.forEach((n, i) => {                   // notes 已按 MIDI 升序（低 → 高）
             const midi = midis[i];
             const pc = ((midi % 12) + 12) % 12;
@@ -5960,10 +6369,13 @@
             label.textContent = role;
             b.appendChild(num);
             b.appendChild(label);
+            // 无调性没有"第几级"这回事，aria-label 只报音名 + 角色
             b.setAttribute('aria-label',
-                pitchName(n.letter, n.acc) + ' · 第 ' + (dg.num || digit) + ' 级'
-                + (dg.alter > 0 ? '（升高半音）' : (dg.alter < 0 ? '（降低半音）' : ''))
-                + ' · ' + role + ' · 试听');
+                (data && data.atonal)
+                    ? (pitchName(n.letter, n.acc) + (role ? ' · ' + role : '') + ' · 试听')
+                    : (pitchName(n.letter, n.acc) + ' · 第 ' + (dg.num || digit) + ' 级'
+                        + (dg.alter > 0 ? '（升高半音）' : (dg.alter < 0 ? '（降低半音）' : ''))
+                        + ' · ' + role + ' · 试听'));
             els.mpAidTones.appendChild(b);
         });
     }
@@ -6153,25 +6565,37 @@
     }
 
     // 上报「我听成了哪个级数」。guessed = null 表示"没听出来"。
+    //   无调性时 guessed 是**性质键**（'maj' / 'min7' …），见 mpBuildErrorOptions。
     function mpSubmitReport(guessed) {
         if (!mpErrorCtx) { mpCloseError(); return; }
+        const isQuality = (typeof guessed === 'string');
         const rec = {
             measure: mpErrorCtx.measure,
+            atonal: !!mpErrorCtx.atonal,
             actual: mpErrorCtx.actual,
             actualRoman: mpErrorCtx.actualRoman,
             // 前几个和弦（错误组合榜要用）—— 冻结进来时记的就是冻结点前面那几个
             prev2: mpErrorCtx.prev2 || [null, null],
             prev3: mpErrorCtx.prev3 || [null, null, null],
             guessed: (guessed == null ? null : guessed),
-            guessedRoman: (guessed == null ? null : (DEGREE_CHOICES[guessed - 1] || null)),
+            guessedRoman: (guessed == null ? null
+                : (isQuality ? atonalMarkText(guessed) : (DEGREE_CHOICES[guessed - 1] || null))),
             ts: Date.now()
         };
         mpReports.push(rec);
         if (mpReports.length > MP_REPORTS_MAX) mpReports.shift();
-        recordReport(rec);            // 聚合统计（数据库页的数据源 + 出题加权的依据）
+        recordReport(rec);            // 聚合统计（无调性下 statsAllowed() 会挡掉）
+        try { console.log('[和弦听辨·报错]', rec); } catch (e) {}
+
+        // ---- 无调性：先给「对 / 错 + 正确答案」，1.4 秒后再关窗续播 ----
+        //   ★ 有调性**保持现状**（提交即关、只记账、从不弹对错）—— 不能顺手改老交互。
+        if (mpErrorCtx.atonal) {
+            mpShowErrorFeedback(guessed, rec);
+            return;
+        }
+
         mpCloseError();
         mpErrorCtx = null;
-        try { console.log('[和弦听辨·报错]', rec); } catch (e) {}
         // ★ 报错提交后从**报错那一个和弦**的小节开头重新起播，播完自然继续往后。
         //   （用户 2026-10-10 改：原先是"提前一小节"重播 —— 先把出错和弦的前置语境给一遍；
         //     现在要求直接从出错的那一小节起，不再退到它前一个和弦。）
@@ -6180,6 +6604,45 @@
         //   重听了一遍，属可接受的计数。isRendering 中提交时 doPlay 会静默跳过本次重播。
         mpCancelGesture();            // 长按冻结/揭示态先解冻，再 seek（必须先解冻，理由见 mpResumeFromMeasure）
         if (!practiceMode) mpResumeFromMeasure(rec.measure);
+    }
+
+    // 无调性专用：在报错浮窗里就地判对错，再自动关窗续播。
+    //   ★ 这是**新功能**。有调性那边 mpSubmitReport 从来不比较、也不显示对错，
+    //     正确率一直是数据库页事后从混淆矩阵算出来的。
+    function mpShowErrorFeedback(guessed, rec) {
+        const correct = (guessed != null && guessed === rec.actual);
+        if (els && els.mpErrorGrid) {
+            Array.prototype.forEach.call(els.mpErrorGrid.children, (b) => {
+                b.disabled = true;
+                const q = b.dataset.quality;
+                if (!q) return;
+                if (q === rec.actual) b.classList.add('is-right');
+                else if (q === guessed) b.classList.add('is-wrong');
+            });
+        }
+        if (els && els.mpErrorNone) els.mpErrorNone.disabled = true;
+        const fb = els && els.mpErrorFeedback;
+        if (fb) {
+            fb.hidden = false;
+            fb.setAttribute('data-ok', correct ? '1' : '0');
+            if (correct) {
+                fb.textContent = '✓ 对了 · ' + atonalMarkText(rec.actual);
+            } else if (guessed == null) {
+                fb.textContent = '正确答案是 ' + atonalMarkText(rec.actual);
+            } else {
+                fb.textContent = '正确答案是 ' + atonalMarkText(rec.actual)
+                    + '，你听成了 ' + atonalMarkText(guessed);
+            }
+        }
+        const token = ++mpErrorFeedbackToken;
+        setTimeout(() => {
+            if (token !== mpErrorFeedbackToken) return;   // 期间已关窗 / 开了新窗 → 作废
+            const m = rec.measure;
+            mpCloseError();
+            mpErrorCtx = null;
+            mpCancelGesture();
+            if (!practiceMode) mpResumeFromMeasure(m);
+        }, 1400);
     }
 
     // ============================================================
@@ -6199,6 +6662,13 @@
             els.mpExitPractice.classList.toggle('is-on', !!on);
         }
         if (els && els.dbPractice) els.dbPractice.disabled = !!on;   // 错题中禁用数据库页入口（已在错题里）
+        // 无调性不记账 → 进错题练习没有题可练，入口置灰（用户 2026-10-24）
+        if (els && els.mpExitPractice && !on) {
+            const lock = !!(settings && settings.atonal);
+            els.mpExitPractice.disabled = lock;
+            els.mpExitPractice.classList.toggle('is-disabled', lock);
+            els.mpExitPractice.title = lock ? '无调性模式不记错题，进不了错题练习' : '';
+        }
         if (els && els.mpModeNote) {
             els.mpModeNote.textContent = MP_MODE_NOTE_PRACTICE;
             els.mpModeNote.hidden = !on;
@@ -6488,6 +6958,10 @@
         play: doPlay,
         // 便于调试 / 自测
         _generateChordProgression: generateChordProgression,
+        // ---- 无调性（验收 / 调试用）----
+        _buildAtonalSchedule: buildAtonalSchedule,
+        _atonalTones: (rootPc, qKey) => atonalTones(rootPc, qKey),
+        _ATONAL_QUALITIES: ATONAL_QUALITIES,
         _getSettings: () => settings,
         // ---- 「未应用的设置」机制（验收用）----
         _getPending: () => (pending ? JSON.parse(JSON.stringify(pending)) : null),
@@ -6580,10 +7054,14 @@
         // 当前这段的极简快照（调内各级 pc + 每小节的级数与音）：供自测独立验证"根音对不对"
         _getDataBrief: () => (data ? {
             key: data.key,
-            scalePc: data.scale.map((s) => s.pc),
+            atonal: !!data.atonal,
+            // 无调性没有音阶（data.scale 是 null）—— 别在这里炸掉整份快照
+            scalePc: data.scale ? data.scale.map((s) => s.pc) : [],
             // ★ 自然和弦的字段与改造前完全一致（只有离调才多出 roman / applied 两个键）
             chords: data.chords.map((c) => {
                 const o = { degree: c.degree, inversion: c.inversion, midis: c.midis.slice() };
+                // 无调性才有这两个键（有调性的快照因此仍然逐字节不变）
+                if (c.rootPc != null) { o.rootPc = c.rootPc; o.quality = c.quality; }
                 if (c.applied) {
                     o.roman = c.roman;
                     o.applied = {
@@ -6776,6 +7254,22 @@
             });
             return out;
         },
+        // 无调性：性质格的顺序（就是 DOM 里的实际顺序，用来验"左列常用 / 右列 7 和弦"）
+        _getMpErrorQualities: () => {
+            if (!els || !els.mpErrorGrid) return [];
+            const out = [];
+            els.mpErrorGrid.querySelectorAll('[data-quality]').forEach((b) => {
+                out.push(b.dataset.quality);
+            });
+            return out;
+        },
+        // 报错浮窗的标题 / 反馈文案（无调性专用：'这是什么性质的和弦？' + '✓ 对了 · □m7'）
+        _getMpErrorText: () => ({
+            title: els && els.mpErrorTitle ? els.mpErrorTitle.textContent : '',
+            feedback: (els && els.mpErrorFeedback && !els.mpErrorFeedback.hidden)
+                ? els.mpErrorFeedback.textContent : '',
+            feedbackOk: (els && els.mpErrorFeedback) ? els.mpErrorFeedback.getAttribute('data-ok') : null
+        }),
         _getCoverInfo: buildCoverInfo,
         // 验收用：把"这个和弦的音各自是几音（root/third/fifth/seventh）"算出来对账
         //   （辅助窗那个「根音/三音/五音/七音」小标签的来源就是它）
@@ -6784,19 +7278,23 @@
         // 离调卡片用的"同色系压暗"派生色板（派生自 ART_PALETTE，不硬编码）
         _getAppliedPalette: () => ART_PALETTE_APPLIED.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
         // 报错浮窗的几何布局：每个色块的中心坐标 + 尺寸（用来客观验证"两列 + Ⅶ 横跨"）
+        //   无调性下按钮带的是 data-quality（没有 data-degree），所以两种都收 —— 多出的键
+        //   分别是 degree 或 quality，调用方按需取用。
         _getMpErrorLayout: () => {
             if (!els || !els.mpErrorGrid) return null;
             const grid = els.mpErrorGrid.getBoundingClientRect();
             const items = [];
-            els.mpErrorGrid.querySelectorAll('button[data-degree]').forEach((b) => {
+            els.mpErrorGrid.querySelectorAll('button[data-degree], button[data-quality]').forEach((b) => {
                 const r = b.getBoundingClientRect();
-                items.push({
-                    degree: parseInt(b.dataset.degree, 10),
+                const it = {
                     x: Math.round(r.left), y: Math.round(r.top),
                     w: Math.round(r.width), h: Math.round(r.height),
                     color: getComputedStyle(b).color,
                     bg: getComputedStyle(b).backgroundImage
-                });
+                };
+                if (b.dataset.quality != null) it.quality = b.dataset.quality;
+                else it.degree = parseInt(b.dataset.degree, 10);
+                items.push(it);
             });
             return { gridW: Math.round(grid.width), items: items };
         }
