@@ -21,9 +21,22 @@ const N = parseInt(process.argv[3] || '3000', 10);
 const LEN = 16;
 const CR = require(path.resolve(target)).ChordRecognition;
 
+// 转位开关：默认关闭，与既有快照基线一致。
+//   INV=1 node tools/check_satb_voicing.js chord_recognition.js 3000         # 测「开启转位」路径
+//   INV=1 SEC=1 node ...                                                     # 再叠加 6₄
+// ★ 第三十一轮：转位拆成「自然 / 离调」两套键，这里**新旧键双写**。
+//   旧版快照(tools/chord_recognition.baseline.js)读 allowInversion / allowSecondInv，
+//   新版读 allowInversionNatural / allowSecondInvNatural，两版互不认识对方的键，
+//   所以同一个脚本审计任一版本都能生效 —— 否则「开转位」这条路径会静默测不到（假基线）。
+const INV = process.env.INV === '1';
+const SEC = INV && process.env.SEC === '1';   // 转位未开时 6₄ 也不可开
+
 function makeSettings(voicingMode) {
     return {
-        length: LEN, tempo: 70, allowInversion: false, allowSecondInv: false,
+        length: LEN, tempo: 70,
+        allowInversion: INV, allowSecondInv: SEC,                          // 旧键（baseline 快照读）
+        allowInversionNatural: INV, allowSecondInvNatural: SEC,            // 新键（第三十一轮起）
+        allowInversionApplied: INV, allowSecondInvApplied: false,          // 离调：恒无 6₄
         voicingMode: voicingMode || 'fourpart', legato: 1.0,
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
         seventhProb: { 1: 0, 2: 40, 3: 0, 4: 10, 5: 70, 6: 0, 7: 30 }
@@ -99,6 +112,7 @@ for (let t = 0; t < N; t++) {
 const innerTotal = S.innerSteps + S.innerThirds + S.innerLeaps;
 const pct = (x, y) => (y ? (100 * x / y).toFixed(3) + '%' : 'n/a');
 console.log('==== 目标文件:', target);
+console.log('转位:', INV ? (SEC ? '开（含 6₄）' : '开（仅 6）') : '关（全原位）');
 console.log('段数:', N, ' 和弦总数:', S.chords, ' 相邻进行数:', S.transitions);
 console.log('每和弦 4 音:', S.badLen === 0 ? 'OK' : ('FAIL ' + S.badLen));
 console.log('严格升序(无和弦内交叉):', S.badOrder === 0 ? 'OK' : ('FAIL ' + S.badOrder));

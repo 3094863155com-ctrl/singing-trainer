@@ -6,8 +6,16 @@ const CR = require(path.resolve(__dirname, '..', process.argv[2] || 'chord_recog
 let _seed = 0x12345678 >>> 0;
 Math.random = () => { _seed = (_seed * 1664525 + 1013904223) >>> 0; return _seed / 4294967296; };
 
+// 第三十一轮：转位拆成「自然 / 离调」两套键，这里新旧键双写
+// （旧版快照读 allowInversion / allowSecondInv，新版读 *Natural，两者互不认识对方的键）
+const INV = process.env.INV === '1';
+const SEC = INV && process.env.SEC === '1';
+
 const settings = {
-    length: 16, tempo: 70, allowInversion: false, allowSecondInv: false,
+    length: 16, tempo: 70,
+    allowInversion: INV, allowSecondInv: SEC,
+    allowInversionNatural: INV, allowSecondInvNatural: SEC,
+    allowInversionApplied: INV, allowSecondInvApplied: false,
     voicingMode: 'fourpart', legato: 1.0,
     degrees: { 1: 1, 2: 1, 3: 1, 4: 1, 5: 1, 6: 1, 7: 1 },
     seventhProb: { 1: 0, 2: 40, 3: 0, 4: 10, 5: 70, 6: 0, 7: 30 }

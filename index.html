@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=30"></script>
+<script src="chord_recognition.js?v=31"></script>
     <style>
         * {
             margin: 0;
@@ -349,49 +349,108 @@
             overflow: hidden;
         }
 
-        /* 页内 tab：视觉与顶部「设置 / 数据库」一致（文字变深 + 底部 3px 紫线） */
-        .kind-tabs {
-            display: flex;
-            gap: 0;
-            width: 100%;
-            border-bottom: 1px solid var(--border);
-        }
-
-        .kind-tabs .seg__opt {
-            flex: 1 1 0;
-            padding: 15px 0 13px;
-            font-size: 16px;
-            color: var(--text-tertiary);
-            background: none;
-            border: none;
-            border-radius: 0;
-            box-shadow: inset 0 -3px 0 transparent;
-            transition: color 0.2s ease, box-shadow 0.2s ease;
-        }
-
-        .kind-tabs .seg__opt.active {
-            color: var(--text-primary);
-            background: none;
-            box-shadow: inset 0 -3px 0 var(--accent);
-        }
-
         .sgroup {
             margin: 12px 12px 0;
-            padding: 2px 14px 6px;
             background: #f5f5f7;
             border-radius: 14px;
+            overflow: hidden;
         }
 
         .sgroup:last-child {
             margin-bottom: 12px;
         }
 
-        .sgroup__title {
+        /* 折叠头：整行可点，标题在左、箭头在右（用户 2026-10-24：每个大板块都要能折起来） */
+        .sgroup__head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            width: 100%;
             margin: 0;
-            padding: 12px 0 2px;
+            padding: 13px 10px 11px 14px;
+            font-family: inherit;
             font-size: 13px;
             font-weight: 600;
             color: var(--text-tertiary);
+            text-align: left;
+            background: none;
+            border: none;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .sgroup__body {
+            padding: 0 14px 6px;
+        }
+
+        .sgroup__body[hidden] {
+            display: none;
+        }
+
+        /* 子卡（自然和弦 / 性质范围）：灰卡里再套一层白卡，层级一眼可辨 */
+        .ssub {
+            margin: 0 0 10px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .ssub__head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            width: 100%;
+            margin: 0;
+            padding: 10px 8px 8px 12px;
+            font-family: inherit;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+            text-align: left;
+            background: none;
+            border: none;
+            cursor: pointer;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .ssub__body {
+            padding: 0 12px 4px;
+        }
+
+        .ssub__body[hidden] {
+            display: none;
+        }
+
+        /* 离调子卡没有独立折叠头：它「展开不展开」由那颗启用开关说了算 */
+        .ssub--applied > .srow {
+            padding: 0 8px 0 12px;
+        }
+
+        .ssub--applied > .ssub__body {
+            padding: 0 12px 4px;
+        }
+
+        /* 折叠箭头：收起朝右、展开朝上。尺寸比独立按钮那颗小，别抢标题 */
+        .sgroup__head .srow__chev,
+        .ssub__head .srow__chev {
+            width: 26px;
+            height: 26px;
+            background: transparent;
+            box-shadow: none;
+        }
+
+        .sgroup__head .srow__chev .ic,
+        .ssub__head .srow__chev .ic {
+            --ic: 15px;
+            transform: rotate(90deg);
+        }
+
+        .sgroup__head[aria-expanded="true"] .srow__chev .ic,
+        .ssub__head[aria-expanded="true"] .srow__chev .ic {
+            transform: rotate(-90deg);
         }
 
         .srow {
@@ -425,6 +484,11 @@
             user-select: none;
         }
 
+        /* 「转位没勾 → 6₄ 也勾不了」：整行压暗（用户 2026-10-24 明确） */
+        .srow.is-off {
+            opacity: 0.45;
+        }
+
         .srow__chev {
             display: inline-flex;
             align-items: center;
@@ -445,7 +509,8 @@
             transition: transform 0.22s ease;
         }
 
-        #chord-degree-toggle.is-open .srow__chev .ic {
+        #chord-degree-toggle.is-open .srow__chev .ic,
+        .srow--btn.is-open .srow__chev .ic {
             transform: rotate(-90deg);
         }
 
@@ -884,6 +949,60 @@
 
         .mp > * {
             pointer-events: auto;
+        }
+
+        /* 「应用变更的设置并重启」条（用户 2026-10-24）：
+           悬在播放器正上方、跨页常驻；点一下就按脏值类型重建（重算音频 or 重新出题）。
+           没有"撤回"——用户明确取消。
+           ★ 尺寸刻意做小（32px 高的按钮、13px 字），别占屏幕。 */
+        .apply-bar {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+            max-width: 640px;
+            margin: 0 auto 8px;
+            padding: 6px 8px 6px 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-pill);
+            box-shadow: var(--shadow-md);
+            animation: applyBarIn 0.18s ease;
+        }
+
+        .apply-bar[hidden] {
+            display: none;
+        }
+
+        @keyframes applyBarIn {
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+
+        .apply-bar__text {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            white-space: nowrap;
+        }
+
+        .apply-bar__btn {
+            height: 32px;
+            padding: 0 14px;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 600;
+            color: #ffffff;
+            background: var(--accent);
+            border: none;
+            border-radius: var(--r-pill);
+            cursor: pointer;
+            white-space: nowrap;
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        .apply-bar__btn:active {
+            transform: scale(0.97);
         }
 
         /* 连按两次卡片不该放大页面、也不该选中面板里的文字（提示行 / 按钮文案）：
@@ -1947,16 +2066,18 @@
                  视觉标准 = 用户 2026-10-24 的截图：三张灰色分组卡 + 顶部下划线 tab。
                  控件只有三种：细边胶囊（互斥）、拨杆（开关）、四格充能（连续值）。
                  ★ 数字档位（速度 / 强调低音 / 七和弦概率）整块就是一个按钮，点一下进一档。 -->
+            <!-- ★ 2026-10-24 第三十一轮：层级纠正 —— 自然/离调不再是"设置页的两页"，
+                 而是「和弦」板块内部的两个子集。三张大板块都能折叠。 -->
             <div class="settings-shell">
-                <!-- 自然 / 离调：页内 tab。类名沿用 .seg/.seg__opt，切页逻辑（markSeg）零改动 -->
-                <div class="seg kind-tabs" id="chord-kind-seg" role="tablist" aria-label="和弦类型">
-                    <button type="button" class="seg__opt" data-kind="natural" role="tab" aria-checked="false">自然和弦</button>
-                    <button type="button" class="seg__opt" data-kind="applied" role="tab" aria-checked="false">离调和弦</button>
-                </div>
 
-                <div id="chord-page-natural" style="display: contents">
-                    <section class="sgroup">
-                        <h4 class="sgroup__title">记谱</h4>
+                <!-- ① 通用：跟有调性/无调性都无关的记谱选项 -->
+                <section class="sgroup">
+                    <button type="button" class="sgroup__head" id="grp-head-general"
+                            aria-expanded="true" aria-controls="grp-general" data-grp="general">
+                        <span>通用</span>
+                        <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span>
+                    </button>
+                    <div class="sgroup__body" id="grp-general">
 
                         <div class="srow">
                             <span>长度</span>
@@ -1973,31 +2094,18 @@
                                 <button type="button" class="seg__opt" data-voicing="fourpart" role="radio" aria-checked="false">四部和声</button>
                             </div>
                         </div>
+                    </div>
+                </section>
 
-                        <!-- 音高显示：固定音高 = 按真实调性记谱；相对音高 = 整段搬到 C 大调（无调号）
-                             ★ 只改大谱表的记谱，音频 / 卡片 / 听辨窗 / 罗马数字全都不动。 -->
-                        <div class="srow">
-                            <span>音高显示</span>
-                            <span class="srow__side"><span id="chord-relative-pitch-label">固定音高</span>
-                                <button type="button" class="switch" id="chord-relative-pitch" role="switch" aria-checked="false" aria-label="音高显示"></button></span>
-                        </div>
+                <!-- ② 播放 -->
+                <section class="sgroup">
+                    <button type="button" class="sgroup__head" id="grp-head-play"
+                            aria-expanded="true" aria-controls="grp-play" data-grp="play">
+                        <span>播放</span>
+                        <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span>
+                    </button>
+                    <div class="sgroup__body" id="grp-play">
 
-                        <div class="srow">
-                            <span>转位</span>
-                            <input type="checkbox" class="switch" id="chord-inversion" title="关闭＝全部原位；开启＝有概率转位，并做和弦间平稳连接">
-                        </div>
-
-                        <div class="srow">
-                            <span>6₄ 和弦</span>
-                            <input type="checkbox" class="switch" id="chord-second-inv" title="不勾选＝所有级数都不出现 6₄；勾选＝允许 6₄（需先开启转位）">
-                        </div>
-                    </section>
-
-                    <section class="sgroup">
-                        <h4 class="sgroup__title">播放</h4>
-
-                        <!-- 播放方式：三选一。生成新一段统一走迷你播放器的「下一首」，
-                             页面不再放 生成 / 播放 / 停止 三个键（用户 2026-10-06 拍板）。 -->
                         <div class="srow">
                             <span>播放方式</span>
                             <div class="seg" id="chord-play-seg" role="radiogroup" aria-label="播放方式">
@@ -2007,27 +2115,23 @@
                             </div>
                         </div>
 
-                        <!-- 速度：40 / 50 / 65 / 80 四档，格子里不写字，右侧给读数 -->
+                        <!-- 速度：40 / 50 / 65 / 80 四档。★ 指哪打哪：点第 N 格 = 第 N 档 -->
                         <div class="srow">
                             <span>速度</span>
-                            <button type="button" class="meter" id="chord-tempo" aria-label="速度，点按切换下一档">
+                            <button type="button" class="meter" id="chord-tempo" aria-label="速度，点第几格就到第几档">
                                 <i></i><i></i><i></i><i></i><span class="meter__val" id="chord-tempo-val">65 bpm</span>
                             </button>
                         </div>
 
-                        <!-- 强调低音（用户 2026-10-07）：把每小节的**最低音**（谱面最下面那个音）
-                             单独提亮，帮听辨时抓住低声部。四档 = 关闭 / 轻微 / 中等 / 明显。
-                             ★ 只作用于主播放那一段离线渲染的音频；听辨辅助窗里试听的和弦保持原样。 -->
+                        <!-- 强调低音：三档 = 关闭 / 中等 / 明显（0 / 30 / 75），格数 0 / 2 / 3。
+                             只作用于主播放那一段离线渲染的音频。 -->
                         <div class="srow">
                             <span>强调低音</span>
-                            <button type="button" class="meter" id="chord-bass-emph" aria-label="强调低音，点按切换下一档">
-                                <i></i><i></i><i></i><i></i><span class="meter__val" id="chord-bass-emph-val">关闭</span>
+                            <button type="button" class="meter" id="chord-bass-emph" aria-label="强调低音，点第几格就到第几档">
+                                <i></i><i></i><i></i><span class="meter__val" id="chord-bass-emph-val">关闭</span>
                             </button>
                         </div>
 
-                        <!-- 两颗独立开关，可以同时开着：
-                               连续播放 = 原「自动连播」（一段播完自动换新的一段）
-                               随身听    = 每小节最后一拍只弹这个和弦的根音 -->
                         <div class="srow">
                             <span>连续播放</span>
                             <button type="button" class="switch" id="chord-auto-continue" role="switch" aria-checked="false" aria-label="连续播放"></button>
@@ -2037,73 +2141,96 @@
                             <span>随身听模式</span>
                             <button type="button" class="switch" id="chord-portable" role="switch" aria-checked="false" aria-label="随身听模式"></button>
                         </div>
-                    </section>
+                    </div>
+                </section>
 
-                    <section class="sgroup">
-                        <h4 class="sgroup__title">答题</h4>
+                <!-- ③ 和弦：自然 / 离调都在这一块里 -->
+                <section class="sgroup">
+                    <button type="button" class="sgroup__head" id="grp-head-chord"
+                            aria-expanded="true" aria-controls="grp-chord" data-grp="chord">
+                        <span>和弦</span>
+                        <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span>
+                    </button>
+                    <div class="sgroup__body" id="grp-chord">
 
-                        <!-- 按住卡片时显示什么：和弦标记（罗马数字）/ 低音级数（中性灰底）
-                             ★ 只管页面里「按住卡片」那张画；锁屏封面恒为罗马数字（用户明确要求）。 -->
-                        <div class="srow">
-                            <span>按住卡片显示</span>
-                            <div class="seg" id="chord-reveal-seg" role="radiogroup" aria-label="按住卡片显示的内容">
-                                <button type="button" class="seg__opt" data-reveal="roman" role="radio" aria-checked="false">和弦标记</button>
-                                <button type="button" class="seg__opt" data-reveal="bass" role="radio" aria-checked="false">低音级数</button>
+                        <div id="chord-tonal">
+
+                            <!-- 相对音高只对"有调性"成立（无调性没有调可移），所以放在这里而不是「通用」 -->
+                            <div class="srow">
+                                <span>谱面显示相对音高</span>
+                                <span class="srow__side"><span id="chord-relative-pitch-label">固定音高</span>
+                                    <button type="button" class="switch" id="chord-relative-pitch" role="switch" aria-checked="false" aria-label="谱面显示相对音高"></button></span>
                             </div>
-                        </div>
 
-                        <!-- 参与级数：默认折叠，收起时只给「N 项已选」；展开是 7 行（概率 + 参与） -->
-                        <div class="srow srow--btn" id="chord-degree-toggle" role="button" tabindex="0"
-                             aria-expanded="false" aria-controls="degree-grid">
-                            <span>参与级数</span>
-                            <span class="srow__side"><span id="chord-degree-count">7 项已选</span>
-                                <span class="srow__chev"><svg class="ic" aria-hidden="true"><use href="#i-chevron-right"/></svg></span></span>
-                        </div>
-                        <div class="degree-list" id="degree-grid" hidden></div>
+                            <!-- 自然和弦子卡 -->
+                            <div class="ssub">
+                                <button type="button" class="ssub__head" id="grp-head-natural"
+                                        aria-expanded="true" aria-controls="grp-natural" data-sub="natural">
+                                    <span>自然和弦</span>
+                                    <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span>
+                                </button>
+                                <div class="ssub__body" id="grp-natural">
 
-                        <!-- 使用用户数据优化题库：关闭＝每级等概率；开启＝按历史错误率调出题权重 -->
-                        <div class="srow">
-                            <span>优化题库</span>
-                            <input type="checkbox" class="switch" id="chord-adaptive" title="关闭＝每个级数等概率；开启＝按你的历史错误率调整出题概率">
-                        </div>
-                    </section>
-                </div><!-- /#chord-page-natural -->
+                                    <!-- 参与级数：默认折叠，收起时只给「N 项已选」；展开是 7 行（概率 + 参与） -->
+                                    <div class="srow srow--btn" id="chord-degree-toggle" role="button" tabindex="0"
+                                         aria-expanded="false" aria-controls="degree-grid">
+                                        <span>参与级数</span>
+                                        <span class="srow__side"><span id="chord-degree-count">7 项已选</span>
+                                            <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span></span>
+                                    </div>
+                                    <div class="degree-list" id="degree-grid" hidden></div>
 
-                <!-- ===== 离调页 =====
-                     离调 = 把调内某个和弦临时当成主和弦，套用它那个调的属/下属功能，
-                     随后立刻回到原调（不做终止，所以不是转调）。
-                     ★ 离调是**叠加**在自然进行上的：自然页那些设置继续生效。 -->
-                <div id="chord-page-applied" style="display: none">
-                    <section class="sgroup">
-                        <h4 class="sgroup__title">离调</h4>
+                                    <div class="srow">
+                                        <span>转位</span>
+                                        <input type="checkbox" class="switch" id="chord-inversion-natural" title="关闭＝全部原位；开启＝有概率转位，并做和弦间平稳连接">
+                                    </div>
 
-                        <div class="srow">
-                            <span>启用离调和弦</span>
-                            <button type="button" class="switch" id="chord-applied-enable" role="switch" aria-checked="false" aria-label="启用离调和弦"></button>
-                        </div>
-
-                        <div class="srow">
-                            <span>离调目标</span>
-                            <div class="seg" id="chord-applied-target-seg" role="radiogroup" aria-label="离调目标">
-                                <button type="button" class="seg__opt" data-target="simple" role="radio" aria-checked="false">简单（Ⅳ Ⅴ）</button>
-                                <button type="button" class="seg__opt" data-target="complex" role="radio" aria-checked="false">复杂（Ⅱ—Ⅵ）</button>
+                                    <div class="srow" id="row-second-inv-natural">
+                                        <span>6₄ 和弦</span>
+                                        <input type="checkbox" class="switch" id="chord-second-inv-natural" title="不勾选＝所有级数都不出现 6₄；勾选＝允许 6₄（需先开启转位）">
+                                    </div>
+                                </div>
                             </div>
-                        </div>
 
-                        <!-- 和弦进行（多选）：至少留一项 -->
-                        <div class="srow">
-                            <span>和弦进行</span>
-                            <div class="toggle-row" id="chord-applied-prog">
-                                <button type="button" class="toggle-pill" data-prog="5-1" role="switch" aria-checked="false">5⁷ → 1</button>
-                                <button type="button" class="toggle-pill" data-prog="2-5-1" role="switch" aria-checked="false">2⁷ → 5⁷ → 1</button>
+                            <!-- 离调和弦子卡：只由「离调和弦」那颗开关决定展开与否 -->
+                            <div class="ssub ssub--applied">
+                                <div class="srow">
+                                    <span>离调和弦</span>
+                                    <button type="button" class="switch" id="chord-applied-enable" role="switch" aria-checked="false" aria-label="启用离调和弦"></button>
+                                </div>
+                                <div class="ssub__body" id="chord-applied-body" hidden>
+
+                                    <!-- 离调范围（多选）：大调 = Ⅳ Ⅴ；小调 = Ⅱ Ⅲ Ⅵ。
+                                         实际可用目标 = 这里勾的 ∩ 参与级数（空了就不出离调）。 -->
+                                    <div class="srow">
+                                        <span>离调范围</span>
+                                        <div class="toggle-row" id="chord-applied-scope">
+                                            <button type="button" class="toggle-pill" data-scope="major" role="switch" aria-checked="true">大调（4、5）</button>
+                                            <button type="button" class="toggle-pill" data-scope="minor" role="switch" aria-checked="false">小调（2、3、6）</button>
+                                        </div>
+                                    </div>
+
+                                    <div class="srow">
+                                        <span>和弦进行</span>
+                                        <div class="toggle-row" id="chord-applied-prog">
+                                            <button type="button" class="toggle-pill" data-prog="5-1" role="switch" aria-checked="false">5⁷ → 1</button>
+                                            <button type="button" class="toggle-pill" data-prog="2-5-1" role="switch" aria-checked="false">2⁷ → 5⁷ → 1</button>
+                                        </div>
+                                    </div>
+
+                                    <!-- 离调只有转位、没有 6₄：七和弦的转位是 65/43/42，
+                                         而组末那个"解决和弦"严禁 46（用户 2026-10-24 定）。 -->
+                                    <div class="srow">
+                                        <span>转位</span>
+                                        <input type="checkbox" class="switch" id="chord-inversion-applied" title="只作用于离调那几小节；解决和弦不会出现 6₄">
+                                    </div>
+
+                                    <div class="applied-preview" id="chord-applied-preview"></div>
+                                </div>
                             </div>
-                        </div>
-
-                        <!-- 当前可用和弦预览：直接调生成侧的 appliedVocabulary，
-                             所以预览列出来的和弦与真出题时用的**永远是同一份**。 -->
-                        <div class="applied-preview" id="chord-applied-preview"></div>
-                    </section>
-                </div><!-- /#chord-page-applied -->
+                        </div><!-- /#chord-tonal -->
+                    </div>
+                </section>
             </div><!-- /.settings-shell -->
 
             <div class="playback-info" id="chord-info">点下面的播放方式开始</div>
@@ -2177,6 +2304,13 @@
            收起态是「播放/暂停」+「下一首」两个固定键；收起条上故意不显示罗马数字（会剧透）。
          ============================================================ -->
     <div id="chord-mp" class="mp" data-state="collapsed">
+        <!-- 「设置未应用」条（用户 2026-10-24）：横在播放器正上方，收起态/展开态都在。
+             只有一个按钮 —— 撤回被用户取消了。 -->
+        <div class="apply-bar" id="chord-apply-bar" hidden>
+            <span class="apply-bar__text">设置未应用</span>
+            <button type="button" class="apply-bar__btn" id="chord-apply-btn">应用变更并重启</button>
+        </div>
+
         <!-- 收起态：胶囊。左=波形（点击展开），右=两个固定功能键：播放/暂停 与「下一首」 -->
         <div class="mp-bar" id="chord-mp-bar">
             <button class="mp-bar__open" id="chord-mp-expand" aria-label="展开播放器">
