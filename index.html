@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=31"></script>
+<script src="chord_recognition.js?v=32"></script>
     <style>
         * {
             margin: 0;
@@ -1920,6 +1920,98 @@
         .db-foot .btn {
             padding: 9px 20px;
             font-size: 14px;
+        }
+
+        /* ============================================================
+           液态玻璃（iOS 26 Liquid Glass 风，用户 2026-10-24 要求）
+           只作用于「悬浮在内容之上」的四块面板：
+             迷你播放器 .mp-bar / 应用变更条 .apply-bar /
+             报错浮窗 .mp-error__panel / 听辨辅助窗 .mp-aid__panel
+           ★ 顶栏 .app-nav 不加 —— 它早定型为「通栏实底、像系统导航栏」，
+             加了玻璃反而变回"浮在页面上的一根条"。
+           ★ 整块可摘除：删掉本段即回到「实底 + 普通阴影」，不影响任何 JS。
+           做法 = 半透白 + backdrop 模糊饱和 + 四边内高光 + 1px 渐变弧光描边。
+           模糊半径刻意压到 18px（不是 40px）：迷你条是跨页常驻的 fixed 元素，
+           每帧滚动都要重算模糊，半径翻倍 = 滚动耗电翻倍。
+           ============================================================ */
+        :root {
+            --liq-bg: rgba(255, 255, 255, 0.68);
+            --liq-blur: 20px;
+            --liq-sat: 180%;
+            --liq-shadow:
+                0 12px 32px -14px rgba(16, 24, 40, 0.30),
+                0 3px 10px -4px rgba(16, 24, 40, 0.12);
+        }
+
+        .mp-bar,
+        .apply-bar,
+        .mp-error__panel,
+        .mp-aid__panel {
+            position: relative;                /* ::before 描边要定位，且不影响原有 flex 布局 */
+            background: var(--liq-bg);
+            border: 1px solid rgba(255, 255, 255, 0.42);
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.95),
+                inset 0 -1px 0 rgba(255, 255, 255, 0.42),
+                inset 0 -16px 24px -20px rgba(16, 24, 40, 0.18),   /* 底部厚度：玻璃不是纸片 */
+                var(--liq-shadow);
+            -webkit-backdrop-filter: blur(var(--liq-blur)) saturate(var(--liq-sat));
+            backdrop-filter: blur(var(--liq-blur)) saturate(var(--liq-sat));
+        }
+
+        /* 边缘「透镜弧光」：上亮 → 中透 → 右下再亮；xor 蒙版只留 1px 边，
+           看起来像一层玻璃壳在折射背后的颜色 */
+        .mp-bar::before,
+        .apply-bar::before,
+        .mp-error__panel::before,
+        .mp-aid__panel::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            padding: 1px;
+            background: linear-gradient(158deg,
+                rgba(255, 255, 255, 0.95) 0%,
+                rgba(255, 255, 255, 0.20) 28%,
+                rgba(255, 255, 255, 0.04) 52%,
+                rgba(255, 255, 255, 0.38) 76%,
+                rgba(255, 255, 255, 0.88) 100%);
+            -webkit-mask: linear-gradient(#000, #000) content-box, linear-gradient(#000, #000);
+            -webkit-mask-composite: xor;
+                    mask: linear-gradient(#000, #000) content-box, linear-gradient(#000, #000);
+                    mask-composite: exclude;
+            pointer-events: none;
+        }
+
+        /* 弹窗遮罩：不再是一层灰纱，改成「背后虚化」，接近 iOS 弹层。
+           半径比迷你条更大（22px）—— 弹窗只在按下时出现，不必为滚动耗电让路，
+           而背后是整页谱面/设置，虚化不足就会透出可读的文字。 */
+        .mp-error,
+        .mp-aid {
+            background: rgba(16, 24, 40, 0.22);
+            -webkit-backdrop-filter: blur(22px) saturate(140%);
+            backdrop-filter: blur(22px) saturate(140%);
+        }
+
+        /* 弹窗面板再压一层更实的底：它长期盖在虚化遮罩上，
+           不必像迷你条那样透，透多了正文会和背后的谱面抢注意力。
+           圆角比页面卡片更大（20px）—— iOS 26 的玻璃块普遍更圆更连续。 */
+        .mp-error__panel,
+        .mp-aid__panel {
+            background: rgba(255, 255, 255, 0.78);
+            border-radius: 20px;
+            -webkit-backdrop-filter: blur(26px) saturate(180%);
+            backdrop-filter: blur(26px) saturate(180%);
+        }
+
+        /* 不支持 backdrop-filter → 退回实底，别让深色字糊在透出来的谱面上 */
+        @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+            .mp-bar,
+            .apply-bar,
+            .mp-error__panel,
+            .mp-aid__panel {
+                background: var(--surface);
+            }
         }
     </style>
 </head>
