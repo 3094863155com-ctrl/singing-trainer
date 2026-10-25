@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=35"></script>
+<script src="chord_recognition.js?v=36"></script>
     <style>
         * {
             margin: 0;
@@ -251,6 +251,7 @@
            ============================================================ */
         .meter {
             --meter-pad: 9px;
+            --meter-tick-w: 1.5px;       /* 刻度线宽：轨道首尾与把手都要按它对齐 */
             display: inline-flex;
             align-items: center;
             gap: 10px;
@@ -274,12 +275,16 @@
             padding: 0 var(--meter-pad);  /* 留出把手的半径，两端落档时不溢出 */
         }
 
-        /* 细轨：贯穿首尾刻度 */
+        /* 细轨：从**首刻度中心**贯穿到**尾刻度中心**
+           ★ 第三十六轮修 bug：绝对定位的包含块是 padding box（150px），而刻度被
+             `padding: 0 var(--meter-pad)` 往里推了 9px → 原来的 left:0;right:0 让
+             线段两端各多出一截、戳到轨道外面（用户："两端线段超出了端点"）。
+             现在两端都从 内边距 + 半个刻度宽 起，正好落在首/尾刻度的中线上。 */
         .meter__track::before {
             content: '';
             position: absolute;
-            left: 0;
-            right: 0;
+            left: calc(var(--meter-pad) + var(--meter-tick-w) / 2);
+            right: calc(var(--meter-pad) + var(--meter-tick-w) / 2);
             top: 50%;
             height: 1.5px;
             margin-top: -0.75px;
@@ -290,7 +295,7 @@
         .meter i {
             position: relative;
             display: block;
-            width: 1.5px;
+            width: var(--meter-tick-w);
             height: 10px;
             border-radius: 1px;
             background: #b6b8c1;
@@ -302,11 +307,12 @@
             background: #9c9ea8;
         }
 
-        /* 把手：白色圆点 + 轻微投影（浅灰底上不能只靠白 */
+        /* 把手：白色圆点 + 轻微投影（浅灰底上不能只靠白）
+           ★ left 与 paintMeter() 里的 calc 必须同款，否则刷新瞬间会跳 0.75px */
         .meter__thumb {
             position: absolute;
             top: 50%;
-            left: 9px;
+            left: calc(var(--meter-pad) + var(--meter-tick-w) / 2);
             width: 18px;
             height: 18px;
             margin: -9px 0 0 -9px;
@@ -613,6 +619,95 @@
 
         .degree-list[hidden] {
             display: none;
+        }
+
+        /* ------------------------------------------------------------
+           参与级数（第三十六轮重构）
+           ------------------------------------------------------------
+           展开后顶行是「和弦开关 ⇄ 七和弦概率」二选一，7 行里**只显示当前那种控件**。
+           理由（用户原话）："开关和进度条都能独占做大还简洁"。
+           ★ 显隐只靠 #degree-grid[data-view] 这两条规则，JS 只写 data-view 属性。
+           ============================================================ */
+        .dview {
+            display: flex;
+            justify-content: flex-start;
+            padding: 2px 0 10px;
+        }
+
+        #degree-grid[data-view="switch"] .drow [data-role="prob"] {
+            display: none;
+        }
+
+        #degree-grid[data-view="prob"] .drow [data-role="pick"] {
+            display: none;
+        }
+
+        /* 开关视图：拨杆升到全尺寸（42×26 的小号太憋屈，一行只有一个控件就该做大） */
+        #degree-grid[data-view="switch"] .drow .switch {
+            --sw-w: 50px;
+            --sw-h: 30px;
+            --sw-k: 24px;
+        }
+
+        /* 概率视图：滑块与读数同比放大（轨道 96 → 132px，内边距回到 9px 与把手对齐） */
+        #degree-grid[data-view="prob"] .drow .meter {
+            --meter-pad: 9px;
+            gap: 10px;
+        }
+
+        #degree-grid[data-view="prob"] .drow .meter__track {
+            width: 132px;
+            height: 22px;
+        }
+
+        #degree-grid[data-view="prob"] .drow .meter--sm i {
+            height: 10px;
+        }
+
+        #degree-grid[data-view="prob"] .drow .meter__thumb {
+            width: 18px;
+            height: 18px;
+            margin: -9px 0 0 -9px;
+        }
+
+        #degree-grid[data-view="prob"] .drow .meter__val {
+            min-width: 46px;
+            font-size: 14px;
+        }
+
+        /* 折叠态概览：直接摆级数罗马数字（用户："标上罗马数字，不用文字说明"）。
+           多数开启 → 摆**被禁用**的那几个（划掉）；少数开启 → 摆**启用**的那几个。
+           两种状态必须一眼分得开，否则「Ⅴ Ⅶ」到底是开还是关只能靠猜。 */
+        .dsum {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+
+        .dsum i {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 19px;
+            height: 21px;
+            padding: 0 4px;
+            font-family: "Songti SC", "STSong", "Times New Roman", Georgia, serif;
+            font-style: normal;
+            font-size: 13px;
+            font-weight: 700;
+            line-height: 1;
+            border-radius: 6px;
+        }
+
+        .dsum i.on {
+            color: var(--accent);
+            background: var(--accent-soft);
+        }
+
+        .dsum i.off {
+            color: #a2a5af;
+            background: #ebedf1;
+            text-decoration: line-through;
         }
 
         .drow {
@@ -1044,7 +1139,10 @@
         /* 「应用变更的设置并重启」条（用户 2026-10-24）：
            悬在播放器正上方、跨页常驻；点一下就按脏值类型重建（重算音频 or 重新出题）。
            没有"撤回"——用户明确取消。
-           ★ 尺寸刻意做小（32px 高的按钮、13px 字），别占屏幕。 */
+           ★ 尺寸刻意做小（32px 高的按钮、13px 字），别占屏幕。
+           ★ 第三十六轮：加一层**极缓慢的呼吸**，让用户余光能察觉它还在（"隐隐约约的缓慢闪烁"）。
+             两个动画同时动 opacity，规则是"后声明的覆盖先声明的" —— 呼吸延迟 0.18s
+             正好等于入场时长，且 0% 写死 opacity:1，接缝处不会跳。 */
         .apply-bar {
             display: flex;
             align-items: center;
@@ -1057,7 +1155,8 @@
             border: 1px solid var(--border);
             border-radius: var(--r-pill);
             box-shadow: var(--shadow-md);
-            animation: applyBarIn 0.18s ease;
+            animation: applyBarIn 0.18s ease,
+                       applyBarBreathe 3.6s ease-in-out 0.18s infinite;
         }
 
         .apply-bar[hidden] {
@@ -1067,6 +1166,18 @@
         @keyframes applyBarIn {
             from { opacity: 0; transform: translateY(6px); }
             to   { opacity: 1; transform: translateY(0); }
+        }
+
+        /* 0.80 是最低透明度：再低就像"坏了"，再高就看不出来 */
+        @keyframes applyBarBreathe {
+            0%, 100% { opacity: 1; }
+            50%      { opacity: 0.80; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .apply-bar {
+                animation: none;
+            }
         }
 
         .apply-bar__text {
@@ -1266,6 +1377,7 @@
 
         /* ---------- 展开态：铺满一屏（bottom sheet） ---------- */
         .mp-sheet {
+            --mp-edge-x: 0px;         /* 左缘右滑收起：跟手位移，由 JS 写（第三十六轮） */
             position: fixed;
             inset: 0;                 /* 用 inset 而非 height:100vh —— 绕开 iOS 地址栏引起的视口抖动 */
             z-index: 100;
@@ -1275,10 +1387,19 @@
             padding: 12px 16px var(--mp-safe);
             background: var(--bg-page);
             transform: translateY(100%);
-            transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+            /* ★ translate 是独立属性：展开/收起走 transform，右滑跟手走 translate，
+                 两者叠加互不覆盖（写在 transform 里就会被 translateY 顶掉）。 */
+            translate: var(--mp-edge-x) 0;
+            transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1),
+                        translate 0.28s cubic-bezier(0.4, 0, 0.2, 1);
             will-change: transform;
             overflow: hidden;
             touch-action: manipulation;   /* 禁双击缩放；谱表页的 pan-y 仍在其上覆盖，滚动不受影响 */
+        }
+
+        /* 拖动中：关掉横向过渡，否则跟手会慢半拍 */
+        .mp-sheet.is-edge-drag {
+            transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
         }
 
         .mp[data-state="expanded"] .mp-sheet {
@@ -1546,6 +1667,64 @@
             background: var(--track);
             color: var(--text-primary);
             transform: scale(0.97);
+        }
+
+        /* 气泡：按住（或滑过）时从键上方浮出，写这个音的级数（♯4 / 2）。
+           ★ touch-action: none 是滑奏能成立的前提 —— 留着 manipulation 的话
+             iOS 会把横向移动判成滚动，中途发 pointercancel 把滑奏掐断。
+           ★ 气泡 pointer-events: none：它正压在键的上沿，能吃到事件就会挡住"滑到下一颗"。 */
+        .mp-tone {
+            position: relative;
+            touch-action: none;
+        }
+
+        .mp-tone__tip {
+            position: absolute;
+            left: 50%;
+            bottom: calc(100% + 4px);
+            z-index: 3;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 30px;
+            height: 26px;
+            padding: 0 8px;
+            font-family: "Songti SC", "STSong", "Times New Roman", Georgia, serif;
+            font-size: 15px;
+            font-weight: 700;
+            line-height: 1;
+            color: var(--text-primary);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 9px;
+            box-shadow: 0 6px 16px -8px rgba(16, 24, 40, 0.34);
+            opacity: 0;
+            transform: translate(-50%, 6px) scale(0.86);
+            transform-origin: 50% 120%;
+            transition: opacity 0.12s ease, transform 0.16s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+            pointer-events: none;
+            white-space: nowrap;
+        }
+
+        /* 下面那个小尖角（用旋转的正方形做，双保险带同色描边） */
+        .mp-tone__tip::after {
+            content: '';
+            position: absolute;
+            left: 50%;
+            bottom: -5px;
+            width: 9px;
+            height: 9px;
+            margin-left: -4.5px;
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            border-bottom-right-radius: 2px;
+            transform: rotate(45deg);
+        }
+
+        .mp-tone.is-down .mp-tone__tip {
+            opacity: 1;
+            transform: translate(-50%, 0) scale(1);
         }
 
         /* 错题练习模式下的一句小字（取代原来整行的手势提示） */
@@ -2047,44 +2226,71 @@
         }
 
         /* ============================================================
-           液态玻璃（iOS 26 Liquid Glass 风，用户 2026-10-24 要求）
-           只作用于「悬浮在内容之上」的四块面板：
+           液态玻璃 v2（iOS 26 Liquid Glass 风，用户 2026-10-25 让重做）
+           ------------------------------------------------------------
+           范围仍是四块悬浮层：
              迷你播放器 .mp-bar / 应用变更条 .apply-bar /
              报错浮窗 .mp-error__panel / 听辨辅助窗 .mp-aid__panel
-           ★ 顶栏 .app-nav 不加 —— 它早定型为「通栏实底、像系统导航栏」，
-             加了玻璃反而变回"浮在页面上的一根条"。
-           ★ 整块可摘除：删掉本段即回到「实底 + 普通阴影」，不影响任何 JS。
-           做法 = 半透白 + backdrop 模糊饱和 + 四边内高光 + 1px 渐变弧光描边。
-           模糊半径刻意压到 18px（不是 40px）：迷你条是跨页常驻的 fixed 元素，
-           每帧滚动都要重算模糊，半径翻倍 = 滚动耗电翻倍。
+           ★ 顶栏 .app-nav 不加 —— 它是通栏实底、像系统导航栏。
+
+           ★ 上一版被退货的原因（用户："你做的不是液态玻璃"）：
+             「半透 + 模糊 + 一圈细边」＝ 磨砂塑料片。真玻璃的关键是**厚度**，
+             不是透明度。厚度靠五层明暗叠出来，缺一层就立刻变回塑料：
+               ① 上沿一道**实白**高光（光在断面上沿折射，最亮）
+               ② 下沿一道**弱白**高光（光绕过去衰减，所以比上沿暗）
+               ③ 紧贴下沿内侧一条**暗线**（断面有 2px 厚 → 才会看到这条边）
+               ④ 顶面整体偏亮 / 底面整体偏暗（一块有厚度的板，不是均匀的膜）
+               ⑤ 外阴影**大而散**（玻璃悬在空中，不是贴在纸上）
+             ①②③④ 走 6 层 box-shadow，⑤ 走 --liq-shadow；
+             顶面还有一道贴边的反射光斑（::after）。
+
+           ★ 为什么不做真·背景折射：`backdrop-filter: url(#svgfilter)` 只有
+             Chromium 认，iOS Safari 会把**整条 backdrop-filter 一起丢掉**
+             （连模糊都没了 → 更糟）。所以折射感只能靠 ①②③ 的明暗对比"骗"，
+             这套在 iPhone 和桌面上都成立。
+
+           ★ 整块可摘除：删掉 2069~2185 即回到「实底 + 普通阴影」，零 JS 依赖。
            ============================================================ */
         :root {
-            --liq-bg: rgba(255, 255, 255, 0.68);
-            --liq-blur: 20px;
-            --liq-sat: 180%;
+            --liq-bg: rgba(255, 255, 255, 0.50);
+            --liq-blur: 26px;
+            --liq-sat: 195%;
             --liq-shadow:
-                0 12px 32px -14px rgba(16, 24, 40, 0.30),
-                0 3px 10px -4px rgba(16, 24, 40, 0.12);
+                0 18px 44px -18px rgba(16, 24, 40, 0.34),
+                0 6px 16px -10px rgba(16, 24, 40, 0.16),
+                0 0 0 0.5px rgba(16, 24, 40, 0.06);
         }
 
         .mp-bar,
         .apply-bar,
         .mp-error__panel,
         .mp-aid__panel {
-            position: relative;                /* ::before 描边要定位，且不影响原有 flex 布局 */
+            position: relative;                /* ::before / ::after 要定位，不影响原有 flex */
             background: var(--liq-bg);
-            border: 1px solid rgba(255, 255, 255, 0.42);
+            border: 1px solid rgba(255, 255, 255, 0.55);
             box-shadow:
-                inset 0 1px 0 rgba(255, 255, 255, 0.95),
-                inset 0 -1px 0 rgba(255, 255, 255, 0.42),
-                inset 0 -16px 24px -20px rgba(16, 24, 40, 0.18),   /* 底部厚度：玻璃不是纸片 */
+                /* ① 上沿高光：纯白 1.5px，玻璃断面上沿 */
+                inset 0 1.5px 0 0 rgba(255, 255, 255, 1),
+                /* ② 下沿高光：弱一档 */
+                inset 0 -1.5px 0 0 rgba(255, 255, 255, 0.62),
+                /* ③ 断面暗线：紧贴下沿内侧，这条一去掉就"变薄" */
+                inset 0 -2px 0 -0.5px rgba(16, 24, 40, 0.10),
+                /* 漏光：整圈 0.5px 极淡白环，圆角处才不显得生硬 */
+                inset 0 0 0 0.5px rgba(255, 255, 255, 0.30),
+                /* ④ 顶面提亮：上半部像被环境光照到 */
+                inset 0 14px 18px -14px rgba(255, 255, 255, 0.90),
+                /* ④ 底面压低：板子的厚度阴影 */
+                inset 0 -18px 22px -18px rgba(16, 24, 40, 0.24),
+                /* ⑤ 悬空外阴影 */
                 var(--liq-shadow);
             -webkit-backdrop-filter: blur(var(--liq-blur)) saturate(var(--liq-sat));
             backdrop-filter: blur(var(--liq-blur)) saturate(var(--liq-sat));
         }
 
         /* 边缘「透镜弧光」：上亮 → 中透 → 右下再亮；xor 蒙版只留 1px 边，
-           看起来像一层玻璃壳在折射背后的颜色 */
+           看起来像一层玻璃壳在折射背后的颜色。
+           ★ 角度 158deg 是有意的：光从左上来，所以左上角最亮、右下角次亮、
+             对角两处最透 —— 等亮的一圈会读成"描边"，不是"折射"。 */
         .mp-bar::before,
         .apply-bar::before,
         .mp-error__panel::before,
@@ -2095,11 +2301,11 @@
             border-radius: inherit;
             padding: 1px;
             background: linear-gradient(158deg,
-                rgba(255, 255, 255, 0.95) 0%,
-                rgba(255, 255, 255, 0.20) 28%,
-                rgba(255, 255, 255, 0.04) 52%,
-                rgba(255, 255, 255, 0.38) 76%,
-                rgba(255, 255, 255, 0.88) 100%);
+                rgba(255, 255, 255, 0.98) 0%,
+                rgba(255, 255, 255, 0.28) 26%,
+                rgba(255, 255, 255, 0.05) 50%,
+                rgba(255, 255, 255, 0.34) 74%,
+                rgba(255, 255, 255, 0.92) 100%);
             -webkit-mask: linear-gradient(#000, #000) content-box, linear-gradient(#000, #000);
             -webkit-mask-composite: xor;
                     mask: linear-gradient(#000, #000) content-box, linear-gradient(#000, #000);
@@ -2107,25 +2313,46 @@
             pointer-events: none;
         }
 
-        /* 弹窗遮罩：不再是一层灰纱，改成「背后虚化」，接近 iOS 弹层。
-           半径比迷你条更大（22px）—— 弹窗只在按下时出现，不必为滚动耗电让路，
+        /* 顶面反射光斑：贴着上沿的一条亮带 + 左上角一小片环境光。
+           全部压在 14px 以内 —— 再往下就会把正文冲淡（玻璃可以亮，字不能看不清）。 */
+        .mp-bar::after,
+        .apply-bar::after,
+        .mp-error__panel::after,
+        .mp-aid__panel::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            pointer-events: none;
+            background:
+                linear-gradient(180deg,
+                    rgba(255, 255, 255, 0.72) 0,
+                    rgba(255, 255, 255, 0.18) 4px,
+                    rgba(255, 255, 255, 0) 13px),
+                radial-gradient(130px 76px at 13% 0%,
+                    rgba(255, 255, 255, 0.55) 0%,
+                    rgba(255, 255, 255, 0) 72%);
+        }
+
+        /* 弹窗遮罩：不再是灰纱，改成「背后虚化」。
+           半径比迷你条更大 —— 弹窗只在按下时出现，不必为滚动耗电让路，
            而背后是整页谱面/设置，虚化不足就会透出可读的文字。 */
         .mp-error,
         .mp-aid {
-            background: rgba(16, 24, 40, 0.22);
-            -webkit-backdrop-filter: blur(22px) saturate(140%);
-            backdrop-filter: blur(22px) saturate(140%);
+            background: rgba(16, 24, 40, 0.20);
+            -webkit-backdrop-filter: blur(26px) saturate(150%);
+            backdrop-filter: blur(26px) saturate(150%);
         }
 
         /* 弹窗面板再压一层更实的底：它长期盖在虚化遮罩上，
            不必像迷你条那样透，透多了正文会和背后的谱面抢注意力。
-           圆角比页面卡片更大（20px）—— iOS 26 的玻璃块普遍更圆更连续。 */
+           圆角比页面卡片更大 —— iOS 26 的玻璃块普遍更圆更连续。 */
         .mp-error__panel,
         .mp-aid__panel {
-            background: rgba(255, 255, 255, 0.78);
-            border-radius: 20px;
-            -webkit-backdrop-filter: blur(26px) saturate(180%);
-            backdrop-filter: blur(26px) saturate(180%);
+            --liq-bg: rgba(255, 255, 255, 0.60);
+            --liq-blur: 32px;
+            --liq-sat: 210%;
+            border-radius: 24px;
         }
 
         /* 不支持 backdrop-filter → 退回实底，别让深色字糊在透出来的谱面上 */
@@ -2317,6 +2544,13 @@
                             <span>八度内排列</span>
                             <button type="button" class="switch" id="chord-stack-octave" role="switch" aria-checked="false" aria-label="八度内排列"></button>
                         </div>
+
+                        <!-- 隐藏卡片（第三十六轮）：开 = 答案只在按住时出现（原有行为）；
+                             关 = 答案常驻显示。纯显示项，不进 pending。 -->
+                        <div class="srow">
+                            <span>隐藏卡片</span>
+                            <button type="button" class="switch" id="chord-hide-card" role="switch" aria-checked="true" aria-label="隐藏卡片"></button>
+                        </div>
                     </div>
                 </section>
 
@@ -2400,14 +2634,25 @@
                                 </button>
                                 <div class="ssub__body" id="grp-natural">
 
-                                    <!-- 参与级数：默认折叠，收起时只给「N 项已选」；展开是 7 行（概率 + 参与） -->
+                                    <!-- 参与级数：默认折叠。收起时右侧直接摆级数的罗马数字 —
+                                         多数开启就摆被禁用的那几个（划掉），少数开启就摆启用的那几个。
+                                         展开后顶行是「和弦开关 / 七和弦概率」二选一：
+                                         一格只做一件事，控件才能做大。 -->
                                     <div class="srow srow--btn" id="chord-degree-toggle" role="button" tabindex="0"
                                          aria-expanded="false" aria-controls="degree-grid">
                                         <span>参与级数</span>
-                                        <span class="srow__side"><span id="chord-degree-count">7 项已选</span>
+                                        <span class="srow__side"><span class="dsum" id="chord-degree-count"></span>
                                             <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span></span>
                                     </div>
-                                    <div class="degree-list" id="degree-grid" hidden></div>
+                                    <div class="degree-list" id="degree-grid" data-view="switch" hidden>
+                                        <!-- 视图切换框：静态节点，buildDegreeGrid() 只清 .drow，不会抹掉它 -->
+                                        <div class="dview">
+                                            <div class="seg" id="chord-degree-view" role="radiogroup" aria-label="级数设置显示">
+                                                <button type="button" class="seg__opt" data-dview="switch" role="radio" aria-checked="true">和弦开关</button>
+                                                <button type="button" class="seg__opt" data-dview="prob" role="radio" aria-checked="false">七和弦概率</button>
+                                            </div>
+                                        </div>
+                                    </div>
 
                                     <div class="srow">
                                         <span>转位</span>

@@ -86,9 +86,24 @@
         //     谱面 / 主播放音频 / 锁屏封面音频保持**原排列**。
         //   实现在 stackedForUI / uiVoicing（约 1630 行），整块可摘除。
         stackOctave: false,
+        // 隐藏卡片（第三十六轮，用户要求，默认开 = 保持原有行为）：
+        //   开 = 卡片上的答案**只在按住时**出现（一直以来的行为）。
+        //   关 = 答案**常驻显示**，展开面板就能看到（练习时可以对照着听）。
+        //   ★ 纯显示项：不出题、不动音频、不影响 pending 机制。
+        //   实现在 mpCardAlwaysOn() / mpSetRevealed()。
+        hideCard: true,
+        // 「参与级数」展开后右侧显示什么（第三十六轮）：
+        //   'switch' = 和弦参与开关（每个级数一颗拨杆）
+        //   'prob'   = 七和弦概率滑块
+        //   二选一是为了"开关和进度条都能独占做大还简洁"（用户原话）。
+        //   ★ 纯显示项，刷新要记住 → 走 loadSettings 白名单。
+        degreeView: 'switch',
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
         // 各级出现七和弦的概率（%）
+        //   ★ 第三十六轮：UI 只给三档 0 / 30 / 80（DEG_STEPS）。这里的默认值
+        //     40 / 10 / 70 / 30 **故意不动** —— 改了会改掉出题结果，
+        //     和声回归快照（accept.mjs 的 sha256 黄金值）会跟着漂。
         seventhProb: { 1: 0, 2: 40, 3: 0, 4: 10, 5: 70, 6: 0, 7: 30 },
         // 强调低音（用户 2026-10-07）：把**每小节的最低音**（谱面最下面那个音）单独提亮，
         //   帮听辨时抓住低声部。数值 = 低音增益要提升的百分比：
@@ -1332,21 +1347,27 @@
     //   离调和弦：三段 ——「阿拉伯（副调级数 + 转位数字）」大字 +「/」+「罗马（目标级数）」
     //   小一号且下沉到基线。视觉上左大右小、右段更低，读作"某某 之 Ⅴ"。
     //
-    // ★ 四个旋钮都在这里。调"看起来太小/太挤/浮得太高"只改这几个数，别去改绘制流程：
-    //     AP_NUM_FONT    阿拉伯数字字号（自然标记是 14）
-    //     AP_TARGET_FONT 目标罗马字号（比数字小一号才像"分母"）
-    //     AP_TARGET_SINK 目标罗马的下沉量（px，正数=往下）
-    //     AP_SLASH_GAP   斜杠前后一共留出的空隙（太小会像 5/Ⅳ 粘在一起）
+    // ★ 唯一旋钮 LABEL_ZOOM（第三十六轮，用户："乐谱的级数再大 20%"）：
+    //   字号与**所有**宽度估算系数都乘它。只改字号不改系数 → 标记不再居中
+    //   （估宽偏小，整串往左偏），离调括号端点会穿进文字里。要调大小只动这一个数。
+    //   其余派生值保持原来的比例关系（阿拉伯 15 / 目标 12 / 下沉 2.5 / 斜杠空隙 6.4）。
     // ------------------------------------------------------------
-    const AP_NUM_FONT = 15;
-    const AP_TARGET_FONT = 12;
-    const AP_TARGET_SINK = 2.5;
-    const AP_SLASH_GAP = 6.4;
+    const LABEL_ZOOM = 1.2;
+    const LABEL_FONT = 14 * LABEL_ZOOM;        // 自然标记字号（VexFlow 里是 "16.8pt"）
+    const LABEL_CHAR_W = 8 * LABEL_ZOOM;       // 罗马字符估宽：9.6/字符
+    const AP_NUM_FONT = 15 * LABEL_ZOOM;       // 离调：阿拉伯数字字号 18
+    const AP_TARGET_FONT = 12 * LABEL_ZOOM;    // 离调：目标罗马字号 14.4
+    const AP_TARGET_SINK = 2.5 * LABEL_ZOOM;   // 离调：目标罗马下沉量 3
+    const AP_SLASH_GAP = 6.4 * LABEL_ZOOM;     // 离调：斜杠前后总空隙 7.68
     // 估宽用的字宽系数（Arial 数字 ≈ 0.55em；罗马数字字符落在衬线字体上 ≈ 0.95em）
-    const AP_NUM_W = 8.3, AP_FIG_W = 5.4, AP_ROMAN_W = 10.6;
+    const AP_NUM_W = 8.3 * LABEL_ZOOM;
+    const AP_FIG_W = 5.4 * LABEL_ZOOM;
+    const AP_ROMAN_W = 10.6 * LABEL_ZOOM;
+    // 离调括号左右外扩量：跟着标记一起放大，否则宽标记（5⁷/Ⅳ）会把括号尾巴穿过去
+    const AP_BRACKET_PAD = 4 * LABEL_ZOOM;
 
     function measureRomanWidth(chord) {
-        if (!chord.applied) return chord.roman.length * 8;
+        if (!chord.applied) return chord.roman.length * LABEL_CHAR_W;
         const f = figuresOf(chord.seventh, chord.inversion);
         const nums = f.text.length;                        // 上标/下标字符各算一个
         const wNum = String(chord.applied.localDegree).length * AP_NUM_W + nums * AP_FIG_W;
@@ -1356,7 +1377,8 @@
 
     function drawRomanLabel(ctx, chord, centerX, labelY) {
         if (!chord.applied) {
-            const estW = chord.roman.length * 8;
+            ctx.setFont('Arial', LABEL_FONT, '');
+            const estW = chord.roman.length * LABEL_CHAR_W;
             ctx.fillText(chord.roman, centerX - estW / 2, labelY);
             return;
         }
@@ -1373,7 +1395,7 @@
         // 目标罗马：小一号 + 略微下沉，读作"某某 的 Ⅴ"
         ctx.setFont('Arial', AP_TARGET_FONT, '');
         ctx.fillText(ROMAN_MAJOR[chord.applied.targetDegree - 1] || '', x, labelY + AP_TARGET_SINK);
-        ctx.setFont('Arial', 14, '');
+        ctx.setFont('Arial', LABEL_FONT, '');
     }
 
     // 生成一段和弦连接：Ⅰ 开头、Ⅰ 结尾；中间从勾选的级数里随机
@@ -2009,7 +2031,7 @@
 
             // 罗马数字级数标注（谱表下方，居中于本小节的和弦）
             ctx.save();
-            ctx.setFont('Arial', 14, '');
+            ctx.setFont('Arial', LABEL_FONT, '');
             ctx.setFillStyle('#555');
             drawRomanLabel(ctx, chord, centerX, labelY);
             ctx.restore();
@@ -2132,7 +2154,7 @@
             // 想让级数离谱表更远/更近，就改这个 34。
             const labelY = bass.getYForLine(4) + 34;
             ctx.save();
-            ctx.setFont('Arial', 14, '');
+            ctx.setFont('Arial', LABEL_FONT, '');
             ctx.setFillStyle('#555');
             drawRomanLabel(ctx, chord, centerX, labelY);
             ctx.restore();
@@ -2202,8 +2224,8 @@
                     const w1 = measureRomanWidth(chords[ms[ms.length - 1]]);
                     segs.push({
                         line: ln, y: y,
-                        x0: measured[ms[0]].centerX - w0 / 2 - 4,
-                        x1: measured[ms[ms.length - 1]].centerX + w1 / 2 + 4
+                        x0: measured[ms[0]].centerX - w0 / 2 - AP_BRACKET_PAD,
+                        x1: measured[ms[ms.length - 1]].centerX + w1 / 2 + AP_BRACKET_PAD
                     });
                 }
                 let d = '';
@@ -2628,6 +2650,8 @@
     //                 ★ 只改这里；主播放的「分解和弦」排程（buildChordSchedule）保持原样。
     //   style 'block' 柱式：全音同时、只弹一下
     //   style 'note'  单音（点辅助窗右侧的简谱数字试听）：包络同柱式，只响一个音
+    //   style 'gliss' 发声键滑奏（第三十六轮）：也只响一个音，但**更短更轻** ——
+    //                 手指快速滑过时，上一颗的余音不能糊住下一颗，否则听不出"分解和弦"。
     //   音源全部登记进 mpAid.sources，关窗/重放前可随时 stop()。采样缺失只 warn 不抛。
     //
     //   ★ 解锁必须"同步"发生（2026-10-06 修「上滑与窗里按钮都没声」）：
@@ -2650,12 +2674,18 @@
         if (!ctx) return { ok: false, reason: 'no-ctx', scheduled: 0 };
 
         const isBlock = (style === 'block' || style === 'note');
+        const isGliss = (style === 'gliss');
         // 和弦分解 = 原序播放和弦里的每个音，有几个响几个（三和弦 3 个、七和弦 4 个）。
-        const pattern = isBlock ? null : midis.slice();
+        const pattern = (isBlock || isGliss) ? null : midis.slice();
         const GAP = 0.325;                 // 和弦分解每音间隔
-        const notes = isBlock
-            ? midis.map((m) => ({ midi: m, at: 0, hold: Math.min(0.8, 60 / settings.tempo), gain: 0.45 }))
-            : pattern.map((m, i) => ({ midi: m, at: i * GAP, hold: 0.3, gain: 0.5 }));
+        // 滑奏：0.26s 的 hold + 0.34 的增益。改大 = 更连、更像和弦；改小 = 更颗粒、更像"刮奏"。
+        const GLISS_HOLD = 0.26;
+        const GLISS_GAIN = 0.34;
+        const notes = isGliss
+            ? [{ midi: midis[0], at: 0, hold: GLISS_HOLD, gain: GLISS_GAIN }]
+            : (isBlock
+                ? midis.map((m) => ({ midi: m, at: 0, hold: Math.min(0.8, 60 / settings.tempo), gain: 0.45 }))
+                : pattern.map((m, i) => ({ midi: m, at: i * GAP, hold: 0.3, gain: 0.5 })));
 
         let scheduled = 0;
         let missing = 0;
@@ -2756,6 +2786,9 @@
         // 「八度内排列」（第三十四轮起是纯"放出来的音"项，但仍是用户偏好 → 必须记住；
         //   漏登记会让刷新后开关自己变回去）
         if (typeof s.stackOctave === 'boolean') settings.stackOctave = s.stackOctave;
+        // 隐藏卡片 / 参与级数的显示视图（第三十六轮）：同样是纯显示偏好，漏登记就会"自己变回去"
+        if (typeof s.hideCard === 'boolean') settings.hideCard = s.hideCard;
+        if (s.degreeView === 'switch' || s.degreeView === 'prob') settings.degreeView = s.degreeView;
         // 强调低音只剩四档 0 / 10 / 30 / 75（关闭 / 轻微 / 中等 / 明显）：旧值就近落档
         if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
             const v = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
@@ -2803,9 +2836,9 @@
         if (s.seventhProb && typeof s.seventhProb === 'object') {
             for (let d = 1; d <= 7; d++) {
                 const v = parseInt(s.seventhProb[d]);
-                // ★ 不在这里吸附到五档：默认值本来就是 40 / 10 / 70 / 30，
+                // ★ 不在这里吸附到档位：默认值本来就是 40 / 10 / 70 / 30，
                 //   吸附会改掉生成结果（回归基线会跟着变）。读数按真实值显示，
-                //   充能格按最近的档显示，点一下才真正落到档位上。
+                //   把手按最近的档摆，点一下才真正落到档位上（第三十六轮起只有 0/30/80 三档）。
                 if (!isNaN(v)) settings.seventhProb[d] = Math.max(0, Math.min(100, v));
             }
         }
@@ -3365,7 +3398,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 35;
+    const APP_VERSION = 36;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -3408,8 +3441,13 @@
     const EMPH_LABELS = ['关闭', '中等', '明显'];
     const EMPH_FILL = [0, 2, 3];
     const TEMPO_FILL = [1, 2, 3, 4];
-    const DEG_STEPS = [0, 25, 50, 75, 100];
-    const DEG_FILL = [0, 1, 2, 3, 4];
+    // 七和弦概率只有三档（第三十六轮，用户："只给三档，0% 30% 80%"）。
+    //   原来五档 0/25/50/75/100 —— 25 和 75 这种中间档在实际听觉上没区别，
+    //   还不如把三档拉开、让滑块每格的分辨率更大。
+    //   ★ 老配置里的 40 / 10 / 70 / 30 不迁移（见 loadSettings 的说明）：
+    //     把手按"最近的档"摆、读数仍写真实值。
+    const DEG_STEPS = [0, 30, 80];
+    const DEG_FILL = [0, 1, 2];
 
     function tempoLabel(v) { return v + ' bpm'; }
 
@@ -3457,7 +3495,10 @@
         const thumb = btn.querySelector('.meter__thumb');
         if (thumb) {
             const r = (n > 1) ? (k / (n - 1)) : 0;
-            thumb.style.left = 'calc(var(--meter-pad) + (100% - var(--meter-pad) * 2) * ' + r.toFixed(4) + ')';
+            // ★ 第三十六轮：与 .meter__track::before 对齐 —— 两端各含半个刻度宽，
+            //   否则把手中心恒比刻度中心偏 0.75px（首档看得最明显）。
+            thumb.style.left = 'calc(var(--meter-pad) + var(--meter-tick-w) / 2'
+                + ' + (100% - var(--meter-pad) * 2 - var(--meter-tick-w)) * ' + r.toFixed(4) + ')';
         }
         const lit = fill ? (fill[k] || 0) : k + 1;
         for (let i = 0; i < n; i++) {
@@ -3545,10 +3586,13 @@
             autoContinue: document.getElementById('chord-auto-continue'),
             portable: document.getElementById('chord-portable'),
             stackOctave: document.getElementById('chord-stack-octave'),
+            hideCard: document.getElementById('chord-hide-card'),
             grid: document.getElementById('degree-grid'),
-            // 「参与级数」折叠行：收起时只显示 N 项已选
+            // 「参与级数」折叠行：收起时显示级数罗马数字概览
             degreeToggle: document.getElementById('chord-degree-toggle'),
             degreeCount: document.getElementById('chord-degree-count'),
+            // 「和弦开关 / 七和弦概率」二选一（第三十六轮）
+            degreeViewSeg: document.getElementById('chord-degree-view'),
             // 转位 / 6₄：自然、离调、无调性各一套
             invNatural: document.getElementById('chord-inversion-natural'),
             secondInvNatural: document.getElementById('chord-second-inv-natural'),
@@ -3628,10 +3672,13 @@
 
     // 级数配置：7 行（用户 2026-10-24 截图定稿）
     //   [级数]  [五格概率条 · 点一下进一档]  [百分比]  [参与拨杆]
-    //   整块默认折叠，收起时那一行只显示「N 项已选」。
+    //   整块默认折叠，收起时那一行显示当前级数的罗马数字概览。
+    //   ★ 第三十六轮：顶部多了一个「和弦开关 / 七和弦概率」二选一切换框（静态 HTML，
+    //     放在 #degree-grid 里当第一个子节点）—— 所以这里**不能**再 innerHTML=''，
+    //     只清掉 7 个 .drow，否则切换框会被一起抹掉。
     function buildDegreeGrid() {
         if (!els.grid) return;
-        els.grid.innerHTML = '';
+        Array.prototype.slice.call(els.grid.querySelectorAll('.drow')).forEach((n) => n.remove());
         for (let d = 1; d <= 7; d++) {
             const row = document.createElement('div');
             row.className = 'drow';
@@ -3678,6 +3725,7 @@
             syncCard(d);
         }
         updateDegreeCount();
+        applyDegreeView();
     }
 
     // 单行的概率条与百分比
@@ -3701,13 +3749,40 @@
         if (card) card.classList.toggle('off', !pv('degrees')[d] && d !== 1);
     }
 
-    // 折叠行右侧的「N 项已选」
+    // 折叠行右侧的级数概览（第三十六轮，用户："标上罗马数字，不用文字说明"）
+    //   规则：**多数开启时显示被禁用的那几个，多数关闭时显示启用的那几个** ——
+    //   这样永远只摆少数几个字，收起态不会被 7 个数字撑爆，也比「7 项已选」信息量大。
+    //   ★ 启用/禁用必须一眼分得开，否则"Ⅴ Ⅶ"到底是开还是关只能靠猜：
+    //     启用 = 紫底紫字；禁用 = 灰底灰字 + 划掉。
+    //   ★ 全开时"禁用集合"是空的 → 退化成显示全部 7 个启用（否则那一栏会空着）。
     function updateDegreeCount() {
         if (!els.degreeCount) return;
         const deg = pv('degrees');
-        let n = 0;
-        for (let d = 1; d <= 7; d++) if (deg[d]) n++;
-        els.degreeCount.textContent = n + ' 项已选';
+        const onList = [], offList = [];
+        for (let d = 1; d <= 7; d++) (deg[d] ? onList : offList).push(d);
+        let showOff = onList.length > offList.length;   // "多数开启" 而非 "≥5"，对称且随勾选实时变
+        if (showOff && offList.length === 0) showOff = false;
+        const list = showOff ? offList : onList;
+        let html = '';
+        for (let i = 0; i < list.length; i++) {
+            const d = list[i];
+            html += '<i class="' + (showOff ? 'off' : 'on') + '">' + DEGREE_CHOICES[d - 1] + '</i>';
+        }
+        els.degreeCount.innerHTML = html;
+        els.degreeCount.setAttribute('aria-label',
+            (showOff ? '未参与：' : '参与：') + list.map((d) => d).join(' '));
+    }
+
+    // 「和弦开关 ⇄ 七和弦概率」二选一（第三十六轮）
+    //   只改 #degree-grid 上的 data-view，显隐全交给 CSS；两种视图里控件都独占整行，
+    //   所以能做到"开关和进度条都做大还简洁"。
+    function applyDegreeView() {
+        if (!els.grid) return;
+        const v = (pv('degreeView') === 'prob') ? 'prob' : 'switch';
+        els.grid.dataset.view = v;
+        if (els.degreeViewSeg) {
+            markSeg(els.degreeViewSeg, (btn) => btn.dataset.dview === v);
+        }
     }
 
     function renderInfoText(text, isError) {
@@ -4097,6 +4172,106 @@
     //   ★ 走 playInstantChord（实时 Web Audio，音源直接从 bufferCache 取），
     //     完全不经 chordAudioEl → 不可能把主播放的起播位置/叠音问题带回来。
     //   ★ 多指可同时按（每个按钮各自 pointerdown），按几个响几个。
+
+    // ------------------------------------------------------------
+    // 发声键「滑奏」（第三十六轮，用户："1234 可以滑奏，从左到右滑出分解和弦"）
+    //
+    //   一次按下就是一条 glissando：手指横向移到哪颗键，哪颗键就亮起并响。
+    //   手指不抬起也能一路从左滑到右 → 自然滑出一串分解和弦。
+    //
+    //   ★ 用 rect 命中判定而不是 document.elementFromPoint：
+    //     气泡是绝对定位的子节点，elementFromPoint 可能返回气泡（虽然已 pointer-events:none），
+    //     rect 判定零副作用，也顺带支持"手指往下飘 20px 还算在这排里"。
+    //   ★ 监听挂在 document 上（按下时加、松手时摘）：
+    //     手指滑到键与键之间的 8px 空隙、甚至滑出整排，事件都不会断。
+    //   ★ `.mp-tone` 必须 `touch-action: none` —— 否则 iOS 会把横向移动判成滚动，
+    //     中途发一个 pointercancel 把滑奏掐断。
+    // ------------------------------------------------------------
+    let mpGliss = null;      // { measure, idx, id } —— 正在滑奏的那根手指
+
+    function mpToneButtons() {
+        return (els && els.mpTones) ? els.mpTones.querySelectorAll('.mp-tone') : [];
+    }
+
+    // 高亮第 i 颗（-1 = 全部熄灭）
+    function mpToneDown(i) {
+        const btns = mpToneButtons();
+        for (let k = 0; k < btns.length; k++) btns[k].classList.toggle('is-down', k === i);
+    }
+
+    // x/y → 第几颗；不在这一排（含上下 24px 宽容区）返回 -1
+    function mpToneIndexAt(x, y) {
+        const btns = mpToneButtons();
+        if (!btns.length) return -1;
+        const first = btns[0].getBoundingClientRect();
+        const last = btns[btns.length - 1].getBoundingClientRect();
+        if (y < first.top - 24 || y > first.bottom + 24) return -1;
+        if (x < first.left - 14) return -1;
+        if (x > last.right + 14) return -1;
+        for (let i = 0; i < btns.length; i++) {
+            const r = btns[i].getBoundingClientRect();
+            if (x >= r.left && x <= r.right) return i;
+        }
+        return (x < first.left) ? 0 : btns.length - 1;
+    }
+
+    function mpTonePlay(measure, i) {
+        const cur = (data && data.chords) ? data.chords[measure] : null;
+        if (!cur || !cur.midis) return;
+        // ★ 现取压缩版：响的就是"八度排列后"的第 i 个音（低音那颗不变）
+        const midi = uiVoicing(cur).midis[i];
+        if (midi == null) return;
+        // 'gliss' 档：更短的 hold + 更低的增益 —— 快速滑过时上一颗的余音不能糊住下一颗
+        playInstantChord([midi], 'gliss').catch(() => {});
+    }
+
+    function mpGlissMove(e) {
+        if (!mpGliss) return;
+        if (mpGliss.id != null && e.pointerId != null && e.pointerId !== mpGliss.id) return;
+        const i = mpToneIndexAt(e.clientX, e.clientY);
+        if (i < 0) {
+            // 滑出整排：灭灯但保留 idx=-1，重新滑回来同一颗要能再响一次
+            if (mpGliss.idx !== -1) { mpGliss.idx = -1; mpToneDown(-1); }
+            return;
+        }
+        if (i === mpGliss.idx) return;
+        mpGliss.idx = i;
+        mpToneDown(i);
+        mpTonePlay(mpGliss.measure, i);
+    }
+
+    function mpGlissStart(measure, i, pointerId) {
+        mpGlissEnd();
+        mpGliss = { measure: measure, idx: i, id: pointerId };
+        mpToneDown(i);
+        mpTonePlay(measure, i);
+        document.addEventListener('pointermove', mpGlissMove);
+        document.addEventListener('pointerup', mpGlissEnd);
+        document.addEventListener('pointercancel', mpGlissEnd);
+    }
+
+    function mpGlissEnd() {
+        if (document) {
+            document.removeEventListener('pointermove', mpGlissMove);
+            document.removeEventListener('pointerup', mpGlissEnd);
+            document.removeEventListener('pointercancel', mpGlissEnd);
+        }
+        if (!mpGliss) return;
+        mpGliss = null;
+        mpToneDown(-1);
+    }
+
+    // 第 i 颗键该冒出来的那个音高标签（第三十六轮，用户："按上去对应的可以显示音名"）。
+    //   有调性 = 阿拉伯级数（♯4 / 2，与卡片/听辨窗同一套写法，不暴露调性）；
+    //   无调性 = 没有级数可算 → 退回音名（F♯）。
+    function mpToneLabel(c, i) {
+        const v = uiVoicing(c);
+        const n = (v.notes && v.notes[i]) ? v.notes[i] : null;
+        if (!n) return '';
+        if (!data || data.atonal || !data.scale) return pitchName(n.letter, n.acc);
+        return degreeOfNote(n, data.scale).text;
+    }
+
     function mpPaintToneButtons(m) {
         if (!els || !els.mpTones) return;
         const c = (data && data.chords) ? data.chords[m] : null;
@@ -4105,8 +4280,10 @@
         const midis = uiVoicing(c).midis;
         const box = els.mpTones;
         // 和弦或小节变了才重建（避免每帧重排 DOM）
+        //   ★ 守卫数 .mp-tone，不能再用 childNodes.length —— 每颗键里现在多了一个气泡
+        //     <span class="mp-tone__tip">，按下标数会永远对不上 → 每帧重建 → 气泡一冒就被销毁。
         if (box.__data === data && box.dataset.measure === String(m)
-            && box.childNodes.length === midis.length) {
+            && box.querySelectorAll('.mp-tone').length === midis.length) {
             return;
         }
         box.innerHTML = '';
@@ -4115,27 +4292,33 @@
             b.type = 'button';
             b.className = 'mp-tone';
             b.dataset.idx = String(i);
-            b.textContent = String(i + 1);
+            // 序号单独包一层：按钮的"可见文字"从此不再只剩一个数字（多了气泡），
+            //   但序号本身仍然是一个独立节点 —— 验收/无障碍都读它，别读 textContent。
+            const num = document.createElement('span');
+            num.className = 'mp-tone__num';
+            num.textContent = String(i + 1);
+            b.appendChild(num);
             b.setAttribute('aria-label', '第 ' + (i + 1) + ' 个音（从低到高）· 试听');
+            // 气泡：按住（或滑过）时从键上方浮出，写这个音对应的级数 / 音名。
+            //   ★ 一定要用 <span> 且 pointer-events:none —— 气泡冒出来时正压在键上方，
+            //     能吃到事件的话"滑到下一颗"就会在气泡上截断。
+            const tip = document.createElement('span');
+            tip.className = 'mp-tone__tip';
+            tip.textContent = mpToneLabel(c, i);
+            b.appendChild(tip);
             // 最低音那颗明显更宽（用户 2026-10-24：再宽 40%）。
             //   4 音时 flex 2.1 ≈ 153px；3 音（键盘和声）时用 1.6，免得一颗占掉一半以上。
             if (i === 0) b.style.flex = (midis.length >= 4) ? '2.1 1 0' : '1.6 1 0';
             b.addEventListener('pointerdown', (e) => {
                 // 拦掉后续 click：这一排只负责发声，不触发任何"跳小节"之类的导航
                 e.preventDefault();
-                const cur = (data && data.chords) ? data.chords[m] : null;
-                if (!cur || !cur.midis) return;
-                // ★ 现取压缩版：点第 i 颗响的就是"八度排列后"的第 i 个音（低音那颗不变）
-                const midi = uiVoicing(cur).midis[i];
-                if (midi == null) return;
-                b.classList.add('is-down');
+                if (!(data && data.chords && data.chords[m])) return;
                 unlockAudioNow();
-                playInstantChord([midi], 'note').catch(() => {});
+                mpGlissStart(m, i, e.pointerId);
             });
-            const up = () => b.classList.remove('is-down');
-            b.addEventListener('pointerup', up);
-            b.addEventListener('pointercancel', up);
-            b.addEventListener('pointerleave', up);
+            // ★ 千万别挂 pointerleave = mpGlissEnd：滑奏时手指必然会"离开上一颗键"，
+            //   那一下就会把整条滑奏掐断（踩过 —— 表现是"只有第一颗响"）。
+            //   滑出整排由 mpGlissMove 的 i<0 分支负责灭灯，松手由 document 上的监听收尾。
             box.appendChild(b);
         }
         box.__data = data;
@@ -4595,6 +4778,7 @@
         if (els.autoContinue) els.autoContinue.setAttribute('aria-checked', pv('autoContinue') ? 'true' : 'false');
         if (els.portable) els.portable.setAttribute('aria-checked', pv('portable') ? 'true' : 'false');
         if (els.stackOctave) els.stackOctave.setAttribute('aria-checked', pv('stackOctave') ? 'true' : 'false');
+        if (els.hideCard) els.hideCard.setAttribute('aria-checked', pv('hideCard') ? 'true' : 'false');
         if (els.relativePitch) {
             const rel = (pv('pitchMode') === 'relative');
             els.relativePitch.setAttribute('aria-checked', rel ? 'true' : 'false');
@@ -5315,6 +5499,18 @@
             });
         }
 
+        // 「和弦开关 ⇄ 七和弦概率」二选一（第三十六轮）：纯显示项 → 即时生效并记住。
+        //   不重出题、不进待应用 —— 它只是"同一批数据换个控件看"。
+        if (els.degreeViewSeg) {
+            els.degreeViewSeg.addEventListener('click', (e) => {
+                const btn = e.target.closest ? e.target.closest('.seg__opt') : null;
+                if (!btn || !btn.dataset.dview) return;
+                settings.degreeView = (btn.dataset.dview === 'prob') ? 'prob' : 'switch';
+                saveSettings();
+                applyDegreeView();
+            });
+        }
+
         // ---------------- 离调（和弦板块里的子卡） ----------------
         //   那颗开关只管"展开/收起 + 是否参与出题"，改了先记待应用。
         if (els.appliedEnable) {
@@ -5498,6 +5694,17 @@
                 mpRepaintToneButtons();
             });
         }
+
+        // 「隐藏卡片」（第三十六轮）：纯显示项 → 即时生效，不进待应用。
+        //   关掉后展开面板里的答案常驻显示（练习时可以对照着听）。
+        if (els.hideCard) {
+            els.hideCard.addEventListener('click', () => {
+                settings.hideCard = !settings.hideCard;
+                saveSettings();
+                syncTogglePills();
+                mpApplyCardVisibility();
+            });
+        }
         syncTogglePills();
 
         // （原「停止」键已删：要停下来统一按底部播放器的暂停键，那一下同样会打断自动连播接力）
@@ -5632,6 +5839,8 @@
 
         // 长按看的答案：按住揭示、按住上滑报错、按住左/右滑上一个/下一个（左右互通）
         bindStageGesture();
+        // 展开面板：从最左侧往右滑收起（第三十六轮）
+        bindEdgeSwipe();
 
         // ★ 第十六轮：任意一次点击都顺手"续一下"音频上下文。
         //   为什么挂在 document 的 capture 阶段：它比所有目标处理器都早跑，
@@ -5706,6 +5915,9 @@
     function mpSetExpanded(on) {
         mpCancelGesture();               // 面板状态一变，在途的手势（含冻结）作废
         mpExpanded = !!on;
+        // 展开前把"左缘右滑"的横向位移清零（第三十六轮）—— 上一次是从右侧甩出去的，
+        // 不清零的话再展开会在屏外就开始。
+        if (mpExpanded) mpResetEdgeX();
         if (els && els.mp) els.mp.dataset.state = mpExpanded ? 'expanded' : 'collapsed';
         if (typeof document !== 'undefined' && document.body) {
             document.body.style.overflow = mpExpanded ? 'hidden' : '';
@@ -5871,11 +6083,27 @@
         c.closePath();
     }
 
+    // 卡片答案是否**常驻**显示（第三十六轮「隐藏卡片」开关关掉时）。
+    //   ★ 用 pv() 而不是 settings：设置页刚改完、还没点应用时也应该立刻看到效果
+    //     （它是纯显示项，本来就不进 pending；pv 在没有 pending 时等于 settings，安全）。
+    function mpCardAlwaysOn() {
+        return pv('hideCard') === false;
+    }
+
+    // 「隐藏卡片」开关切完后的收尾：开 → 恢复"只有按住才显示"；关 → 立刻常驻显示。
+    //   按住期间（mpFreeze 非空）不去打断用户正在看的那张，等他松手自然回到新状态。
+    function mpApplyCardVisibility() {
+        if (mpCardAlwaysOn()) mpSetRevealed(true);
+        else if (!mpFreeze) mpSetRevealed(false);
+    }
+
     // 揭示开关（瞬时）：按住 = true，松手 = false。
     //   ★ 与旧版的区别：以前是"点一下持久切换"，现在**默认永远遮住**，
     //     只有手指按住的那段时间才看得见。
+    //   ★ 第三十六轮：设置里「隐藏卡片」关掉后，这里被钉在 true ——
+    //     所有调用点（松手、切页、cancelGesture…）都不用改，一处收口。
     function mpSetRevealed(on) {
-        mpRevealing = !!on;
+        mpRevealing = !!(on || mpCardAlwaysOn());
         if (els && els.mpStage) {
             els.mpStage.classList.toggle('is-hidden', !mpRevealing);
             els.mpStage.classList.toggle('is-revealed', mpRevealing);
@@ -6084,10 +6312,111 @@
         mpPreviewChord(next);
     }
 
+    // ------------------------------------------------------------
+    // 展开面板：从最左侧往右滑 = 收起（第三十六轮，用户要求）
+    //
+    //   ★ 为什么挂在 .mp-sheet 上而不是舞台：舞台只占中间一块，
+    //     而面板展开时 inset:0 铺满全屏、收起时被 translateY(100%) 推到屏外 ——
+    //     挂它自己身上天然"只在可见时收得到事件"，不用判可见性。
+    //   ★ 必须用 **捕获阶段** + stopPropagation：起点落在舞台上时，
+    //     舞台自己的"按住右滑 = 下一个和弦"也在监听同一批事件，
+    //     不拦就会同时收起面板又跳一个和弦。
+    //   ★ 让位规则：如果用户先按住（舞台手势已经 armed），这里直接放弃 ——
+    //     "长按看答案后右滑到下一个和弦"是更常用的手势，不能被边缘手势抢走。
+    //   ★ 横向位移写进 --mp-edge-x（独立 translate 属性），与展开/收起的 translateY 叠加。
+    // ------------------------------------------------------------
+    const MP_EDGE_ZONE = 36;      // 起手点离面板左边缘多少 px 以内才算"从左缘滑"
+    const MP_EDGE_COMMIT = 10;    // 横向超过这个位移才认定"在拖面板"（过滤误触）
+    const MP_EDGE_CLOSE = 96;     // 滑过这么远松手 → 收起
+    const MP_EDGE_VEL = 0.45;     // 或者甩得够快（px/ms）也收起
+
+    // 把横向位移无过渡地归零。
+    //   ★ 必须"关过渡 → 改值 → 强制重排 → 开过渡"，否则会看到面板自己滑回左边。
+    function mpResetEdgeX() {
+        const sheet = els && els.mpSheet;
+        if (!sheet) return;
+        sheet.classList.add('is-edge-drag');
+        sheet.style.setProperty('--mp-edge-x', '0px');
+        void sheet.offsetWidth;               // 强制一次重排，让归零在"无过渡"状态下生效
+        sheet.classList.remove('is-edge-drag');
+    }
+
+    function mpEdgeClose() {
+        const sheet = els && els.mpSheet;
+        if (!sheet) return;
+        const w = sheet.getBoundingClientRect().width || 400;
+        // 横向甩出与纵向收起同时发生（对角线滑走），比"先滑回再往下"自然
+        sheet.style.setProperty('--mp-edge-x', (w + 16) + 'px');
+        mpSetExpanded(false);
+        // 面板已完全在屏外，这时才归零（看不清任何跳动）
+        setTimeout(mpResetEdgeX, 420);
+    }
+
+    function bindEdgeSwipe() {
+        const sheet = els && els.mpSheet;
+        if (!sheet) return;
+        let st = null;      // { id, x0, y0, t0, dx, locked, captured }
+
+        // 顶栏 / 按钮 / 发声键这一排本身不接收边缘手势（它们自己有点击语义）
+        const blocked = (t) => !!(t && t.closest && t.closest(
+            'button, a, input, textarea, select, .mp-tones, .mp-sheet__top, .mp-sheet__actions, .mp-sheet__footer'
+        ));
+
+        sheet.addEventListener('pointerdown', (e) => {
+            if (!mpExpanded || st) return;
+            if (blocked(e.target)) return;
+            const r = sheet.getBoundingClientRect();
+            if (e.clientX - r.left > MP_EDGE_ZONE) return;
+            st = { id: e.pointerId, x0: e.clientX, y0: e.clientY, t0: Date.now(),
+                   dx: 0, locked: false, captured: false };
+            try { sheet.setPointerCapture(e.pointerId); st.captured = true; } catch (err) {}
+        }, true);
+
+        sheet.addEventListener('pointermove', (e) => {
+            if (!st) return;
+            if (st.id != null && e.pointerId != null && e.pointerId !== st.id) return;
+            const dx = e.clientX - st.x0;
+            const dy = e.clientY - st.y0;
+            if (!st.locked) {
+                // 舞台手势已经武装 → 让位（长按后右滑 = 下一个和弦）
+                if (mpGesture && mpGesture.phase === 'armed') { st = null; return; }
+                if (dx < MP_EDGE_COMMIT || dx < Math.abs(dy) * 1.2) {
+                    // 竖着走远 → 彻底放弃这个候选
+                    if (Math.abs(dy) > 16 && Math.abs(dy) > dx) st = null;
+                    return;
+                }
+                st.locked = true;
+                mpCancelGesture();                        // 掐掉舞台上那颗还没武装的手势
+                sheet.classList.add('is-edge-drag');
+            }
+            st.dx = Math.max(0, dx);
+            sheet.style.setProperty('--mp-edge-x', st.dx + 'px');
+            e.stopPropagation();
+            e.preventDefault();
+        }, true);
+
+        const finish = (e) => {
+            if (!st) return;
+            if (st.id != null && e && e.pointerId != null && e.pointerId !== st.id) return;
+            const s = st;
+            st = null;
+            if (s.captured) { try { sheet.releasePointerCapture(s.id); } catch (err) {} }
+            if (!s.locked) return;
+            const dt = Math.max(1, Date.now() - s.t0);
+            sheet.classList.remove('is-edge-drag');       // 恢复过渡（弹回 / 甩出都要有动画）
+            if (s.dx > MP_EDGE_CLOSE || (s.dx / dt) > MP_EDGE_VEL) {
+                mpEdgeClose();
+            } else {
+                sheet.style.setProperty('--mp-edge-x', '0px');
+            }
+        };
+        sheet.addEventListener('pointerup', finish, true);
+        sheet.addEventListener('pointercancel', finish, true);
+    }
+
     function bindStageGesture() {
         const stage = els && els.mpStage;
         if (!stage) return;
-
         // iOS 长按会弹拷贝菜单/放大镜，直接压掉
         stage.addEventListener('contextmenu', (e) => { e.preventDefault(); });
 
@@ -7371,7 +7700,11 @@
             aidOpen: !!(els && els.mpAid && !els.mpAid.hidden),
             reportCount: mpReports.length,
             // 第二十六轮：起播静音斜坡的当前音量（0 = 正处于"盖残留"窗口；1 = 已恢复）
-            volume: chordAudioEl ? chordAudioEl.volume : null
+            volume: chordAudioEl ? chordAudioEl.volume : null,
+            // 第三十六轮：舞台页 + 卡片是否被"隐藏卡片"开关钉成常驻 + 左缘右滑的横向位移
+            stageView: mpStageView,
+            cardAlwaysOn: mpCardAlwaysOn(),
+            edgeX: (els && els.mpSheet) ? (els.mpSheet.style.getPropertyValue('--mp-edge-x') || '') : ''
         }),
         // 第二十二轮：起播落点自检的记录（真机上排查"关窗后落在第几节"直接用）
         _getResumeLog: () => mpResumeLog.slice(),
