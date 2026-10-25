@@ -1133,6 +1133,19 @@
         return picked.length ? picked : ['5-1'];
     }
 
+    // ★ 第三十九轮（用户："小调彻底取消二级和弦的，离调到小调只有五级"）：
+    //   向**小调目标**（Ⅱ Ⅲ Ⅵ，即 APPLIED_SCOPE_DEGREES.minor）的离调，
+    //   凡是分子为 2 的（2⁷/Ⅱ、2⁷/Ⅲ、2⁷/Ⅵ）一律不再出 —— 含局部 2 级的进行
+    //   （2-5-1）整个被排除，只剩 5-1（5⁷/x）。大调目标（Ⅳ Ⅴ）不受影响。
+    //   与 appliedTargetDegreePool 的"目标 ∩ 参与级数"是两道独立的闸。
+    function progressionsForTarget(settings, targetDegree) {
+        const progs = settingsProgressions(settings);
+        if (APPLIED_SCOPE_DEGREES.minor.indexOf(targetDegree) >= 0) {
+            return progs.filter((k) => APPLIED_PROGRESSIONS[k].indexOf(2) < 0);
+        }
+        return progs;
+    }
+
     // 构造一个离调和弦的描述（不产生随机数，纯算术）
     //   targetDegree : 被临时当成主和弦的那一级（原调级数，1..7）
     //   localDegree  : 这个和弦在副调里的级数（2 / 4 / 5）
@@ -1191,8 +1204,10 @@
     function planAppliedEvents(scale, seq, settings) {
         const N = seq.length;
         const want = APPLIED_GROUPS_BY_LEN[N] || 1;
-        const progs = settingsProgressions(settings);
-        const pool = appliedTargetDegreePool(settings);
+        const pool = appliedTargetDegreePool(settings)
+            // ★ 第三十九轮：没有任何可用进行的目标（小调目标 + 只勾了 2-5-1 时）
+            //   直接剔出池子 —— 不然抽到它才失败，白白浪费随机次数、组数还凑不满。
+            .filter((t) => progressionsForTarget(settings, t).length > 0);
         if (!pool.length) return [];        // 没有可用目标 → 这一段不出离调
         const lastResolve = N - 2;          // 解决小节最晚落在这里，最后一小节留给终止 Ⅰ
 
@@ -1215,7 +1230,8 @@
                     if (!free.length) free = pool.slice();   // 组数比目标池多时允许重复目标
                     const target = free[Math.floor(Math.random() * free.length)];
                     let locals = null;
-                    for (const key of shuffle(progs.slice())) {
+                    // ★ 第三十九轮：小调目标只用不含 2 的进行（见 progressionsForTarget）
+                    for (const key of shuffle(progressionsForTarget(settings, target).slice())) {
                         const cand = pickLocalSeq(scale, target, [key]);
                         if (cand) { locals = cand; break; }
                     }
@@ -1323,12 +1339,12 @@
     //   ★ 与出题同源：走同一套 groupViable / APPLIED_PROGRESSIONS，预览永远不会和真实出题脱节。
     function appliedVocabulary(settings) {
         const scale = buildScale('C');
-        const progs = settingsProgressions(settings);
         const targets = appliedTargetDegreePool(settings);
         const list = [];
         const seen = new Set();
         for (const t of targets) {
-            for (const k of progs) {
+            // ★ 第三十九轮：小调目标只用不含 2 的进行（与真实出题同源，预览永不会脱节）
+            for (const k of progressionsForTarget(settings, t)) {
                 const locals = APPLIED_PROGRESSIONS[k];
                 if (!groupViable(scale, t, locals)) continue;
                 for (const L of locals) {
@@ -2711,9 +2727,11 @@
         // 和弦分解 = 原序播放和弦里的每个音，有几个响几个（三和弦 3 个、七和弦 4 个）。
         const pattern = (isBlock || isGliss) ? null : midis.slice();
         const GAP = 0.325;                 // 和弦分解每音间隔
-        // 滑奏：0.26s 的 hold + 0.34 的增益。改大 = 更连、更像和弦；改小 = 更颗粒、更像"刮奏"。
+        // 滑奏：0.26s 的 hold + 0.52 的增益。
+        //   ★ 第三十九轮：0.34 → 0.52（用户："按出的声响要大一点，不然会被柱式和弦淹没"）。
+        //     hold 不动 —— 快速滑过时上一颗的余音还是不能糊住下一颗。
         const GLISS_HOLD = 0.26;
-        const GLISS_GAIN = 0.34;
+        const GLISS_GAIN = 0.52;
         const notes = isGliss
             ? [{ midi: midis[0], at: 0, hold: GLISS_HOLD, gain: GLISS_GAIN }]
             : (isBlock
@@ -3432,7 +3450,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 39;
+    const APP_VERSION = 40;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -4163,12 +4181,12 @@
         return hslToHex(h, Math.max(0, Math.min(1, s + ds)), Math.max(0, Math.min(1, l + dl)));
     }
 
-    const ART_PALETTE_APPLIED = ART_PALETTE.map((p) => ({
-        top: darkenHex(p.top, -0.10, -0.08),
-        bottom: darkenHex(p.bottom, -0.13, -0.08),
-        ink: darkenHex(p.ink, 0.06, -0.06),
-        sub: darkenHex(p.sub, 0.02, -0.06)
-    }));
+    // ★ 第三十九轮：ART_PALETTE_APPLIED 整个删掉（对角渐变直接用原色板）。
+    //   用户反馈 37 轮的离调卡片"颜色像发霉了"——发霉的来源有两处：
+    //     ① 这张表把两端颜色先压暗 10~13%、再降饱和；
+    //     ② 中间 stop 又 darkenHex(-0.12) 一次 → 三个 stop 全是"压暗+去饱和"，糊成灰调。
+    //   现在渐变直接用 ART_PALETTE 原色，中点 mixHex 后**提亮** 6%（洗出过渡带，
+    //   互补色对 Ⅴ黄↔Ⅳ蓝 的中缝才不会塌成脏灰）。
 
     // 两色的 sRGB 中点（离调对角渐变的中间 stop 基料）
     function mixHex(a, b) {
@@ -4506,22 +4524,23 @@
         const isApplied = !bassOnly && !!(info && info.applied);
         const pal = bassOnly
             ? COVER_NEUTRAL
-            : (isApplied ? ART_PALETTE_APPLIED : ART_PALETTE)[(info.degree - 1) % ART_PALETTE.length];
+            : ART_PALETTE[(info.degree - 1) % ART_PALETTE.length];
         // ★ 第三十七轮（用户："离调卡片配色改一下……例如 2/Ⅲ，左上就是 2 的颜色，
         //   右下是 3 的，中间过渡一下，别是两个色块冲突在一起"）：
-        //   离调档改成**对角线（左上→右下）三 stop 渐变** —— 左上 = 分子（副调级数）的色，
-        //   右下 = 分母（目标级数）的色。中间必须插第三个 stop：互补色对（Ⅴ 黄 ↔ Ⅳ 蓝）
-        //   在 sRGB 直插会在中缝塌成脏灰；取两端中点再**提亮 + 降饱和**，看起来才是
-        //   "柔和过渡带"而不是"脏块"。普通档 / bassOnly 档维持原垂直渐变，一字不动。
+        //   离调档 = **对角线（左上→右下）三 stop 渐变** —— 左上 = 分子（副调级数）的色，
+        //   右下 = 分母（目标级数）的色。
+        //   ★ 第三十九轮（用户："颜色像发霉了"）：两端改用 **ART_PALETTE 原色**
+        //     （不再经 ART_PALETTE_APPLIED 压暗降饱和），中点 mixHex 后**提亮 +6%**。
+        //     普通档 / bassOnly 档维持原垂直渐变，一字不动。
         let ink = pal.ink;
         let subInk = pal.sub;
         let grad;
         if (isApplied && info.applied.localDegree && info.applied.targetDegree) {
-            const palA = ART_PALETTE_APPLIED[(info.applied.localDegree - 1) % ART_PALETTE_APPLIED.length];
-            const palB = ART_PALETTE_APPLIED[(info.applied.targetDegree - 1) % ART_PALETTE_APPLIED.length];
+            const palA = ART_PALETTE[(info.applied.localDegree - 1) % ART_PALETTE.length];
+            const palB = ART_PALETTE[(info.applied.targetDegree - 1) % ART_PALETTE.length];
             grad = g.createLinearGradient(0, 0, size, size);
             grad.addColorStop(0, palA.top);
-            grad.addColorStop(0.5, darkenHex(mixHex(palA.top, palB.bottom), 0.05, -0.12));
+            grad.addColorStop(0.5, darkenHex(mixHex(palA.top, palB.bottom), 0.06, 0));
             grad.addColorStop(1, palB.bottom);
             // 文字色：主标记（大阿拉伯数字）在画面中央，用两端 ink 里**更深**的那个
             //   （对比度主要看亮度差，深 ink 在任何一端的浅底上都读得清）；
@@ -5824,16 +5843,16 @@
 
         // ---------------- 底部迷你播放器 ----------------
         if (els.mpExpand) els.mpExpand.addEventListener('click', () => mpSetExpanded(true));
-        if (els.mpClose) els.mpClose.addEventListener('click', () => mpSetExpanded(false));
+        if (els.mpClose) bindFastTap(els.mpClose, () => mpSetExpanded(false));
         // ★ 级数图不再有"点一下切换显隐" —— 改成整个舞台长按揭示（见 bindStageGesture）。
-        if (els.mpPrev) els.mpPrev.addEventListener('click', () => mpJump(-1));
-        if (els.mpNext) els.mpNext.addEventListener('click', () => mpJump(1));
-        if (els.mpPlayPause) els.mpPlayPause.addEventListener('click', () => { mpTogglePlay(); });
+        if (els.mpPrev) bindFastTap(els.mpPrev, () => mpJump(-1));
+        if (els.mpNext) bindFastTap(els.mpNext, () => mpJump(1));
+        if (els.mpPlayPause) bindFastTap(els.mpPlayPause, () => { mpTogglePlay(); });
         if (els.mpPlayPauseMin) els.mpPlayPauseMin.addEventListener('click', () => { mpTogglePlay(); });
-        if (els.mpSheetToggle) els.mpSheetToggle.addEventListener('click', () => {
+        if (els.mpSheetToggle) bindFastTap(els.mpSheetToggle, () => {
             mpSetStageView(mpStageView === 'sheet' ? 'card' : 'sheet');
         });
-        if (els.mpGenerate) els.mpGenerate.addEventListener('click', () => { mpRegenerate(); });
+        if (els.mpGenerate) bindFastTap(els.mpGenerate, () => { mpRegenerate(); });
         if (els.mpGenerateMin) els.mpGenerateMin.addEventListener('click', () => { mpRegenerate(); });
         if (els.mpErrorNone) els.mpErrorNone.addEventListener('click', () => mpSubmitReport(null));
         // 用 pointerdown 而不是 click 关闭：iOS Safari 对 fixed 遮罩的 click
@@ -5946,6 +5965,17 @@
                 else unlockAudioNow();
             } catch (e) {}
         }, { capture: true, passive: true });
+
+        // ★ 第三十九轮：切后台回来也补一次解锁。
+        //   iOS 切后台会把 AudioContext 挂起（state = 'interrupted'/'suspended'），
+        //   回来后如果用户没先碰主播放键，实时音路（听辨辅助 / 1234 / 试听）全部
+        //   "按了没反应" —— 它们与主 <audio> 不同通道，主轨出声不代表 ctx 活着。
+        //   回前台瞬间补一次 unlock（幂等），比等用户第一次点击更早。
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                try { unlockAudioNow(); } catch (e) {}
+            }
+        });
 
         // 连按两次卡片不该把页面放大、也不该选中面板里的文字。
         //   CSS 那边已经用 user-select:none + touch-action:manipulation + viewport
@@ -6537,6 +6567,30 @@
         };
         sheet.addEventListener('pointerup', finish, true);
         sheet.addEventListener('pointercancel', finish, true);
+    }
+
+    // ★ 第三十九轮：面板按键的"快速点按"绑定。
+    //   症状（用户真机）：短按看答案后马上去按 上一个/下一个/播放 没反应；
+    //   按 1234 后快速再按其它键也没反应，要隔几百毫秒。1234 一直正常。
+    //   根因方向：1234 走 pointerdown，而这些按键走 click —— iOS Safari 在
+    //   "上一次触摸刚结束的几百毫秒内"会把下一次 tap 的合成 click 吞掉
+    //   （双击缩放/快速点按判定），于是点了没反应；隔开就恢复。
+    //   修法：改在 **pointerup** 直接触发（与合成 click 无关），click 只保留
+    //   给键盘/辅助技术（detail === 0）。去重靠时间戳：pointerup 处理过的那一下，
+    //   紧随其后的合成 click（≤600ms 内）跳过 —— 不设固定冷却，快速连点不受影响。
+    function bindFastTap(el, fn) {
+        if (!el) return;
+        let lastHandledAt = 0;
+        el.addEventListener('pointerup', (e) => {
+            if (e.pointerType === 'mouse' && e.button !== 0) return;
+            lastHandledAt = Date.now();
+            fn(e);
+        });
+        el.addEventListener('click', (e) => {
+            // detail === 0：键盘 Enter/Space 或辅助技术合成的 click（没有前置 pointerup）
+            if (e.detail !== 0 && (Date.now() - lastHandledAt) < 600) return;
+            fn(e);
+        });
     }
 
     function bindStageGesture() {
@@ -7980,7 +8034,7 @@
         _chordToneSpelled: chordToneSpelled,
         _getArtPalette: () => ART_PALETTE.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
         // 离调卡片用的"同色系压暗"派生色板（派生自 ART_PALETTE，不硬编码）
-        _getAppliedPalette: () => ART_PALETTE_APPLIED.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
+        _getAppliedPalette: () => ART_PALETTE.map((p) => ({ top: p.top, bottom: p.bottom, ink: p.ink, sub: p.sub })),
         // 报错浮窗的几何布局：每个色块的中心坐标 + 尺寸（用来客观验证"两列 + Ⅶ 横跨"）
         //   无调性下按钮带的是 data-quality（没有 data-degree），所以两种都收 —— 多出的键
         //   分别是 degree 或 quality，调用方按需取用。

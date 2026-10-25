@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=39"></script>
+<script src="chord_recognition.js?v=40"></script>
     <style>
         * {
             margin: 0;
@@ -102,6 +102,8 @@
         .mp-bar__open,
         .mp-icon-btn,
         .mp-action-btn,
+        .mp-play-main,
+        .apply-bar__btn,
         .mp-generate,
         .mp-error__opt,
         .mp-error__none,
@@ -806,19 +808,9 @@
             color: var(--text-secondary);
         }
 
-        /* 离调页底部那行「当前可用和弦」：只读预览，用等宽感的细字，别抢控件的视觉重量 */
-        .applied-preview {
-            font-size: 13px;
-            line-height: 1.7;
-            color: var(--text-secondary);
-            padding: 4px 0 10px;
-            word-break: break-word;
-        }
-
-        .applied-preview b {
-            font-weight: 600;
-            color: var(--text-primary);
-        }
+        /* 「当前可用和弦」预览行已删（第三十九轮，用户：不需要显示）。
+           .applied-preview 的 CSS 一并清掉；JS 里 updateAppliedPreview 的守卫还在，
+           els.appliedPreview 拿到 null 直接 return，不会报错。 */
 
         select {
             padding: 10px 20px;
@@ -1234,19 +1226,16 @@
            悬在播放器正上方、跨页常驻；点一下就按脏值类型重建（重算音频 or 重新出题）。
            没有"撤回"——用户明确取消。
            ★ 尺寸刻意做小（32px 高的按钮、13px 字），别占屏幕。
-           ★ 第三十六轮：加一层极缓慢的呼吸，让用户余光能察觉它还在。
-           ★ 第三十七轮两处改动（用户原话）：
-             ① "太不明显了，闪烁幅度稍大一些，频率变两倍，同时动态也加大"
-                → 3.6s → 1.8s；opacity 底 0.80 → 0.52；再叠 2px 上浮 + 1.8% 放大。
-             ② "这个里面的『动画已关闭』就很通透，把它应用到这个提示框上"
-                → 从"四块厚玻璃"里摘出来单独做：淡彩底（accent 12%）+ 1.5px 半透明
-                  细边 + 轻投影，去掉 6 层 inset 高光（那是"厚"的来源）。
-                  再补 10px 模糊，保证文字可读（用户："可以稍微模糊一点"）。
-           两个动画同时驱动 opacity/transform，规则是"后声明的覆盖先声明的" ——
-           呼吸延迟 0.18s 正好等于入场时长，且 0% 写全三个属性，接缝处不会跳。 */
+           ★ 第三十七轮：从"四块厚玻璃"里摘出来单独做"淡彩通透"（半透明底 + 细边 +
+             10px 模糊），保证文字可读。
+           ★ 第三十九轮（用户："取消呼吸感，改成红色主题"）：
+             - 呼吸动画整个删掉（applyBarBreathe 连同 38 轮的方向修正一起摘除），
+               只剩入场淡入 applyBarIn；
+             - 配色 紫 → **红**：未应用 = 需要处理，红色语义更对。
+             透明玻璃（backdrop-filter）保留。 */
         .apply-bar {
-            --apply-tint: rgba(99, 102, 241, 0.12);   /* 旋钮：底色浓度（越大越"实"） */
-            --apply-edge: rgba(99, 102, 241, 0.50);   /* 旋钮：描边浓度 */
+            --apply-tint: rgba(220, 38, 38, 0.12);    /* 旋钮：底色浓度（越大越"实"） */
+            --apply-edge: rgba(220, 38, 38, 0.45);    /* 旋钮：描边浓度 */
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1263,8 +1252,7 @@
             -webkit-backdrop-filter: blur(10px) saturate(170%);
             backdrop-filter: blur(10px) saturate(170%);
             box-shadow: 0 6px 20px rgba(16, 24, 40, 0.10);
-            animation: applyBarIn 0.18s ease,
-                       applyBarBreathe 1.8s ease-in-out 0.18s infinite;
+            animation: applyBarIn 0.18s ease;
         }
 
         .apply-bar[hidden] {
@@ -1272,16 +1260,8 @@
         }
 
         @keyframes applyBarIn {
-            from { opacity: 0; transform: translateY(6px) scale(1); }
-            to   { opacity: 1; transform: translateY(0)   scale(1); }
-        }
-
-        /* ★ 第三十八轮（用户："淡的时候缩小，深的时候扩张"——上一轮方向做反了）：
-           最淡点（opacity 0.52）收成 scale(.965)，最深时回到 scale(1)；
-           再保留 -2px 上浮，让"变淡"读起来像轻轻飘远。 */
-        @keyframes applyBarBreathe {
-            0%, 100% { opacity: 1;    transform: translateY(0)    scale(1); }
-            50%      { opacity: 0.52; transform: translateY(-2px) scale(0.965); }
+            from { opacity: 0; transform: translateY(6px); }
+            to   { opacity: 1; transform: translateY(0); }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -1304,7 +1284,8 @@
             font-size: 13px;
             font-weight: 600;
             color: #ffffff;
-            background: var(--accent);
+            /* ★ 第三十九轮：紫 → 红，与条的红色主题一致 */
+            background: #dc2626;
             border: none;
             border-radius: var(--r-pill);
             cursor: pointer;
@@ -1802,11 +1783,12 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            min-width: 30px;
-            height: 26px;
-            padding: 0 8px;
+            min-width: 36px;
+            height: 30px;
+            padding: 0 10px;
             font-family: "Songti SC", "STSong", "Times New Roman", Georgia, serif;
-            font-size: 15px;
+            /* ★ 第三十九轮：15px → 18px（用户："气泡提示字太小了"） */
+            font-size: 18px;
             font-weight: 700;
             line-height: 1;
             color: var(--text-primary);
@@ -2830,8 +2812,6 @@
                                         <span>转位</span>
                                         <input type="checkbox" class="switch" id="chord-inversion-applied" title="只作用于离调那几小节；解决和弦不会出现 6₄">
                                     </div>
-
-                                    <div class="applied-preview" id="chord-applied-preview"></div>
                                 </div>
                             </div>
                         </div><!-- /#chord-tonal -->
