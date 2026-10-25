@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=38"></script>
+<script src="chord_recognition.js?v=39"></script>
     <style>
         * {
             margin: 0;
@@ -1251,7 +1251,10 @@
             align-items: center;
             justify-content: center;
             gap: 10px;
-            max-width: 640px;
+            /* ★ 第三十八轮：不再撑满左右 —— 宽度收成内容宽，居中，两侧各留 20px 起。
+               （块级 flex 默认会拉伸到父容器全宽，640px 上限在手机上根本够不到。） */
+            width: fit-content;
+            max-width: calc(100% - 40px);
             margin: 0 auto 8px;
             padding: 6px 8px 6px 14px;
             background: var(--apply-tint);
@@ -1273,11 +1276,12 @@
             to   { opacity: 1; transform: translateY(0)   scale(1); }
         }
 
-        /* 0.52 是最低点：比原来的 0.80 明显，但仍能读清两行字。
-           配合 -2px 上浮 + 1.8% 放大 = 用户要的"动态也加大"。 */
+        /* ★ 第三十八轮（用户："淡的时候缩小，深的时候扩张"——上一轮方向做反了）：
+           最淡点（opacity 0.52）收成 scale(.965)，最深时回到 scale(1)；
+           再保留 -2px 上浮，让"变淡"读起来像轻轻飘远。 */
         @keyframes applyBarBreathe {
             0%, 100% { opacity: 1;    transform: translateY(0)    scale(1); }
-            50%      { opacity: 0.52; transform: translateY(-2px) scale(1.018); }
+            50%      { opacity: 0.52; transform: translateY(-2px) scale(0.965); }
         }
 
         @media (prefers-reduced-motion: reduce) {
