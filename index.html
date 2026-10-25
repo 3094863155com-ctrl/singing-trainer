@@ -8,7 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=40"></script>
+<script src="chord_recognition.js?v=41"></script>
+<!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
+<script src="social.js?v=41" defer></script>
     <style>
         * {
             margin: 0;
@@ -2333,6 +2335,164 @@
         }
 
         /* ============================================================
+           社交页（第四十轮新增，局域网练习项目；logic 全在 social.js）
+           ★ 可整体摘除：删掉本段 + #view-social 骨架 + i-social 图标 + 引入行。
+           ============================================================ */
+        .soc-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--r-lg);
+            box-shadow: var(--shadow-md);
+            padding: 18px;
+            margin-bottom: 18px;
+        }
+
+        /* 身份卡：色点 + 昵称 + 连接徽标 */
+        .soc-identity {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .soc-dot {
+            flex: 0 0 auto;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            background: #9aa1b0;
+            box-shadow: inset 0 0 0 3px rgba(255, 255, 255, 0.55);
+        }
+        .soc-identity__body { flex: 1 1 auto; min-width: 0; }
+        .soc-identity__name {
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--text-primary);
+            cursor: text;
+            min-height: 24px;
+        }
+        .soc-identity__sub {
+            font-size: 12px;
+            color: var(--text-tertiary);
+            margin-top: 2px;
+        }
+        .soc-rename {
+            width: 100%;
+            max-width: 220px;
+            font: inherit;
+            font-size: 17px;
+            font-weight: 700;
+            color: var(--text-primary);
+            border: none;
+            border-bottom: 2px solid var(--accent);
+            background: transparent;
+            outline: none;
+            padding: 0 0 2px;
+        }
+        .soc-net {
+            flex: 0 0 auto;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-tertiary);
+        }
+        .soc-net i {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #c3c8d4; /* 未连接：灰 */
+        }
+        .soc-net.is-online i { background: #22c55e; } /* 已连接：绿 */
+
+        /* 留言板 */
+        .soc-board__title {
+            margin: 0 0 12px;
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+        .soc-board__sub {
+            font-size: 12px;
+            font-weight: 400;
+            color: #d97706; /* 有待上传留言时橙字提醒 */
+            margin-left: 8px;
+        }
+        .soc-list {
+            max-height: 46vh;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+            padding: 2px;
+        }
+        .soc-msg {
+            display: flex;
+            gap: 10px;
+            align-items: flex-start;
+        }
+        .soc-msg__dot {
+            flex: 0 0 auto;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-top: 6px;
+        }
+        .soc-msg__body { flex: 1 1 auto; min-width: 0; }
+        .soc-msg__meta {
+            display: flex;
+            align-items: baseline;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-tertiary);
+        }
+        .soc-msg__meta b {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+        .soc-msg__mine {
+            font-size: 10px;
+            line-height: 1;
+            padding: 2px 5px;
+            border-radius: 4px;
+            background: var(--accent-soft);
+            color: var(--accent);
+            font-weight: 700;
+        }
+        .soc-msg__pending { color: #d97706; }
+        .soc-msg__meta time { margin-left: auto; }
+        .soc-msg__text {
+            font-size: 14px;
+            line-height: 1.55;
+            color: var(--text-primary);
+            word-break: break-word;
+            margin-top: 2px;
+        }
+        .soc-msg.is-pending .soc-msg__text { opacity: 0.55; }
+
+        .soc-inputrow {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+        }
+        .soc-input {
+            flex: 1 1 auto;
+            min-width: 0;
+            font: inherit;
+            font-size: 15px;
+            color: var(--text-primary);
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 11px 14px;
+            outline: none;
+            transition: border-color 0.2s ease;
+        }
+        .soc-input:focus { border-color: var(--accent); }
+        .soc-send { flex: 0 0 auto; padding: 0 18px; font-size: 14px; }
+
+        /* 顶栏：三个入口全部图标化（第四十轮，用户：不再用文字） */
+        .app-nav .app-tab--icon .ic { --ic: 21px; }
+
+        /* ============================================================
            液态玻璃 v2（iOS 26 Liquid Glass 风，用户 2026-10-25 让重做）
            ------------------------------------------------------------
            范围仍是四块悬浮层里剩下的**三块**：
@@ -2601,14 +2761,21 @@
             <path d="M10.4 11.4V6.9a1.9 1.9 0 0 0-3.8 0v7.2"/>
             <path d="M18 8.7a1.9 1.9 0 0 1 3.8 0v4.8A7.5 7.5 0 0 1 14.3 21h-1.9c-2.6 0-4.2-.8-5.6-2.2l-3.4-3.4a1.9 1.9 0 0 1 2.7-2.7l1.7 1.7"/>
         </symbol>
+
+        <!-- ---------- 社交：对话气泡（第四十轮，顶栏第三入口） ---------- -->
+        <symbol id="i-social" viewBox="0 0 24 24">
+            <path d="M14.8 4.6H6.9a2.9 2.9 0 0 0-2.9 2.9v4a2.9 2.9 0 0 0 2.9 2.9h.5v3.1l3.5-3.1h3.9a2.9 2.9 0 0 0 2.9-2.9v-4a2.9 2.9 0 0 0-2.9-2.9z"/>
+            <path d="M18.2 9.7h.2a2.6 2.6 0 0 1 2.6 2.6v3.3a2.6 2.6 0 0 1-2.6 2.6h-.4v2.7l-3.1-2.7h-3.1"/>
+        </symbol>
     </svg>
 
     <div class="container">
-        <!-- 顶部页面级路由：主页（和弦听辨）/ 数据库（听辨统计）。
-             视唱旋律生成已拆到独立站点，不再出现在这个应用里。 -->
+        <!-- 顶部页面级路由：设置（主页）/ 数据库（听辨统计）/ 社交（局域网留言板）。
+             第四十轮起三个入口全部图标化（用户：不再用文字），逻辑在 social.js + 底部路由脚本。 -->
         <nav class="app-nav">
-            <button class="app-tab active" data-root="home"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg>设置</button>
-            <button class="app-tab" data-root="db"><svg class="ic" aria-hidden="true"><use href="#i-database"/></svg>数据库</button>
+            <button class="app-tab app-tab--icon active" data-root="home" aria-label="设置"><svg class="ic" aria-hidden="true"><use href="#i-gear"/></svg></button>
+            <button class="app-tab app-tab--icon" data-root="db" aria-label="数据库"><svg class="ic" aria-hidden="true"><use href="#i-database"/></svg></button>
+            <button class="app-tab app-tab--icon" data-root="social" aria-label="社交"><svg class="ic" aria-hidden="true"><use href="#i-social"/></svg></button>
         </nav>
 
 
@@ -2915,6 +3082,31 @@
             <div class="db-foot">
                 <button class="btn btn-secondary" id="db-clear-round">清空本轮</button>
                 <button class="btn btn-secondary" id="db-clear-all">清空历史</button>
+            </div>
+        </div>
+
+        <!-- ============ 视图四：社交（局域网留言板，第四十轮新增） ============
+             纯骨架；身份/连接/留言/离线队列的逻辑全在 social.js（window.SocialUI）。
+             服务器 = 家里 UTM 虚拟机上的 Node 后端（见 backend/DEPLOY.md）；
+             接口不通时整页安静降级为「离线模式」：留言存本机，连上后自动上传。 -->
+        <div id="view-social" style="display: none">
+            <div class="soc-card soc-identity">
+                <span class="soc-dot" id="soc-my-dot"></span>
+                <div class="soc-identity__body">
+                    <div class="soc-identity__name" id="soc-my-name">…</div>
+                    <div class="soc-identity__sub">这是你（本设备）的昵称 · 点一下可改名</div>
+                </div>
+                <span class="soc-net" id="soc-net"><i></i><em id="soc-net-text">检测中…</em></span>
+            </div>
+
+            <div class="soc-card">
+                <div class="soc-board__title">公共留言板<span class="soc-board__sub" id="soc-queue-hint"></span></div>
+                <div class="soc-list" id="soc-list"></div>
+                <div class="soc-inputrow">
+                    <input class="soc-input" id="soc-input" type="text" maxlength="500"
+                           placeholder="给留言板写点什么…（离线时会先存在本机）">
+                    <button class="btn btn-primary soc-send" id="soc-send"><svg class="ic" aria-hidden="true"><use href="#i-note"/></svg>发送</button>
+                </div>
             </div>
         </div>
     </div><!-- /.container -->
@@ -3450,15 +3642,15 @@
         ensureMediaSession();
 
         // ============================================================
-        // 页面级路由（顶部按钮）：主页（和弦听辨）←→ 数据库（听辨统计）
-        //   视唱旋律生成已拆到独立站点，这里只剩两个顶层页面。
+        // 页面级路由（顶部按钮）：设置（和弦听辨）←→ 数据库（听辨统计）←→ 社交
+        //   第四十轮起三个页面；社交页逻辑在 social.js，这里只负责切换显示。
         // ============================================================
         const viewChord = document.getElementById('view-chord');
         const viewDb = document.getElementById('view-db');
+        const viewSocial = document.getElementById('view-social');
         const appNav = document.querySelector('.app-nav');
 
         function switchRoot(root) {
-            const toDb = (root === 'db');
             // ★ 只认 .app-nav 里的按钮 —— 数据库页的范围切换复用了 .app-tab 样式，
             //   不限定作用域会顺手把它们的 active 也抹掉。
             if (appNav) {
@@ -3466,17 +3658,19 @@
                     b.classList.toggle('active', b.dataset.root === root);
                 });
             }
-            if (viewDb) viewDb.style.display = toDb ? '' : 'none';
-            if (viewChord) viewChord.style.display = toDb ? 'none' : '';
+            if (viewDb) viewDb.style.display = root === 'db' ? '' : 'none';
+            if (viewSocial) viewSocial.style.display = root === 'social' ? '' : 'none';
+            if (viewChord) viewChord.style.display = root === 'home' ? '' : 'none';
 
-            if (toDb) {
-                // 离开主页：停掉和弦页播放 + 交还媒体会话
-                if (window.ChordRecognition) {
-                    ChordRecognition.deactivate();
-                    ChordRecognition.renderStats();
-                }
+            if (root === 'home') {
+                if (window.ChordRecognition) ChordRecognition.activate();
             } else if (window.ChordRecognition) {
-                ChordRecognition.activate();
+                // 离开主页：停掉和弦页播放 + 交还媒体会话
+                ChordRecognition.deactivate();
+                if (root === 'db') ChordRecognition.renderStats();
+            }
+            if (root === 'social' && window.SocialUI) {
+                SocialUI.onShow(); // 切过来立刻探测连接 + 拉新留言
             }
         }
 

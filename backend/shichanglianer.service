@@ -1,0 +1,31 @@
+# ============================================================
+# systemd 服务配置 —— 让后端「开机自启 + 崩溃自动拉起」
+# ------------------------------------------------------------
+# 安装（在 Ubuntu 虚拟机里执行）：
+#   sudo cp shichanglianer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now shichanglianer
+#
+# 日常命令：
+#   systemctl status shichanglianer        # 看运行状态
+#   sudo systemctl restart shichanglianer  # 改完代码后重启（部署的最后一步）
+#   journalctl -u shichanglianer -f        # 实时看日志（后端报错都在这里）
+#
+# ★ 若 `which node` 显示的不是 /usr/bin/node，把下面 ExecStart 里的路径改成实际路径。
+# ============================================================
+
+[Unit]
+Description=视唱练耳 局域网社交后端 (Node.js + Express)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/shichanglianer-backend
+ExecStart=/usr/bin/node /home/ubuntu/shichanglianer-backend/server.js
+Restart=on-failure
+RestartSec=3
+Environment=PORT=3000
+
+[Install]
+WantedBy=multi-user.target

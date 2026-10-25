@@ -39,3 +39,7 @@ tools/render/
 
 # 验收脚本与无头浏览器 profile（第十八轮起；放 /tmp 会被系统清掉，所以挪进项目内不发布）
 .accept/
+
+# 局域网社交后端（第四十轮）：数据库文件不进仓库，node_modules 也不进
+backend/data.sqlite*
+backend/node_modules/
