@@ -8,7 +8,7 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=36"></script>
+<script src="chord_recognition.js?v=37"></script>
     <style>
         * {
             margin: 0;
@@ -56,13 +56,14 @@
                  --mp-btn：主交互按钮边长（下限 48px ≈ 高于 Apple HIG 的 44pt 最小点按目标，
                            上限 64px 保证不夸张；15vw 保证 320px 窄屏不溢出）
                  --mp-gap：键与键之间的间距（防误触）
-                 --mp-bar-h：收起态那条胶囊的高度
+                 --mp-bar-h：收起态那条胶囊的高度（第三十七轮 56 → 62，用户要"再大一点点、
+                            更容易点到"；改这一个数整条胶囊连同展开热区一起变高）
                  --mp-safe：底部安全边距（iPhone 的小白条）。view 没加 viewport-fit=cover，
                             所以 env() 在 Safari 上通常是 0，用 max(12px, …) 兜底。
                ============================================================ */
             --mp-btn: clamp(48px, 15vw, 64px);
             --mp-gap: 12px;
-            --mp-bar-h: 56px;
+            --mp-bar-h: 62px;
             --nav-h: 54px;        /* 顶部常驻导航高度（两个 tab 平分整行 + 下缘线） */
             --mp-safe: max(12px, env(safe-area-inset-bottom, 0px));
         }
@@ -445,11 +446,29 @@
             overflow: hidden;
         }
 
+        /* ============================================================
+           设置页的**三级层级**（第三十七轮重构，用户："小标题和子选项没区别，
+           层级很不明确" + "通用/播放/和弦三个板块区分不明显"）
+           ------------------------------------------------------------
+             L1 板块标题 .sgroup__head   12px / 700 / 淡灰 + 前置彩色小方块 + 字距
+             L2 子卡标题 .ssub__head     13.5px / 700 / 中灰 + 左侧 3px 竖条 + 浅底
+             L3 普通行   .srow > span    15px / 600 / 深色（不动）
+           ★ 三级靠"字号↑ + 颜色↑"两条轴同时拉开：越往下越黑越大，越往上越淡越小。
+             只改字号不改颜色（或反过来）都会糊在一起 —— 上一版就是 L1 和 L2 同色、
+             L2 和 L3 同字号。
+           ★ 板块之间靠"彩色方块"区分（通用=灰 / 播放=蓝 / 和弦=紫），
+             比加图标省地方，也不用改 HTML 结构（色点走 ::before，data-grp 分色）。
+           ============================================================ */
         .sgroup {
             margin: 12px 12px 0;
             background: #f5f5f7;
             border-radius: 14px;
             overflow: hidden;
+        }
+
+        /* 板块之间拉开一点：三个板块才像三个"章节"，而不是一张卡里的三块 */
+        .sgroup + .sgroup {
+            margin-top: 20px;
         }
 
         .sgroup:last-child {
@@ -460,20 +479,39 @@
         .sgroup__head {
             display: flex;
             align-items: center;
-            justify-content: space-between;
-            gap: 10px;
+            gap: 8px;
             width: 100%;
             margin: 0;
-            padding: 13px 10px 11px 14px;
+            padding: 14px 10px 12px 14px;
             font-family: inherit;
-            font-size: 13px;
-            font-weight: 600;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
             color: var(--text-tertiary);
             text-align: left;
             background: none;
             border: none;
             cursor: pointer;
             -webkit-tap-highlight-color: transparent;
+        }
+
+        /* L1 的彩色小方块：三个板块各一色，一眼分得开 */
+        .sgroup__head::before {
+            content: '';
+            flex: 0 0 auto;
+            width: 9px;
+            height: 9px;
+            border-radius: 3px;
+            background: var(--grp-dot, #b9bcc6);
+        }
+        .sgroup__head[data-grp="general"] { --grp-dot: #9aa0ad; }   /* 通用 · 灰 */
+        .sgroup__head[data-grp="play"]    { --grp-dot: #4a7fe0; }   /* 播放 · 蓝 */
+        .sgroup__head[data-grp="chord"]   { --grp-dot: #7c5cf0; }   /* 和弦 · 紫 */
+
+        /* 箭头靠右（加了 ::before 之后不能再靠 space-between，否则色点会被推到最左、
+           标题挤在中间） */
+        .sgroup__head .srow__chev {
+            margin-left: auto;
         }
 
         .sgroup__body {
@@ -484,7 +522,7 @@
             display: none;
         }
 
-        /* 子卡（自然和弦 / 性质范围）：灰卡里再套一层白卡，层级一眼可辨 */
+        /* 子卡（自然和弦 / 性质范围）：灰卡里再套一层白卡 */
         .ssub {
             margin: 0 0 10px;
             background: var(--surface);
@@ -493,6 +531,8 @@
             overflow: hidden;
         }
 
+        /* L2 子卡标题：比 L1 深一点、比 L3 小一点，并带一条竖条 + 浅底，
+           让它一眼是"这一组的名字"而不是"又一条选项" */
         .ssub__head {
             display: flex;
             align-items: center;
@@ -500,14 +540,17 @@
             gap: 10px;
             width: 100%;
             margin: 0;
-            padding: 10px 8px 8px 12px;
+            padding: 10px 8px 10px 13px;
             font-family: inherit;
-            font-size: 15px;
-            font-weight: 600;
-            color: var(--text-primary);
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--text-secondary);
             text-align: left;
-            background: none;
+            background: rgba(16, 24, 40, 0.028);
             border: none;
+            /* 竖条用 inset box-shadow：不占布局宽度、也不用额外伪元素，
+               而且会跟着元素框走（改 padding 也不会错位）。 */
+            box-shadow: inset 3px 0 0 var(--accent);
             cursor: pointer;
             -webkit-tap-highlight-color: transparent;
         }
@@ -520,9 +563,18 @@
             display: none;
         }
 
-        /* 离调子卡没有独立折叠头：它「展开不展开」由那颗启用开关说了算 */
+        /* 离调子卡没有独立折叠头：它「展开不展开」由那颗启用开关说了算。
+           ★ 但它必须和「自然和弦」看起来同级 —— 所以套用同一套 L2 样式。 */
         .ssub--applied > .srow {
-            padding: 0 8px 0 12px;
+            padding: 0 8px 0 13px;
+            background: rgba(16, 24, 40, 0.028);
+            box-shadow: inset 3px 0 0 var(--accent);
+        }
+
+        .ssub--applied > .srow > span:first-child {
+            font-size: 13.5px;
+            font-weight: 700;
+            color: var(--text-secondary);
         }
 
         .ssub--applied > .ssub__body {
@@ -574,10 +626,24 @@
             white-space: nowrap;
         }
 
+        /* 「参与级数」折叠行（唯一使用 .srow--btn 的元素）
+           ★ 第三十七轮（用户："这个选项折叠视觉上要做处理，不然跟其他选项看上去一样，
+             不知道他里面实际上包含了这么多东西"）：
+             整行做成一条**内嵌浅灰块**（左右各留 10px 内边距、10px 圆角），
+             和普通白底行区分开 —— 读起来是"一个能展开的容器"，不是一条普通选项。
+             右侧再给「已开/总数」的小计数（.dsum__count）+ 7 个级数 chip 概览。 */
         .srow--btn {
+            padding: 0 10px;
+            background: rgba(16, 24, 40, 0.045);
+            border-radius: 10px;
             cursor: pointer;
             -webkit-user-select: none;
             user-select: none;
+            transition: background 0.18s ease;
+        }
+
+        .srow--btn.is-open {
+            background: rgba(16, 24, 40, 0.028);
         }
 
         /* 「转位没勾 → 6₄ 也勾不了」：整行压暗（用户 2026-10-24 明确） */
@@ -708,6 +774,16 @@
             color: #a2a5af;
             background: #ebedf1;
             text-decoration: line-through;
+        }
+
+        /* 「5/7」小计数（第三十七轮）：紧贴在概览 chip 左边，让折叠行自己说出
+           "里面一共有 7 项、现在开着 5 项" —— 用户原话："不知道他里面实际上包含了这么多东西"。 */
+        .dsum__count {
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--text-tertiary);
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 0.02em;
         }
 
         .drow {
@@ -1093,6 +1169,23 @@
             display: block;
             user-select: none;       /* 点击小节跳转时防止连点选中谱面文字 */
             -webkit-user-select: none;
+            /* 谱面字形减细的唯一旋钮（第三十七轮，用户："字体太粗，像老人机"）。
+               取值范围 0.55 ~ 0.9：手机 358px 容器下 1 单位 ≈ 0.77px，0.7 单边侵蚀 0.27px；
+               桌面 1400 宽下 1 单位 = 3px，同一数值单边侵蚀 1.05px。
+               超过 1.4 会把 ♯/♭ 的细竖和高音谱号的发丝线打断。 */
+            --sheet-trim: 1.0;
+        }
+
+        /* 纸色描边把字形轮廓削掉一圈 → 视觉变细。
+           ★ stroke 不参与排版：版式、判定框、点击热区全部零改动。
+           ★ 选择器必须收窄到 text —— 谱线/小节线/加线是 <path>/<rect>，
+             粗细来自根 <svg> 上继承的 stroke-width="1"，被扫到就会连谱线一起削掉。
+           ★ paint-order 显式钉死：stroke 必须画在 fill 之后（外圈才吃得到字形），
+             写成 stroke fill 会反过来把描边藏在字形下面，完全不变细。 */
+        #chord-sheet-music svg text {
+            stroke: var(--paper);
+            stroke-width: var(--sheet-trim);
+            paint-order: fill stroke;
         }
 
         @media (max-width: 768px) {
@@ -1140,10 +1233,19 @@
            悬在播放器正上方、跨页常驻；点一下就按脏值类型重建（重算音频 or 重新出题）。
            没有"撤回"——用户明确取消。
            ★ 尺寸刻意做小（32px 高的按钮、13px 字），别占屏幕。
-           ★ 第三十六轮：加一层**极缓慢的呼吸**，让用户余光能察觉它还在（"隐隐约约的缓慢闪烁"）。
-             两个动画同时动 opacity，规则是"后声明的覆盖先声明的" —— 呼吸延迟 0.18s
-             正好等于入场时长，且 0% 写死 opacity:1，接缝处不会跳。 */
+           ★ 第三十六轮：加一层极缓慢的呼吸，让用户余光能察觉它还在。
+           ★ 第三十七轮两处改动（用户原话）：
+             ① "太不明显了，闪烁幅度稍大一些，频率变两倍，同时动态也加大"
+                → 3.6s → 1.8s；opacity 底 0.80 → 0.52；再叠 2px 上浮 + 1.8% 放大。
+             ② "这个里面的『动画已关闭』就很通透，把它应用到这个提示框上"
+                → 从"四块厚玻璃"里摘出来单独做：淡彩底（accent 12%）+ 1.5px 半透明
+                  细边 + 轻投影，去掉 6 层 inset 高光（那是"厚"的来源）。
+                  再补 10px 模糊，保证文字可读（用户："可以稍微模糊一点"）。
+           两个动画同时驱动 opacity/transform，规则是"后声明的覆盖先声明的" ——
+           呼吸延迟 0.18s 正好等于入场时长，且 0% 写全三个属性，接缝处不会跳。 */
         .apply-bar {
+            --apply-tint: rgba(99, 102, 241, 0.12);   /* 旋钮：底色浓度（越大越"实"） */
+            --apply-edge: rgba(99, 102, 241, 0.50);   /* 旋钮：描边浓度 */
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1151,12 +1253,14 @@
             max-width: 640px;
             margin: 0 auto 8px;
             padding: 6px 8px 6px 14px;
-            background: var(--surface);
-            border: 1px solid var(--border);
+            background: var(--apply-tint);
+            border: 1.5px solid var(--apply-edge);
             border-radius: var(--r-pill);
-            box-shadow: var(--shadow-md);
+            -webkit-backdrop-filter: blur(10px) saturate(170%);
+            backdrop-filter: blur(10px) saturate(170%);
+            box-shadow: 0 6px 20px rgba(16, 24, 40, 0.10);
             animation: applyBarIn 0.18s ease,
-                       applyBarBreathe 3.6s ease-in-out 0.18s infinite;
+                       applyBarBreathe 1.8s ease-in-out 0.18s infinite;
         }
 
         .apply-bar[hidden] {
@@ -1164,14 +1268,15 @@
         }
 
         @keyframes applyBarIn {
-            from { opacity: 0; transform: translateY(6px); }
-            to   { opacity: 1; transform: translateY(0); }
+            from { opacity: 0; transform: translateY(6px) scale(1); }
+            to   { opacity: 1; transform: translateY(0)   scale(1); }
         }
 
-        /* 0.80 是最低透明度：再低就像"坏了"，再高就看不出来 */
+        /* 0.52 是最低点：比原来的 0.80 明显，但仍能读清两行字。
+           配合 -2px 上浮 + 1.8% 放大 = 用户要的"动态也加大"。 */
         @keyframes applyBarBreathe {
-            0%, 100% { opacity: 1; }
-            50%      { opacity: 0.80; }
+            0%, 100% { opacity: 1;    transform: translateY(0)    scale(1); }
+            50%      { opacity: 0.52; transform: translateY(-2px) scale(1.018); }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -1316,16 +1421,19 @@
         }
 
         /* 收起条播放键（方案 B，用户 2026-10-06 拍板）：
-           横向加宽的胶囊（64×40，不是正圆）+ 沿外圈走一根细描边 = 播放进度。
+           横向加宽的胶囊 + 沿外圈走一根细描边 = 播放进度。
            进度用 SVG <path> 的 stroke-dashoffset 画（dashoffset = 1 − 进度），
            路径起点钉在**顶部中点（12 点钟）**且顺时针，所以进度从 12 点开始绕着长。
            旧的 conic-gradient + mask 圆环已删 —— 键一横向加宽，正圆环就不贴形了。
+           ★ 第三十七轮：跟 --mp-bar-h 一起放大 64×40 → 70×44。
+             ★★ 键体这四个数、以及 HTML 里那颗进度环 SVG 的 viewBox / rect / path
+                **必须四件套一起改**，否则环和键体错位（轨道路径是手写的绝对坐标）。
            ★ --mp-prog 这个变量名保留（仍然是 0…1 的整段进度），只作对外读数。 */
         .mp-bar__play {
             flex: 0 0 auto;
             position: relative;
-            width: 64px;
-            height: 40px;
+            width: 70px;
+            height: 44px;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -1388,10 +1496,13 @@
             background: var(--bg-page);
             transform: translateY(100%);
             /* ★ translate 是独立属性：展开/收起走 transform，右滑跟手走 translate，
-                 两者叠加互不覆盖（写在 transform 里就会被 translateY 顶掉）。 */
+                 两者叠加互不覆盖（写在 transform 里就会被 translateY 顶掉）。
+               ★ 第三十七轮：translate 的时长/曲线改成与 transform **完全一致**（0.28→0.32s）。
+                 原来两条曲线不一样，右滑收起时"横向回位"和"纵向下落"不同步，
+                 看起来和点收起按钮是两种动画。 */
             translate: var(--mp-edge-x) 0;
             transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1),
-                        translate 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+                        translate 0.32s cubic-bezier(0.4, 0, 0.2, 1);
             will-change: transform;
             overflow: hidden;
             touch-action: manipulation;   /* 禁双击缩放；谱表页的 pan-y 仍在其上覆盖，滚动不受影响 */
@@ -1737,11 +1848,15 @@
 
         .mp-sheet__mode[hidden] { display: none; }
 
-        /* 一行两键：上一个（宽，常用）/ 下一个 */
+        /* 一行两键：上一个 / 下一个
+           ★ 第三十七轮（用户："上一个按键收缩 20%，下一个补上"）：
+             2fr:1fr（231:115）→ 1fr:.875fr（185:161）。
+             上一个 -20%，多出来的全给下一个（+40%）。grid 恒填满，不会溢出；
+             320px 窄屏复算 147:129，仍高于内容最小宽 ~97px，安全。 */
         .mp-sheet__actions {
             flex: 0 0 auto;
             display: grid;
-            grid-template-columns: 2fr 1fr;
+            grid-template-columns: 1fr 0.875fr;
             gap: var(--mp-gap);
         }
 
@@ -1767,10 +1882,15 @@
             background: var(--surface-hover);
         }
 
+        /* 一行两键：播放 / 下一首
+           ★ 第三十七轮（用户："播放键再扩张一点，相应的下一首收缩大概 15%"）：
+             1fr:2fr（115:231）→ 1fr:1.31fr（150:196）。
+             播放 +30%、下一首 -15% —— 两者在 346px 的可分宽度上正好互补，
+             别的比例都会溢出或凑不齐。 */
         .mp-sheet__footer {
             flex: 0 0 auto;
             display: grid;
-            grid-template-columns: 1fr 2fr;   /* 播放 1/3 + 下一首 2/3 */
+            grid-template-columns: 1fr 1.31fr;
             gap: var(--mp-gap);
         }
 
@@ -2228,9 +2348,11 @@
         /* ============================================================
            液态玻璃 v2（iOS 26 Liquid Glass 风，用户 2026-10-25 让重做）
            ------------------------------------------------------------
-           范围仍是四块悬浮层：
-             迷你播放器 .mp-bar / 应用变更条 .apply-bar /
-             报错浮窗 .mp-error__panel / 听辨辅助窗 .mp-aid__panel
+           范围仍是四块悬浮层里剩下的**三块**：
+             迷你播放器 .mp-bar / 报错浮窗 .mp-error__panel / 听辨辅助窗 .mp-aid__panel
+           ★ 第三十七轮：.apply-bar 被**摘出去**了。用户要的是另一种质感 ——
+             「动画已关闭」按钮那种"通透淡彩"（淡彩底 + 细边 + 轻投影，没有厚度），
+             和这里的"实心厚玻璃"是两套东西。它的样式单独写在 .apply-bar 那条规则里。
            ★ 顶栏 .app-nav 不加 —— 它是通栏实底、像系统导航栏。
 
            ★ 上一版被退货的原因（用户："你做的不是液态玻璃"）：
@@ -2262,7 +2384,6 @@
         }
 
         .mp-bar,
-        .apply-bar,
         .mp-error__panel,
         .mp-aid__panel {
             position: relative;                /* ::before / ::after 要定位，不影响原有 flex */
@@ -2292,7 +2413,6 @@
            ★ 角度 158deg 是有意的：光从左上来，所以左上角最亮、右下角次亮、
              对角两处最透 —— 等亮的一圈会读成"描边"，不是"折射"。 */
         .mp-bar::before,
-        .apply-bar::before,
         .mp-error__panel::before,
         .mp-aid__panel::before {
             content: '';
@@ -2316,7 +2436,6 @@
         /* 顶面反射光斑：贴着上沿的一条亮带 + 左上角一小片环境光。
            全部压在 14px 以内 —— 再往下就会把正文冲淡（玻璃可以亮，字不能看不清）。 */
         .mp-bar::after,
-        .apply-bar::after,
         .mp-error__panel::after,
         .mp-aid__panel::after {
             content: '';
@@ -2355,13 +2474,16 @@
             border-radius: 24px;
         }
 
-        /* 不支持 backdrop-filter → 退回实底，别让深色字糊在透出来的谱面上 */
+        /* 不支持 backdrop-filter → 退回实底，别让深色字糊在透出来的谱面上。
+           .apply-bar 的兜底单独给：它是"淡彩"不是"实白"，退回实白会丢掉那层色。 */
         @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
             .mp-bar,
-            .apply-bar,
             .mp-error__panel,
             .mp-aid__panel {
                 background: var(--surface);
+            }
+            .apply-bar {
+                background: rgba(99, 102, 241, 0.14);
             }
         }
     </style>
@@ -2545,11 +2667,16 @@
                             <button type="button" class="switch" id="chord-stack-octave" role="switch" aria-checked="false" aria-label="八度内排列"></button>
                         </div>
 
-                        <!-- 隐藏卡片（第三十六轮）：开 = 答案只在按住时出现（原有行为）；
-                             关 = 答案常驻显示。纯显示项，不进 pending。 -->
+                        <!-- 卡片答案（第三十七轮）：两档交互。
+                             hold = 答案只在按住时出现（原有行为）；
+                             toggle = 点一下常驻显示、再点一下常驻隐藏（按住不再揭示）。
+                             纯显示项，不进 pending。 -->
                         <div class="srow">
-                            <span>隐藏卡片</span>
-                            <button type="button" class="switch" id="chord-hide-card" role="switch" aria-checked="true" aria-label="隐藏卡片"></button>
+                            <span>卡片答案</span>
+                            <div class="seg" id="chord-card-mode" role="radiogroup" aria-label="卡片答案">
+                                <button type="button" class="seg__opt" data-cardmode="hold" role="radio" aria-checked="true">按住显示</button>
+                                <button type="button" class="seg__opt" data-cardmode="toggle" role="radio" aria-checked="false">点击切换</button>
+                            </div>
                         </div>
                     </div>
                 </section>
@@ -2641,7 +2768,7 @@
                                     <div class="srow srow--btn" id="chord-degree-toggle" role="button" tabindex="0"
                                          aria-expanded="false" aria-controls="degree-grid">
                                         <span>参与级数</span>
-                                        <span class="srow__side"><span class="dsum" id="chord-degree-count"></span>
+                                        <span class="srow__side"><span class="dsum__count" id="chord-degree-count-num"></span><span class="dsum" id="chord-degree-count"></span>
                                             <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span></span>
                                     </div>
                                     <div class="degree-list" id="degree-grid" data-view="switch" hidden>
@@ -2834,14 +2961,16 @@
             <button class="mp-bar__play" id="chord-mp-playpause-min" aria-label="播放或暂停">
                 <!-- 方案 B：胶囊 + 沿外圈走一根进度描边（比原来的圆环更贴键形，
                      也不会在"横向加宽后"变成一个突兀的圆） -->
-                <svg class="mp-ring" viewBox="0 0 64 40" preserveAspectRatio="none" aria-hidden="true">
-                    <rect class="mp-ring__track" x="0.75" y="0.75" width="62.5" height="38.5" rx="19.25"/>
+                <svg class="mp-ring" viewBox="0 0 70 44" preserveAspectRatio="none" aria-hidden="true">
+                    <rect class="mp-ring__track" x="0.75" y="0.75" width="68.5" height="42.5" rx="21.25"/>
                     <!-- 进度条 = 同一个胶囊轮廓，但**用 <path> 手写**，把路径起点放在顶部中点（12 点钟）
                          并顺时针走。原因：<rect> 的路径固定从左上角起笔，dashoffset 一递减，
                          亮起来的那段就从左上角长出来（用户 2026-10-06：\"应该从 12 点钟方向开始\"）。
-                         几何与上面的 track 完全重合（外侧内缩 0.75 = 描边宽 1.5 的一半）。 -->
+                         几何与上面的 track 完全重合（外侧内缩 0.75 = 描边宽 1.5 的一半）。
+                         ★ 第三十七轮跟随键体放大到 70×44：起点 35,0.75、上直边 35→48、
+                           圆弧半径 21.25、下直边 48→22、左弧回到 22,0.75。 -->
                     <path class="mp-ring__bar" id="chord-mp-ring-bar" pathLength="1"
-                          d="M32 0.75 L44 0.75 A19.25 19.25 0 0 1 44 39.25 L20 39.25 A19.25 19.25 0 0 1 20 0.75 Z"/>
+                          d="M35 0.75 L48 0.75 A21.25 21.25 0 0 1 48 43.25 L22 43.25 A21.25 21.25 0 0 1 22 0.75 Z"/>
                 </svg>
                 <svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg>
             </button>

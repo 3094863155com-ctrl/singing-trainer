@@ -86,12 +86,15 @@
         //     谱面 / 主播放音频 / 锁屏封面音频保持**原排列**。
         //   实现在 stackedForUI / uiVoicing（约 1630 行），整块可摘除。
         stackOctave: false,
-        // 隐藏卡片（第三十六轮，用户要求，默认开 = 保持原有行为）：
-        //   开 = 卡片上的答案**只在按住时**出现（一直以来的行为）。
-        //   关 = 答案**常驻显示**，展开面板就能看到（练习时可以对照着听）。
+        // 卡片答案（第三十七轮，用户要求把布尔开关改成两档交互）：
+        //   'hold'   = 答案**只在按住时**出现（一直以来的行为，默认）。
+        //   'toggle' = **点一下常驻显示、再点一下常驻隐藏**；按住不再揭示，
+        //              上滑报错 / 下滑辅助 / 左右滑切格照常（冻结照建，只是不亮卡片）。
         //   ★ 纯显示项：不出题、不动音频、不影响 pending 机制。
-        //   实现在 mpCardAlwaysOn() / mpSetRevealed()。
-        hideCard: true,
+        //   ★ 旧版布尔 hideCard（true=按住 / false=常驻）在 loadSettings 里迁移：
+        //     true → 'hold'，false → 'toggle'（常驻 ≈ 点一下就常驻）。
+        //   实现在 mpCardMode() / mpCardLatch / mpSetRevealed()。
+        cardMode: 'hold',
         // 「参与级数」展开后右侧显示什么（第三十六轮）：
         //   'switch' = 和弦参与开关（每个级数一颗拨杆）
         //   'prob'   = 七和弦概率滑块
@@ -1366,6 +1369,13 @@
     // 离调括号左右外扩量：跟着标记一起放大，否则宽标记（5⁷/Ⅳ）会把括号尾巴穿过去
     const AP_BRACKET_PAD = 4 * LABEL_ZOOM;
 
+    // 谱线（5 条横线 + 小节线 + 加线）的线宽（第三十七轮，与字形减细同一批）。
+    //   ★ 唯一旋钮：0.85。改回 1 即回原样。
+    //   ★ 字形减细走 CSS（index.html 的 --sheet-trim），谱线走这里 —— 两者互不影响，
+    //     因为 VexFlow 把 stroke-width 写在根 <svg> 上，CSS 那条只命中 <text>，
+    //     这里的 setLineWidth 只影响 stave.draw() 期间。
+    const SHEET_STAVE_LINE_W = 0.85;
+
     function measureRomanWidth(chord) {
         if (!chord.applied) return chord.roman.length * LABEL_CHAR_W;
         const f = figuresOf(chord.seventh, chord.inversion);
@@ -1927,14 +1937,20 @@
         // 高亮带整行高 = lineHeight，最后一行要容下 bandTop + lineHeight，留 2 单位余量
         const lastRowHeight = fourPart ? 240 : 136;
         const GRAND_GAP = 90;                       // 高音谱表 y → 低音谱表 y（内容尺寸，不放大）
-        // 每行首小节要放下 谱号 + 调号 + 拍号。★ 实测（6 个升号，CDP 量的）：
-        //   调号墨迹 61.8→127.1，拍号 141.6→160.9 —— 也就是说 6 个升号时
-        //   谱号区至少要 141~145 才不把拍号挤出第一小节。原来是固定 85/80，
-        //   只够 2 个升降号 ⇒ 6 个升号时拍号被逼进音符区、音符只好贴着拍号。
-        //   ⇒ 按调号个数加宽（每号 16 单位，实测每个升号墨迹约 10.9 + 间隙）。
-        //   ≤2 个升降时数值不变（与之前逐像素一致）。
+        // 每行首小节要放下 谱号 + 调号（第三十七轮起不再画拍号）。
+        //   ★ 实测（CDP 量的）：谱号墨迹结束 ≈ 61.8，每个升降号 ≈ 10.9（6 个升号到 127.1）。
         const keyAccCount = Object.keys(shownKeySig || {}).length;
-        const CLEF_KEY_WIDTH = (fourPart ? 85 : 80) + Math.max(0, keyAccCount - 2) * 16;
+        // ★ 第三十七轮：谱面不再画拍号（用户："乐谱不需要有节拍号，这样也能省空间"）。
+        //   预留宽度现在只要"谱号 + 调号"，公式顺带修正了一个老问题：
+        //   —— 原来 `85 + (n-2)*16` 是**按 2 个升降号**手调的常数，拍号其实一直
+        //      画在预留区之外（6 个升号实测：调号墨迹到 127.1，拍号却从 141.6 才开始），
+        //      靠 `getNoteStartX()` 自动撑开才没崩，代价是首小节音符被挤到很靠右。
+        //   —— 现在的公式直接按实测墨迹走：谱号结束 ≈ 61.8，每个升降号 ≈ 10.9，
+        //      所以 base 取"谱号 + 一点余量"、斜率取 11，n 个升降号刚好盖住。
+        //   对比旧值：0 个升降 80→62/68、2 个 85→84/90、6 个 149→128/134。
+        //   ★ 省下来的宽度**不是凭空消失**：它进了 unit 的分子，于是首小节变窄、
+        //     右侧几个小节平分多出来的部分（用户选的"右侧三个小节分摊"）。
+        const CLEF_KEY_WIDTH = (fourPart ? 68 : 62) + keyAccCount * 11;
 
         const totalMeasures = chords.length;
         const totalLines = Math.ceil(totalMeasures / measuresPerLine);
@@ -1973,13 +1989,21 @@
             const stave = new Vex.Stave(x, g.y, staveWidth);
             stave.setContext(ctx);
             if (isFirstInLine) {
+                // ★ 第三十七轮：不再 addTimeSignature('4/4')（用户："乐谱不需要有节拍号"）。
+                //   拍号是纯装饰 —— 每小节恒为 4 拍（beatsPerMeasure 独立写死），
+                //   删掉它不影响出题、配声、音频任何一环，还顺带把首小节挤窄 18 单位。
                 stave.addClef('treble').addKeySignature(shownKey);
-                if (m === 0) stave.setTimeSignature('4/4');
             }
             if (m === totalMeasures - 1) {
                 stave.setEndBarType(Vex.Barline.type.END);
             }
+            // 谱线细一档（第三十七轮，与字形减细同一批）。Stave.draw 里
+            //   `lineWidth % 2 == 0 ? 0 : .5` 的半像素对齐不变，线宽不参与任何坐标计算
+            //   → 版式零影响。把 0.85 改回 1 即回原样。
+            ctx.save();
+            ctx.setLineWidth(SHEET_STAVE_LINE_W);
             stave.draw();
+            ctx.restore();
 
             const chord = chords[m];
             const keys = chord.notes.map((n) => `${pitchName(n.letter, n.acc)}/${n.octave}`);
@@ -2018,7 +2042,12 @@
                 try { note.setXShift(shifts[m]); } catch (e) { /* 居中失败不影响出谱 */ }
             }
 
+            // 加线（ledger）也走 stroke，跟着同一档线宽；符头/升降号是 <text>，不受影响
+            //   （ledgerLineStyle 默认是空对象，不会自己 setLineWidth，所以这里能生效）
+            ctx.save();
+            ctx.setLineWidth(SHEET_STAVE_LINE_W);
             voice.draw(ctx, stave);
+            ctx.restore();
 
             // 这个 VexFlow 构建里横向位置要 draw() 之后才确定，也是必须量两遍的原因
             let naturalAbs = NaN;
@@ -2052,14 +2081,10 @@
             bass.setContext(ctx);
 
             if (isFirstInLine) {
+                // ★ 第三十七轮：不再 setTimeSignature('4/4')。原来两个谱表都要记，
+                //   因为只记上谱表会让下谱表音符起始早 33 单位；现在两边都不记，天然对齐。
                 treble.addClef('treble').addKeySignature(shownKey);
                 bass.addClef('bass').addKeySignature(shownKey);
-                if (m === 0) {
-                    // 拍号两个谱表都要记（标准大谱表写法）。只记上谱表的话，
-                    // 该行的下谱表音符起始会比上谱表早 33 个单位。
-                    treble.setTimeSignature('4/4');
-                    bass.setTimeSignature('4/4');
-                }
             }
             if (isLast) {
                 treble.setEndBarType(Vex.Barline.type.END);
@@ -2070,8 +2095,12 @@
             //   绝不能跨小节取 Max 再回灌到所有小节 —— 那样每个小节的音符都会被
             //   挤到同一个 x（8 个小节叠在一起），已踩过这个坑。
             try { bass.setNoteStartX(treble.getNoteStartX()); } catch (e) { /* ignore */ }
+            // 谱线细一档，与单行谱表同一常量（见 SHEET_STAVE_LINE_W）
+            ctx.save();
+            ctx.setLineWidth(SHEET_STAVE_LINE_W);
             treble.draw();
             bass.draw();
+            ctx.restore();
 
             const chord = chords[m];
             // 升序：[0] 低音 … 最后一个是最高音。
@@ -2133,8 +2162,12 @@
                 } catch (e) { /* ignore */ }
             }
 
+            // 加线也跟同一档线宽（与单行谱表一致）
+            ctx.save();
+            ctx.setLineWidth(SHEET_STAVE_LINE_W);
             vU.draw(ctx, treble);
             vL.draw(ctx, bass);
+            ctx.restore();
 
             let naturalAbs = NaN;
             try { naturalAbs = upper.getAbsoluteX(); } catch (e) { /* ignore */ }
@@ -2786,8 +2819,9 @@
         // 「八度内排列」（第三十四轮起是纯"放出来的音"项，但仍是用户偏好 → 必须记住；
         //   漏登记会让刷新后开关自己变回去）
         if (typeof s.stackOctave === 'boolean') settings.stackOctave = s.stackOctave;
-        // 隐藏卡片 / 参与级数的显示视图（第三十六轮）：同样是纯显示偏好，漏登记就会"自己变回去"
-        if (typeof s.hideCard === 'boolean') settings.hideCard = s.hideCard;
+        // 卡片答案两档 / 参与级数的显示视图（第三十六、三十七轮）：纯显示偏好，漏登记就会"自己变回去"
+        if (s.cardMode === 'hold' || s.cardMode === 'toggle') settings.cardMode = s.cardMode;
+        else if (typeof s.hideCard === 'boolean') settings.cardMode = s.hideCard ? 'hold' : 'toggle';
         if (s.degreeView === 'switch' || s.degreeView === 'prob') settings.degreeView = s.degreeView;
         // 强调低音只剩四档 0 / 10 / 30 / 75（关闭 / 轻微 / 中等 / 明显）：旧值就近落档
         if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
@@ -3398,7 +3432,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 36;
+    const APP_VERSION = 37;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -3586,11 +3620,12 @@
             autoContinue: document.getElementById('chord-auto-continue'),
             portable: document.getElementById('chord-portable'),
             stackOctave: document.getElementById('chord-stack-octave'),
-            hideCard: document.getElementById('chord-hide-card'),
+            cardModeSeg: document.getElementById('chord-card-mode'),
             grid: document.getElementById('degree-grid'),
             // 「参与级数」折叠行：收起时显示级数罗马数字概览
             degreeToggle: document.getElementById('chord-degree-toggle'),
             degreeCount: document.getElementById('chord-degree-count'),
+            degreeCountNum: document.getElementById('chord-degree-count-num'),
             // 「和弦开关 / 七和弦概率」二选一（第三十六轮）
             degreeViewSeg: document.getElementById('chord-degree-view'),
             // 转位 / 6₄：自然、离调、无调性各一套
@@ -3771,6 +3806,10 @@
         els.degreeCount.innerHTML = html;
         els.degreeCount.setAttribute('aria-label',
             (showOff ? '未参与：' : '参与：') + list.map((d) => d).join(' '));
+        // 「5/7」小计数（第三十七轮）：折叠行要自己说出"里面一共有 7 项"。
+        //   ★ 必须写在这里而不是 buildDegreeGrid 里 —— 勾选任一拨杆也会走 updateDegreeCount，
+        //     写在构建期就只有第一次是对的。
+        if (els.degreeCountNum) els.degreeCountNum.textContent = onList.length + '/7';
     }
 
     // 「和弦开关 ⇄ 七和弦概率」二选一（第三十六轮）
@@ -4131,6 +4170,17 @@
         sub: darkenHex(p.sub, 0.02, -0.06)
     }));
 
+    // 两色的 sRGB 中点（离调对角渐变的中间 stop 基料）
+    function mixHex(a, b) {
+        const pa = /^#?([0-9a-f]{6})$/i.exec(String(a).trim());
+        const pb = /^#?([0-9a-f]{6})$/i.exec(String(b).trim());
+        if (!pa || !pb) return a;
+        const va = parseInt(pa[1], 16), vb = parseInt(pb[1], 16);
+        const ch = (sh) => Math.round((((va >> sh) & 255) + ((vb >> sh) & 255)) / 2);
+        const to = (v) => (v < 16 ? '0' : '') + v.toString(16);
+        return '#' + to(ch(16)) + to(ch(8)) + to(ch(0));
+    }
+
     let artCache = [];     // 小节索引 -> MediaMetadata.artwork 数组
     let artUrls = [];      // 已生成的全部 blob URL（换一段时统一回收）
     let artImages = [];    // 已"读进内存并解码"的图。钉住引用，保证系统取图时命中暖缓存
@@ -4200,6 +4250,10 @@
     }
 
     // x/y → 第几颗；不在这一排（含上下 24px 宽容区）返回 -1
+    //   ★ 第三十七轮修 bug（用户："滑动 1234 的时候，有概率没划到 4，4 自动触发声音"）：
+    //     键与键之间有 8px gap，手指落在 gap 里时下面的 for 循环不命中，
+    //     旧兜底 `return btns.length - 1` 会**直接判成最后一颗** → 还没划到 4，4 就响了。
+    //     现在兜底改成"取中心最近的键"：gap 属于左右两颗里更近的那颗，不再偏向末键。
     function mpToneIndexAt(x, y) {
         const btns = mpToneButtons();
         if (!btns.length) return -1;
@@ -4212,7 +4266,14 @@
             const r = btns[i].getBoundingClientRect();
             if (x >= r.left && x <= r.right) return i;
         }
-        return (x < first.left) ? 0 : btns.length - 1;
+        // 落在键间 gap / 两端 pad（±14px 内）：按中心距离取最近的一颗
+        let best = 0, bestD = Infinity;
+        for (let i = 0; i < btns.length; i++) {
+            const r = btns[i].getBoundingClientRect();
+            const d = Math.abs(x - (r.left + r.right) / 2);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
     }
 
     function mpTonePlay(measure, i) {
@@ -4446,9 +4507,32 @@
         const pal = bassOnly
             ? COVER_NEUTRAL
             : (isApplied ? ART_PALETTE_APPLIED : ART_PALETTE)[(info.degree - 1) % ART_PALETTE.length];
-        const grad = g.createLinearGradient(0, 0, 0, size);
-        grad.addColorStop(0, pal.top);
-        grad.addColorStop(1, pal.bottom);
+        // ★ 第三十七轮（用户："离调卡片配色改一下……例如 2/Ⅲ，左上就是 2 的颜色，
+        //   右下是 3 的，中间过渡一下，别是两个色块冲突在一起"）：
+        //   离调档改成**对角线（左上→右下）三 stop 渐变** —— 左上 = 分子（副调级数）的色，
+        //   右下 = 分母（目标级数）的色。中间必须插第三个 stop：互补色对（Ⅴ 黄 ↔ Ⅳ 蓝）
+        //   在 sRGB 直插会在中缝塌成脏灰；取两端中点再**提亮 + 降饱和**，看起来才是
+        //   "柔和过渡带"而不是"脏块"。普通档 / bassOnly 档维持原垂直渐变，一字不动。
+        let ink = pal.ink;
+        let subInk = pal.sub;
+        let grad;
+        if (isApplied && info.applied.localDegree && info.applied.targetDegree) {
+            const palA = ART_PALETTE_APPLIED[(info.applied.localDegree - 1) % ART_PALETTE_APPLIED.length];
+            const palB = ART_PALETTE_APPLIED[(info.applied.targetDegree - 1) % ART_PALETTE_APPLIED.length];
+            grad = g.createLinearGradient(0, 0, size, size);
+            grad.addColorStop(0, palA.top);
+            grad.addColorStop(0.5, darkenHex(mixHex(palA.top, palB.bottom), 0.05, -0.12));
+            grad.addColorStop(1, palB.bottom);
+            // 文字色：主标记（大阿拉伯数字）在画面中央，用两端 ink 里**更深**的那个
+            //   （对比度主要看亮度差，深 ink 在任何一端的浅底上都读得清）；
+            //   小字里 footer 贴着底缘（分母端），跟分母的 sub。分子端 pos 也用 subInk。
+            ink = (hexToHsl(palA.ink).l <= hexToHsl(palB.ink).l) ? palA.ink : palB.ink;
+            subInk = palB.sub;
+        } else {
+            grad = g.createLinearGradient(0, 0, 0, size);
+            grad.addColorStop(0, pal.top);
+            grad.addColorStop(1, pal.bottom);
+        }
         g.fillStyle = grad;
         g.fillRect(0, 0, size, size);
 
@@ -4525,7 +4609,7 @@
         const x0 = (size - widthAt(fs)) / 2;
         g.textAlign = 'left';
         g.textBaseline = 'middle';
-        g.fillStyle = pal.ink;
+        g.fillStyle = ink;
         g.font = '700 ' + fs + 'px ' + ART_SERIF;
         g.fillText(parts.base, x0, cy);
         let cursor = x0 + g.measureText(parts.base).width;
@@ -4554,7 +4638,7 @@
         //   比音名串窄约三成，所以字号略放大、间距加宽，与上行大罗马数字重量相配。
         g.textAlign = 'center';
         g.font = '500 ' + (size * 0.090) + 'px ' + ART_SANS;
-        g.fillStyle = pal.sub;
+        g.fillStyle = subInk;
         g.fillText(info.tones, size / 2, size * 0.715);
 
         // 底行：调性 · 配声
@@ -4778,7 +4862,8 @@
         if (els.autoContinue) els.autoContinue.setAttribute('aria-checked', pv('autoContinue') ? 'true' : 'false');
         if (els.portable) els.portable.setAttribute('aria-checked', pv('portable') ? 'true' : 'false');
         if (els.stackOctave) els.stackOctave.setAttribute('aria-checked', pv('stackOctave') ? 'true' : 'false');
-        if (els.hideCard) els.hideCard.setAttribute('aria-checked', pv('hideCard') ? 'true' : 'false');
+        // 卡片答案两档 seg（第三十七轮）：markSeg 负责把 active/aria-checked/thumb 一起刷好
+        if (els.cardModeSeg) markSeg(els.cardModeSeg, (o) => o.dataset.cardmode === pv('cardMode'));
         if (els.relativePitch) {
             const rel = (pv('pitchMode') === 'relative');
             els.relativePitch.setAttribute('aria-checked', rel ? 'true' : 'false');
@@ -5006,6 +5091,8 @@
         highlightedMeasure = -1;
         coverMeasure = -1;              // 锁屏封面的"当前小节"也要复位（否则下一段第一小节会被判成"没变"）
         mpSeg++;                        // 段落代数 +1：冻结快照靠它判断"是不是已经跨到新一段了"
+        // ★ 第三十七轮：换段清"点击切换"档的常驻锁存 —— 上一段点的常驻显示不该带到新一段来。
+        mpResetCardLatch();
         // ★ 不要在这里直接改 mpMeasure —— 统一走 mpOnMeasure 这一个入口。
         //   它会在"用户正长按看答案"时只更新 mpLiveMeasure、不动显示，
         //   于是自动连播换段也不会把用户按住的那个答案换掉。
@@ -5695,13 +5782,17 @@
             });
         }
 
-        // 「隐藏卡片」（第三十六轮）：纯显示项 → 即时生效，不进待应用。
-        //   关掉后展开面板里的答案常驻显示（练习时可以对照着听）。
-        if (els.hideCard) {
-            els.hideCard.addEventListener('click', () => {
-                settings.hideCard = !settings.hideCard;
+        // 「卡片答案」两档（第三十七轮）：'hold' = 按住才显示（原有行为）；
+        //   'toggle' = 点一下常驻显示、再点一下常驻隐藏。纯显示项 → 即时生效，不进待应用。
+        if (els.cardModeSeg) {
+            els.cardModeSeg.addEventListener('click', (e) => {
+                const opt = e.target.closest('.seg__opt');
+                if (!opt || !els.cardModeSeg.contains(opt)) return;
+                const v = (opt.dataset.cardmode === 'toggle') ? 'toggle' : 'hold';
+                if (v === settings.cardMode) return;
+                settings.cardMode = v;
                 saveSettings();
-                syncTogglePills();
+                markSeg(els.cardModeSeg, (o) => o.dataset.cardmode === v);
                 mpApplyCardVisibility();
             });
         }
@@ -5893,6 +5984,7 @@
             });
         }
         mpSetRevealed(false);
+        mpSyncCardHint();             // 占位卡文案跟档位走（第三十七轮）
         mpSyncPlayIcon();
         mpOnMeasure(mpMeasure);
     }
@@ -6083,27 +6175,56 @@
         c.closePath();
     }
 
-    // 卡片答案是否**常驻**显示（第三十六轮「隐藏卡片」开关关掉时）。
+    // 卡片答案两档（第三十七轮）：'hold' = 按住才显示；'toggle' = 点一下常驻显示/隐藏。
     //   ★ 用 pv() 而不是 settings：设置页刚改完、还没点应用时也应该立刻看到效果
     //     （它是纯显示项，本来就不进 pending；pv 在没有 pending 时等于 settings，安全）。
-    function mpCardAlwaysOn() {
-        return pv('hideCard') === false;
+    function mpCardMode() {
+        return (pv('cardMode') === 'toggle') ? 'toggle' : 'hold';
     }
 
-    // 「隐藏卡片」开关切完后的收尾：开 → 恢复"只有按住才显示"；关 → 立刻常驻显示。
-    //   按住期间（mpFreeze 非空）不去打断用户正在看的那张，等他松手自然回到新状态。
+    // 'toggle' 档的**常驻显示锁存**：true = 答案常驻（点一下后），false = 常驻遮住。
+    //   ★ 绝不能复用 mpRevealing 当锁存 —— 它每次松手都被 mpCancelGesture 清零。
+    //   'hold' 档下锁存恒不生效（mpSetRevealed 里直接忽略），不需要另外清。
+    let mpCardLatch = false;
+
+    // 换段 / 换档时的收尾：锁存清零 + 同步占位卡文案。
+    //   换段不清的话，新一段一出来答案就摊在脸上（上一段点的"常驻显示"不该继承）。
+    function mpResetCardLatch() {
+        mpCardLatch = false;
+        if (mpCardMode() === 'toggle') mpSetRevealed(false);
+    }
+
+    // 'hold' 档的"按住揭示"；'toggle' 档下按住不揭示（锁存说了算）。
+    //   调用点：长按到点（mpArmGesture）、按住左右滑切格（mpStep*WhileHolding）。
+    function mpRevealWhileHolding() {
+        if (mpCardMode() === 'hold') mpSetRevealed(true);
+    }
+
+    // 占位卡文案跟档位走（toggle 档按住不再揭示，"按住看答案"就成假话了）。
+    function mpSyncCardHint() {
+        const el = els && els.mpCoverHidden;
+        if (el) el.textContent = (mpCardMode() === 'toggle') ? '点一下显示 / 隐藏答案' : '按住看答案';
+    }
+
+    // 档位切完后的收尾：hold → 恢复"只有按住才显示"；toggle → 从当前可见状态继承锁存
+    //   （在 hold 常驻开着的时候切过去，答案不闪没；在按住时切过去，等松手自然回到新状态）。
     function mpApplyCardVisibility() {
-        if (mpCardAlwaysOn()) mpSetRevealed(true);
-        else if (!mpFreeze) mpSetRevealed(false);
+        mpSyncCardHint();
+        if (mpCardMode() === 'toggle') {
+            mpCardLatch = mpRevealing;
+        } else {
+            mpCardLatch = false;
+            if (!mpFreeze) mpSetRevealed(false);
+        }
     }
 
     // 揭示开关（瞬时）：按住 = true，松手 = false。
-    //   ★ 与旧版的区别：以前是"点一下持久切换"，现在**默认永远遮住**，
-    //     只有手指按住的那段时间才看得见。
-    //   ★ 第三十六轮：设置里「隐藏卡片」关掉后，这里被钉在 true ——
-    //     所有调用点（松手、切页、cancelGesture…）都不用改，一处收口。
+    //   ★ 第三十七轮：'toggle' 档的锁存在这里收口 —— 锁存为真时，任何调用点传 false
+    //     都遮不掉（常驻显示），锁存为假时只有 mpRevealWhileHolding 这条路能亮。
+    //     mpResetCardLatch / mpApplyCardVisibility 负责在换段、换档时清锁存。
     function mpSetRevealed(on) {
-        mpRevealing = !!(on || mpCardAlwaysOn());
+        const latch = (mpCardMode() === 'toggle') ? mpCardLatch : false;
+        mpRevealing = !!(on || latch);
         if (els && els.mpStage) {
             els.mpStage.classList.toggle('is-hidden', !mpRevealing);
             els.mpStage.classList.toggle('is-revealed', mpRevealing);
@@ -6212,14 +6333,13 @@
     }
 
     // 长按阈值到点：冻结 + 揭示
+    //   ★ 第三十七轮：'toggle' 档按住**不揭示**（答案由点击锁存说了算），
+    //     但冻结照建 —— 上滑报错 / 下滑辅助 / 左右滑切格全依赖冻结，不能少。
     function mpArmGesture(g) {
         if (!mpFreezeAt(mpLiveMeasure)) return false;
         g.phase = 'armed';
-        if (els && els.mpStage) {
-            els.mpStage.classList.remove('is-pressing');
-            els.mpStage.classList.add('is-revealed');
-        }
-        mpSetRevealed(true);
+        if (els && els.mpStage) els.mpStage.classList.remove('is-pressing');
+        mpRevealWhileHolding();
         return true;
     }
 
@@ -6231,7 +6351,7 @@
         const next = Math.max(0, cur - 1);
         if (next === cur) return;          // 已经在第一小节
         mpFreezeAt(next);
-        mpSetRevealed(true);
+        mpRevealWhileHolding();
         mpNudge('left');
         if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }
         mpShowMeasureOnly(next);
@@ -6304,7 +6424,7 @@
         const next = Math.min(last, cur + 1);
         if (next === cur) return;          // 已经在最后一小节
         mpFreezeAt(next);
-        mpSetRevealed(true);
+        mpRevealWhileHolding();
         mpNudge('right');
         if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }
         mpShowMeasureOnly(next);
@@ -6344,11 +6464,16 @@
     function mpEdgeClose() {
         const sheet = els && els.mpSheet;
         if (!sheet) return;
-        const w = sheet.getBoundingClientRect().width || 400;
-        // 横向甩出与纵向收起同时发生（对角线滑走），比"先滑回再往下"自然
-        sheet.style.setProperty('--mp-edge-x', (w + 16) + 'px');
+        // ★ 第三十七轮（用户："左缘滑动收起的动画要和点收起按钮一致，且跟手"）：
+        //   以前这里会额外把 --mp-edge-x 写成 (宽+16)px —— 面板沿对角线甩出去，
+        //   和收起按钮的"纯垂直下落"是两种动画。
+        //   现在**什么都不写**：横向位移保持手指松开时的值不动，只让 translateY
+        //   走 mpSetExpanded(false) 触发的那条 0.32s 过渡（和按钮完全同一条曲线）。
+        //   合成的轨迹是"偏着 dx 垂直下落" —— 曲线的形状、时长、缓动都与按钮一致，
+        //   同时保留了拖动时的跟手感（面板一直贴在手指右边）。
         mpSetExpanded(false);
-        // 面板已完全在屏外，这时才归零（看不清任何跳动）
+        // 面板已完全在屏外，这时才归零（看不见任何跳动）。
+        //   ★ 420ms > 0.32s 过渡 + 一点余量；平时展开时 mpSetExpanded(true) 也会再清一次。
         setTimeout(mpResetEdgeX, 420);
     }
 
@@ -6534,6 +6659,16 @@
                 }
                 mpGesture = null;
                 return;
+            }
+            // ★ 第三十七轮「点击切换」档：tap = 手势还停在 'pending'（没到长按阈值、
+            //   也没滑出 MP_SLOP_PX —— 滑出去的话手势在 move 里已被销毁，走不到这里）。
+            //   判据天然覆盖四种情形：短点 ✓ / 长按后松手（phase==='armed'）✗ /
+            //   滑了又松手（手势已销毁，g 为 null）✗ / 下滑开窗（consumed，上面已 return）✗。
+            //   ★ 只在此处切换锁存：pointerup 之后浏览器还会补发 lostpointercapture，
+            //     那次进来 mpGesture 已是 null，直接 return —— 不会一次点击切两次。
+            if (g.phase === 'pending' && !g.viewOnly && mpCardMode() === 'toggle') {
+                mpCardLatch = !mpCardLatch;
+                mpSetRevealed(mpCardLatch);
             }
             mpCancelGesture();
         };
@@ -7701,9 +7836,11 @@
             reportCount: mpReports.length,
             // 第二十六轮：起播静音斜坡的当前音量（0 = 正处于"盖残留"窗口；1 = 已恢复）
             volume: chordAudioEl ? chordAudioEl.volume : null,
-            // 第三十六轮：舞台页 + 卡片是否被"隐藏卡片"开关钉成常驻 + 左缘右滑的横向位移
+            // 第三十七轮：舞台页 + 卡片档位/锁存 + 揭示态 + 左缘右滑的横向位移
             stageView: mpStageView,
-            cardAlwaysOn: mpCardAlwaysOn(),
+            cardMode: mpCardMode(),
+            cardLatch: mpCardLatch,
+            revealed: mpRevealing,
             edgeX: (els && els.mpSheet) ? (els.mpSheet.style.getPropertyValue('--mp-edge-x') || '') : ''
         }),
         // 第二十二轮：起播落点自检的记录（真机上排查"关窗后落在第几节"直接用）
