@@ -80,8 +80,11 @@
         portable: false,
         // 八度内排列（第三十三轮，默认关）：「通用」里的独立开关。
         //   打开后每个和弦**低音不动**，其余音全部移到低音上方最近的八度并按音高重排
-        //   （5 4 2 7 → 5 7 2 4）；与低音同音名的音直接去掉，所以四音可能变三音。
-        //   实现在 doGenerate 后面那一段 stackProgressionWithinOctave，整块可摘除。
+        //   （5 4 2 7 → 5 7 2 4）；重复音名只留一个，所以四音可能变三音。
+        //   ★ 第三十四轮改口径：**只影响"放出来的音"** —— 发声键那排 1 2 3 4、
+        //     听辨辅助窗（开窗琶音 / 数字列 / 单音试听 / 整和弦试听）、卡片底部那排级数。
+        //     谱面 / 主播放音频 / 锁屏封面音频保持**原排列**。
+        //   实现在 stackedForUI / uiVoicing（约 1630 行），整块可摘除。
         stackOctave: false,
         // 参与的级数（Ⅰ 永远参与，端点强制）
         degrees: { 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true },
@@ -1625,9 +1628,27 @@
         return chord;
     }
 
-    function stackProgressionWithinOctave(chords) {
-        if (!chords) return;
-        for (const c of chords) stackChordWithinOctave(c);
+    // 「放出来的音」的压缩副本（第三十四轮）：浅克隆后重排，**绝不碰 data.chords 本体**。
+    //   ★ buildChordSchedule(2305) / renderChordAudio(2457) / bassMidiOf(2511) /
+    //     mpPreviewChord(6215) / 谱面(1903,1998) 读的都是同一份引用 ——
+    //     一旦就地改 chord，谱面、主播放音频、锁屏封面会跟着变，与用户口径相悖。
+    function stackedForUI(chord) {
+        const midis = (chord && chord.midis) ? chord.midis.slice() : [];
+        const notes = (chord && chord.notes) ? chord.notes.slice() : [];
+        if (midis.length < 2) return { midis: midis, notes: notes };
+        const copy = { midis: midis, notes: notes, doubledRole: (chord && chord.doubledRole) || null };
+        stackChordWithinOctave(copy);          // 就地改 copy（midis 已是新数组，不牵连原对象）
+        return { midis: copy.midis, notes: copy.notes };
+    }
+
+    // 唯一读开关的地方：调用点不用各写一遍三元。
+    //   ★ 必须读 settings（已生效值），不能读 pv()（设置页控件值，含未应用项）。
+    function uiVoicing(chord) {
+        if (chord && settings.stackOctave) return stackedForUI(chord);
+        return {
+            midis: (chord && chord.midis) ? chord.midis.slice() : [],
+            notes: (chord && chord.notes) ? chord.notes.slice() : []
+        };
     }
 
     function buildAtonalSchedule(settings) {
@@ -1815,6 +1836,22 @@
     }
 
     // 只重画谱面（显示类设置改完调它）：不重新出题、不动音频、不作废已渲染的 WAV。
+    // 谱面放大倍数（第三十四轮）：默认 1.5。
+    //   ★ 可用 URL 参数临时覆盖：`?zoom=1.7` —— 真机上比较不同放大倍数时不用改代码。
+    //     允许 0.6 ~ 2.6；非法值一律回落 1.5。去掉参数就是发布值。
+    function sheetZoomFactor() {
+        let z = 1.5;
+        try {
+            const q = String((global.location && global.location.search) || '');
+            const m = q.match(/[?&]zoom=([0-9]+(?:\.[0-9]+)?)/);
+            if (m) {
+                const v = parseFloat(m[1]);
+                if (isFinite(v) && v >= 0.6 && v <= 2.6) z = v;
+            }
+        } catch (e) { /* Node 里 require（无 location）→ 用默认值 */ }
+        return z;
+    }
+
     function repaintSheet() {
         if (!data || data.atonal) return;   // 无调性没有谱表，别去画
         renderChordSheet(data);
@@ -1843,16 +1880,39 @@
         // 全音符每小节只占很窄一格，一行放 4 小节（16 小节 = 4 行，8 小节 = 2 行）
         const measuresPerLine = 4;
 
-        const SCALE = 2.0;
-        const canvasWidth = 1400;
+        // ---------------- 谱面放大（第三十四轮） ----------------
+        //   ★ 唯一旋钮。VexFlow 的 SVGContext.scale() 只做
+        //     setViewBox(0, 0, width/scaleX, height/scaleY)，**不缩放绘图坐标** ——
+        //     所以逻辑单位（行高 / GRAND_GAP / 谱号宽 / 判定框坐标 / rx / 描边宽 / 字号）
+        //     与音符同处一个坐标系，改 SCALE = 整张画面等比放大。
+        //     手机端 px/单位 = 容器宽 ÷ (1400/SCALE)；桌面端（无 max-width）= SCALE。
+        //   ★ 判定框 / 点击热区 / 离调括号全由 geom 派生 → 自动跟随，零改动。
+        //   ★ SHEET_ZOOM = 1 时与第 33 轮逐像素一致（SCALE 回 2.0、viewBox 回 700）。
+        //   ★ 后果必须知道：整张画面等比放大 ⇒ 谱面**也高 50%**（页面滚动变长）。
+        //     纵向没有可回收的空白 —— 实测每行 260 里内容已占 243，只空 17。
+        const SHEET_ZOOM = sheetZoomFactor();     // 1.5 = 音符与标记放大 50%（?zoom= 可临时覆盖）
+        const SCALE = 2.0 * SHEET_ZOOM;           // 2.0 → 3.0，viewBox 宽 700 → 466.7
+        const canvasWidth = 1400;                 // 不动（改了只会让桌面画布变窄、音符不变大）
         const width = Math.round(canvasWidth / SCALE);
-        // 大谱表要竖着放两个五线谱，行高约为单行谱的 1.7 倍
+        // 行高按"内容实际占用"给。★ 实测（2026-10-25 CDP 量的，别再凭感觉估）：
+        //   谱表线距 = 20 单位（5 线 = 80 高），低音谱表底 = y+170；
+        //   罗马数字基线 = labelY = y+204（= GRAND_GAP 90 + 80 + 34）；
+        //   离调括号在 labelY+11 = y+215，箭头再往下 ~8 → 内容底 ≈ y+223。
+        //   ⇒ 四部行高 260（判定带 -22..238）只剩 15 单位余量，**已经是紧的**，别再收。
+        //   单行：谱表底 y+80、级数 y+126、括号 y+139 ⇒ 150（-18..132）刚好，也别动。
         const lineHeight = fourPart ? 260 : 150;
-        const topPad = 50;
-        // 高亮带整行高 = lineHeight，最后一行需容下 bandTop + lineHeight（238 / 132），留 2px 余量
+        const topPad = 50;          // 不动：首行上方要给上加线留余量（判定带顶 = 28）
+        // 高亮带整行高 = lineHeight，最后一行要容下 bandTop + lineHeight，留 2 单位余量
         const lastRowHeight = fourPart ? 240 : 136;
-        const GRAND_GAP = 90;                       // 高音谱表 y → 低音谱表 y
-        const CLEF_KEY_WIDTH = fourPart ? 85 : 80;
+        const GRAND_GAP = 90;                       // 高音谱表 y → 低音谱表 y（内容尺寸，不放大）
+        // 每行首小节要放下 谱号 + 调号 + 拍号。★ 实测（6 个升号，CDP 量的）：
+        //   调号墨迹 61.8→127.1，拍号 141.6→160.9 —— 也就是说 6 个升号时
+        //   谱号区至少要 141~145 才不把拍号挤出第一小节。原来是固定 85/80，
+        //   只够 2 个升降号 ⇒ 6 个升号时拍号被逼进音符区、音符只好贴着拍号。
+        //   ⇒ 按调号个数加宽（每号 16 单位，实测每个升号墨迹约 10.9 + 间隙）。
+        //   ≤2 个升降时数值不变（与之前逐像素一致）。
+        const keyAccCount = Object.keys(shownKeySig || {}).length;
+        const CLEF_KEY_WIDTH = (fourPart ? 85 : 80) + Math.max(0, keyAccCount - 2) * 16;
 
         const totalMeasures = chords.length;
         const totalLines = Math.ceil(totalMeasures / measuresPerLine);
@@ -2693,6 +2753,9 @@
         if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
         if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
         if (typeof s.portable === 'boolean') settings.portable = s.portable;
+        // 「八度内排列」（第三十四轮起是纯"放出来的音"项，但仍是用户偏好 → 必须记住；
+        //   漏登记会让刷新后开关自己变回去）
+        if (typeof s.stackOctave === 'boolean') settings.stackOctave = s.stackOctave;
         // 强调低音只剩四档 0 / 10 / 30 / 75（关闭 / 轻微 / 中等 / 明显）：旧值就近落档
         if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
             const v = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
@@ -3302,7 +3365,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 34;
+    const APP_VERSION = 35;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -4037,7 +4100,9 @@
     function mpPaintToneButtons(m) {
         if (!els || !els.mpTones) return;
         const c = (data && data.chords) ? data.chords[m] : null;
-        const midis = (c && c.midis) ? c.midis : [];
+        // ★ 「八度内排列」：这一排是"放出来的音" → 用压缩版（低音不动、其余音依次往上排）。
+        //   按钮数量、每颗绑定的音高都跟着变；谱面与主播放音频仍然是原排列。
+        const midis = uiVoicing(c).midis;
         const box = els.mpTones;
         // 和弦或小节变了才重建（避免每帧重排 DOM）
         if (box.__data === data && box.dataset.measure === String(m)
@@ -4060,7 +4125,8 @@
                 e.preventDefault();
                 const cur = (data && data.chords) ? data.chords[m] : null;
                 if (!cur || !cur.midis) return;
-                const midi = cur.midis[i];
+                // ★ 现取压缩版：点第 i 颗响的就是"八度排列后"的第 i 个音（低音那颗不变）
+                const midi = uiVoicing(cur).midis[i];
                 if (midi == null) return;
                 b.classList.add('is-down');
                 unlockAudioNow();
@@ -4074,6 +4140,17 @@
         }
         box.__data = data;
         box.dataset.measure = String(m);
+    }
+
+    // 强制重画发声键那排 + 卡片（第三十四轮）：破掉 mpPaintToneButtons 的"没变就不重建"守卫。
+    //   用在「八度内排列」开关切完之后 —— 排列变了但 data 没变，守卫会挡住重建。
+    function mpRepaintToneButtons() {
+        if (!els || !els.mpTones) return;
+        els.mpTones.dataset.measure = '';
+        els.mpTones.__data = null;
+        const m = (typeof mpMeasure === 'number' && mpMeasure >= 0) ? mpMeasure : coverMeasure;
+        if (m >= 0) mpPaintToneButtons(m);
+        if (els.mpCover) mpPaintCover();     // 卡片底部那排级数数字也跟着重排（它是实时画的）
     }
 
     function setCoverMeasure(m) {
@@ -4411,8 +4488,12 @@
                 : null,
             // 和弦音：用**调内级数**（阿拉伯数字，变化音带 ♯/♭）而不是音名 ——
             //   与听辨辅助窗同一套写法，且天然不暴露调性（用户 2026-10-24 定）。
-            //   重复音不去重（四部里常常 1 3 5 1，重复的是哪个音本身就是信息）。
-            tones: (data.scale ? c.notes.map((n) => degreeOfNote(n, data.scale).text) : []).join('   '),
+            // ★ 第三十四轮：跟着「八度内排列」走（用户 2026-10-25 拍板）——
+            //   卡片数字的顺序与发声键 / 辅助窗一致。注意 drawCover 画的也是 info.tones，
+            //   所以锁屏封面那排数字会一起变（两者必须长得一样）。
+            tones: (data.scale
+                ? uiVoicing(c).notes.map((n) => degreeOfNote(n, data.scale).text)
+                : []).join('   '),
             // ★ 去掉调名（用户 2026-10-24：「索性去掉调性」）：只留配声方式。
             footer: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
             pos: (m + 1) + ' / ' + data.chords.length,
@@ -4727,9 +4808,9 @@
         data = practiceMode
             ? practiceProgression()
             : (settings.atonal ? buildAtonalSchedule(settings) : generateChordProgression(settings));
-        // 「八度内排列」（第三十三轮）：只改最终排列，不参与配声决策 → 整块可单独摘除。
-        //   放在 renderChordSheet 之前：谱面、卡片、发声键、辅助窗、音频都读这份 midis/notes。
-        if (settings.stackOctave && data && data.chords) stackProgressionWithinOctave(data.chords);
+        // ★ 第三十四轮：「八度内排列」**不在这里改写 data.chords** —— 它只影响"放出来的音"
+        //   （发声键 / 听辨辅助窗 / 卡片数字），见 stackedForUI / uiVoicing。
+        //   放在这里原地改的话，谱面、主播放音频、锁屏封面会一起变，与"音响本身不动"相悖。
         // 无调性没有调、没有谱表：renderChordSheet 会把 undefined 当调号画（还会读
         // chord.roman.length）→ 直接跳过，谱表页在无调性下也整个不出现。
         if (!data.atonal) renderChordSheet(data);
@@ -5407,12 +5488,14 @@
             });
         }
 
-        // 「八度内排列」：改的是**和弦音的排列本身**（谱面 / 卡片 / 发声键 / 辅助窗 / 音频全变），
-        //   所以按「内容类」进待应用 —— 只重排不可逆（原始八度已经丢了），重出题最稳。
+        // 「八度内排列」（第三十四轮改口径）：只改"放出来的音"（发声键 / 听辨辅助窗 / 卡片数字），
+        //   谱面与主播放音频一个字节都不动 → **即时生效**，不进待应用、不重出题、不重渲染音频。
         if (els.stackOctave) {
             els.stackOctave.addEventListener('click', () => {
-                stageSetting('stackOctave', !pv('stackOctave'), 'content');
+                settings.stackOctave = !settings.stackOctave;
+                saveSettings();
                 syncTogglePills();
+                mpRepaintToneButtons();
             });
         }
         syncTogglePills();
@@ -6409,7 +6492,7 @@
     //   触发即暂停主音频 → 播冻结和弦的「和弦分解」→ 弹浮窗；
     //   浮窗里可重听柱式 / 再放一遍和弦分解；点窗外关闭并恢复播放。
     //   辅助窗不写任何统计（与报错浮窗的 practiceMode 闸门无关，错题模式也可用）。
-    let mpAid = null;   // { measure, midis, sources: [], wasPlaying }
+    let mpAid = null;   // { measure, midis, notes, sources: [], wasPlaying }
     // 最近一次 playInstantChord 的结果 { style, ok, ctxState, scheduled }。
     //   ok 为假 = 那一声"没能真正排上程/上下文没在跑"，pointerup 会拿它决定要不要补放。
     let mpAidLast = null;
@@ -6426,6 +6509,11 @@
             ? frozen.midis
             : ((data && data.chords[frozen.measure] || {}).midis);
         if (!midis || !midis.length) return;
+        // ★ 第三十四轮「八度内排列」：这一窗也是"放出来的音" → 整窗用压缩版
+        //   （开窗那声琶音 / 数字列 / 单音试听 / 整和弦试听全走 mpAid.midis）。
+        //   前提是 midis 与 notes 同长同序，所以统一从和弦本体取；取不到才退回快照。
+        const chordNow = (data && data.chords) ? data.chords[frozen.measure] : null;
+        const ui = uiVoicing((chordNow && chordNow.midis) ? chordNow : { midis: midis, notes: [] });
         // ★ 第二十轮：开窗 = "我要停下来听这个和弦" → 在途的自动连播接力立刻作废。
         //   否则（尤其开窗前音频刚好播完 → wasPlaying=false → 关窗时根本没有 doPlay 去取消它）
         //   1.05 秒后接力照样到点：生成新的一段、从第 0 小节起播 —— 用户看到的就是
@@ -6438,11 +6526,11 @@
         mpPlayToken++;
         mpSyncPlayIcon();                                  // pause 事件会同步，这里兜底
         //   openedAt：关窗那一下的"开窗保护窗"要用（见 MP_AID_OPEN_GUARD_MS）
-        mpAid = { measure: frozen.measure, midis: midis.slice(), sources: [], wasPlaying,
-                  openedAt: Date.now() };
+        mpAid = { measure: frozen.measure, midis: ui.midis, notes: ui.notes,
+                  sources: [], wasPlaying, openedAt: Date.now() };
         mpPaintAidTones(frozen.measure);
         if (els && els.mpAid) els.mpAid.hidden = false;
-        try { await playInstantChord(midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
+        try { await playInstantChord(ui.midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
     }
 
     // 和弦音角色 → 中文标注（chordToneSpelled 返回的是英文 role）
@@ -6463,9 +6551,14 @@
         els.mpAidTones.innerHTML = '';
         const c = (data && data.chords) ? data.chords[measure] : null;
         if (!c || !c.notes || !c.notes.length) return;
-        const midis = (mpAid && mpAid.midis && mpAid.midis.length === c.notes.length)
-            ? mpAid.midis
-            : (c.midis || []);
+        // ★ 第三十四轮：去重后 mpAid.midis.length ≠ c.notes.length，原来那个"长度相等才用
+        //   mpAid.midis"的守卫必然失配 → 会悄默声地退回原始 midis，而 notes 仍按压缩版
+        //   配对 → 数字显示 3 个却响 4 个音（点 3 响 5）。所以改以 mpAid.notes 为准，
+        //   midis 与 notes 必须**成对**取，不能各取各的。
+        const useAid = !!(mpAid && mpAid.measure === measure && mpAid.midis && mpAid.notes
+            && mpAid.notes.length && mpAid.notes.length === mpAid.midis.length);
+        const aidNotes = useAid ? mpAid.notes : c.notes;
+        const midis = useAid ? mpAid.midis : (c.midis || []);
         // 和弦各音的"角色"：直接复用 chordToneSpelled —— 它按调内级数推出和弦音，
         //   **转位天然正确**（角色由根音定义，跟哪个音落在低音无关）；四部重复音时
         //   同一个角色会出现两枚，这也是对的（和声学上就是重复了那个音）。
@@ -6477,7 +6570,8 @@
             : (c.rootPc != null
                 ? atonalTones(c.rootPc, c.quality).tones
                 : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh) : []));
-        c.notes.forEach((n, i) => {                   // notes 已按 MIDI 升序（低 → 高）
+        aidNotes.forEach((n, i) => {                  // notes 已按 MIDI 升序（低 → 高）
+            if (!n || !n.letter) return;
             const midi = midis[i];
             const pc = ((midi % 12) + 12) % 12;
             // ★ 级数走 degreeOfNote（卡片同一套）：变化音显示 ♯4 而不是音名 F#。
@@ -7094,10 +7188,13 @@
         _buildAtonalSchedule: buildAtonalSchedule,
         _atonalTones: (rootPc, qKey) => atonalTones(rootPc, qKey),
         _ATONAL_QUALITIES: ATONAL_QUALITIES,
-        // 「八度内排列」（验收用）：纯函数，传入一个 chord 就地重排
+        // 「八度内排列」（验收用）：就地重排 / 只读压缩副本 / 显示闸门
         _stackChordWithinOctave: stackChordWithinOctave,
-        _stackProgressionWithinOctave: stackProgressionWithinOctave,
+        _stackedForUI: stackedForUI,
+        _uiVoicingOf: uiVoicing,
         _getSettings: () => settings,
+        // 版本号（验收用：确认跑的就是这一版）
+        _appVersion: () => APP_VERSION,
         // ---- 「未应用的设置」机制（验收用）----
         _getPending: () => (pending ? JSON.parse(JSON.stringify(pending)) : null),
         _pendingKind: () => pendingKind,
@@ -7406,6 +7503,8 @@
             feedbackOk: (els && els.mpErrorFeedback) ? els.mpErrorFeedback.getAttribute('data-ok') : null
         }),
         _getCoverInfo: buildCoverInfo,
+        // 重画谱面（验收用：证明「八度内排列」开关不会改动谱面几何）
+        _repaintSheet: repaintSheet,
         // 验收用：把"这个和弦的音各自是几音（root/third/fifth/seventh）"算出来对账
         //   （辅助窗那个「根音/三音/五音/七音」小标签的来源就是它）
         _chordToneSpelled: chordToneSpelled,
