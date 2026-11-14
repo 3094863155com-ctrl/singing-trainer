@@ -115,9 +115,10 @@
         //   才再掷一次骰子决定要不要在七和弦上面继续加九音（用户原话：
         //   "只有一个和弦生成为七和弦，才有概率进一步出现九音"）。
         //   实际出九和弦的概率 = seventhProb × ninthProb。
-        //   ★ 只在「流行键盘」配声模式下生效 —— 另外两种模式的音数容纳不了 5 个音，
-        //     开成 100 也不会出九和弦（见 doGenerate 里的 ninth 判定）。
-        //   默认全 0 ⇒ 出题结果与第四十轮逐字节一致。
+        //   ★ 只在「流行键盘」与「四部和声」两种配声模式下生效（第四十四轮扩到四部）——
+        //     键盘和声是三音柱式，装不下 5 个音，开成 100 也不会出九和弦
+        //     （见 doGenerate 里的 ninth 判定）。
+        //   默认全 0 ⇒ 出题结果与第四十轮逐字节一致（概率为 0 时连骰子都不掷）。
         ninthProb: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 },
         // 强调低音（用户 2026-10-07）：把**每小节的最低音**（谱面最下面那个音）单独提亮，
         //   帮听辨时抓住低声部。数值 = 低音增益要提升的百分比：
@@ -587,6 +588,12 @@
         commonTone: -3,      // 共同音保持在同一声部 → 加分
         resolveOk: -4,
         resolveBad: 15,
+        // 九音的解决（第四十四轮）单独一套权重：教材要求"九音必须下行级进"，
+        //   只借用 resolveOk(-4) 压不过"保持不动"自带的共同音加分(-3)，
+        //   实测会有一半的九音原地不动（听起来像没解决）。这里给足差距。
+        ninthOk: -7,        // 九音下行一个二度
+        ninthHold: 3,       // 原样保持（没有解决，轻微罚）
+        ninthBad: 45,       // 往上跑 / 大跳 —— 教材里九音上行是明确的错误，给到接近硬约束的量级
         similarAll: 1.5,     // 四部同向轻度惩罚（1.5 << 内声部一步 3.0，不会把内声部逼成大跳）
         rangeCenter: 0.25,
         outOfRange: 4,       // 越出声部标准音域的每半音惩罚
@@ -596,16 +603,29 @@
     };
 
     // 和弦音（带角色与原音级），供重复音判定使用
-    // 返回 [{letter, acc, pc, role, scaleDegree}]，role ∈ root/third/fifth[/seventh]
-    function chordToneSpelled(scale, degree, seventh) {
-        const steps = seventh ? [0, 2, 4, 6] : [0, 2, 4];
-        const roles = seventh
-            ? ['root', 'third', 'fifth', 'seventh']
-            : ['root', 'third', 'fifth'];
+    // 返回 [{letter, acc, pc, role, scaleDegree}]，role ∈ root/third/fifth[/seventh][/ninth]
+    //   ★ 第四十四轮加第九音：steps 第 5 项 = 8（= 七音再往上叠一个三度），
+    //     字母自动是根音上方"隔一个"的那个字母（C9 → C E G B D），升降号沿用调内音级，
+    //     所以 C 大调 ⅲ 级上的九音自然就是 F（小三度叠出来的小九度）—— 不需要额外判断。
+    function chordToneSpelled(scale, degree, seventh, ninth) {
+        const steps = ninth ? [0, 2, 4, 6, 8] : (seventh ? [0, 2, 4, 6] : [0, 2, 4]);
+        const roles = ninth
+            ? ['root', 'third', 'fifth', 'seventh', 'ninth']
+            : (seventh ? ['root', 'third', 'fifth', 'seventh'] : ['root', 'third', 'fifth']);
         return steps.map((s, i) => {
             const d = scale[(degree - 1 + s) % 7];
             return { letter: d.letter, acc: d.acc, pc: d.pc, role: roles[i], scaleDegree: d.degree };
         });
+    }
+
+    // 四部九和弦的音表（第四十四轮）：**省五音**
+    //   5 个和弦音塞进 4 个声部，教材的标准解法就是省掉五音 ——
+    //   剩下的根-三-七-九正好 4 个音，九音必须放高声部（S）。
+    //   ★ 与流行键盘那边的关系：左手 1+5 里五音还在（搬到低音），所以右手也只剩 3-7-9；
+    //     四部没有第二只手，五音只能真的不要 —— 两条路的结论是同一个。
+    //   返回 4 项，索引固定：0=根 1=三 2=七 3=九（最后一项 = 必须去高声部的那个音）。
+    function fourPartNinthTones(scale, degree) {
+        return chordToneSpelled(scale, degree, true, true).filter((t) => t.role !== 'fifth');
     }
 
     // 三和弦该重复哪个音 → 返回 0=根音 / 1=三音 / 2=五音；-1 = 无合法重复音
@@ -635,13 +655,28 @@
     //   relax 0=严格 1=放宽间距 2=音域±2 3=音域±4
     //   tonesOverride（可选，离调专用）：直接给定和弦音（含 role / scaleDegree），
     //     绕开 chordToneSpelled 的"调内查表"。不传 = 旧行为。
-    function buildFourPartCandidates(scale, degree, seventh, allowInversion, allowSecondInv, relax, tonesOverride, forceRootDbl) {
+    //   topIdx（第四十四轮，可选）：必须落在**高声部 S** 的那个音在 tones 里的下标。
+    //     九和弦专用（九音必须最上面，教材硬规则），-1 = 不限制。
+    //     ★ 一旦给了 topIdx，同时强制：只用原位（九和弦没有转位写法）、
+    //       且最高音必须比低音高九度以上（小九度 13 也算，大三和弦上叠的就是 13）。
+    const FOUR_NINTH_MIN = 13;      // 九音相对低音的最小音程（小九度）
+    // 上限：九音只写在"九度"这个位置（13/14），最宽放到 16。
+    //   ★ 不设上限时优化器会为了"高声部别动"把九音甩到低音上方 26 个半音（= 十六度），
+    //     音高对、谱面却是两个八度开外的散架子，四部写法里没有这种排列。
+    const FOUR_NINTH_MAX = 16;
+    function buildFourPartCandidates(scale, degree, seventh, allowInversion, allowSecondInv, relax, tonesOverride, forceRootDbl, topIdx) {
         relax = relax || 0;
+        const tops = (typeof topIdx === 'number' && topIdx >= 0) ? topIdx : -1;
         const tones = tonesOverride || chordToneSpelled(scale, degree, seventh);
         const n = tones.length;
 
         let invList = allowInversion ? Array.from({ length: n }, (_, i) => i) : [0];
         if (allowSecondInv === false) invList = invList.filter((inv) => !(inv === 2 && !seventh));
+        // 九和弦：恒原位（低音必是根音，否则"九度"这个音程关系就说不清了）
+        if (tops >= 0) invList = [0];
+        // ★ 必须落在高声部的是哪**一个音**（按音比按 index 可靠：下方 upperTones 会过滤掉低音，
+        //   tones 的下标和 upperTones 的下标不是一回事 —— 这里踩过一次，九和弦因此一个候选都生不出）
+        const topTone = tops >= 0 ? tones[tops] : null;
 
         // relax：0 严格 / 1 放宽间距 / 2 音域±2 / 3 音域±4 / 4 间距±4 / 5 间距±8
         //        6 = 深度枚举（仅供"回溯修补"在极罕见死锁时兜底，音源有 ±24 半音移调兜底）
@@ -694,6 +729,8 @@
                 //   连"避开声部超越/平行"的余地都没有 —— 这才是四部配声不平稳的根因。
                 //   排列音位正是四部和声写作的核心动作（就近解决、共同音保持）。
                 for (const perm of PERM3) {
+                    // 九和弦：九音必须去高声部（perm[2] = 摆到 S 的那个音）
+                    if (topTone && upperTones[perm[2]].pc !== topTone.pc) continue;
                     const o0 = opts[perm[0]][0];
                     const o1 = opts[perm[1]][1];
                     const o2 = opts[perm[2]][2];
@@ -707,6 +744,9 @@
                             for (const t2 of o2) {
                                 if (t2 <= t1) continue;
                                 if (t2 - t1 > FOUR_GAP.sa + gapUp) continue;
+                                // 九音与低音的音程必须真的是"九度"（八度 + 二度）
+                                if (tops >= 0 && t2 - bassMidi < FOUR_NINTH_MIN) continue;
+                                if (tops >= 0 && t2 - bassMidi > FOUR_NINTH_MAX) continue;
                                 const arr = [bassMidi, t0, t1, t2];
                                 const key = inv + ':' + arr.join(',');
                                 if (seen.has(key)) continue;
@@ -839,6 +879,21 @@
                         else cost += P4.resolveBad;
                     }
                 }
+                // 前和弦的九音（第四十四轮）：教材口径 —— 九音是"挂"在八度上的二度，
+                //   必须**下行级进**解决（或保持不动），绝不能往上跑。
+                //   它结构上一定在高声部 S，所以这条规则实际只约束 S 的走向。
+                //   ★ 只给软代价不给硬过滤：下一小节可能也是九和弦（S 要留给新的九音），
+                //     硬拦会让整个阶梯一候选不剩 → 退到兜底路径，反而破坏其它声部规则。
+                if (ctx.prevNinthPc != null) {
+                    for (let i = 0; i < 4; i++) {
+                        const pc = (((a[i] % 12) + 12) % 12);
+                        if (pc !== ctx.prevNinthPc) continue;
+                        const mv = b[i] - a[i];
+                        if (mv === -1 || mv === -2) cost += P4.ninthOk;           // 下行级进：正解
+                        else if (mv === 0) cost += P4.ninthHold;                  // 保持：没解决
+                        else cost += P4.ninthBad;                                 // 上行/大跳：错
+                    }
+                }
             }
         } else {
             // 首和弦：低音靠近 C3、高音靠近 C5，别一上来就极端
@@ -940,7 +995,8 @@
             midis: arr,
             inv: 0,
             doubledRole: seventh ? null : tones[idx].role,
-            doubledPc: seventh ? null : tones[idx].pc
+            doubledPc: seventh ? null : tones[idx].pc,
+            clean: false            // 兜底路径不做任何声部校验 → 不算干净
         };
     }
 
@@ -981,16 +1037,27 @@
     //   即"放宽音域"永远优先于"放宽声部规则" —— 音域越界比声部超越轻得多。
     //   规则集：① 无平行五八度 + 无超越 + 内声部跳进 ≤ cap
     //          ② 无平行 + 无超越   ③ 只保证无平行   ④ 任意
-    function chooseFourPartVoicing(scale, degree, seventh, prevMidis, allowInversion, isLast, allowSecondInv, ctx, tonesOverride, forceRootDbl, resolveReq) {
-        const pick = (cands) => {
+    function chooseFourPartVoicing(scale, degree, seventh, prevMidis, allowInversion, isLast, allowSecondInv, ctx, tonesOverride, forceRootDbl, resolveReq, ninth) {
+        // ★ 第四十四轮：pick 顺便把"这一版够不够干净"标在候选上。
+        //   判据 = 无平行五八度 + 无声部超越（教材里的两条硬错误）。
+        //   为什么需要这个标记：九和弦在原位、九音又锁死在高声部，形态几乎被写死，
+        //   一旦碰上"怎么排都要平行五八"的小节，就只能退到 fbNoOverlap/fbAny。
+        //   调用方拿到 clean=false 时**放弃九音、退回七和弦** —— 声部规则优先于色彩音。
+        const pick = (cands, clean) => {
             const scored = cands.map((c) => ({ c, cost: fourPartCost(c, prevMidis, isLast, ctx) }));
             scored.sort((x, y) => x.cost - y.cost);
             const best = scored[0].cost;
             const pool = scored.filter((s) => s.cost <= best + P4.poolWidth).map((s) => s.c);
-            return pool[Math.floor(Math.random() * pool.length)];
+            const c = pool[Math.floor(Math.random() * pool.length)];
+            c.clean = (clean !== false);
+            return c;
         };
+        // 九和弦（第四十四轮）：音表换成「省五音」的 根-三-七-九，九音锁在高声部。
+        //   ★ 离调小节不会走这条路（doGenerate 里 ninth 恒要求 !ap），所以两者不冲突。
+        const nTones = ninth ? (tonesOverride || fourPartNinthTones(scale, degree)) : tonesOverride;
+        const topIdx = ninth ? 3 : -1;
         const build = (relax) => buildFourPartCandidates(
-            scale, degree, seventh, allowInversion, allowSecondInv, relax, tonesOverride, forceRootDbl
+            scale, degree, seventh, allowInversion, allowSecondInv, relax, nTones, forceRootDbl, topIdx
         );
 
         // 离调解决小节：副调导音所在的**那个声部**必须上行小二度进主音。
@@ -1018,10 +1085,21 @@
                 if (cands.length) return pick(cands);
             }
             FOURPART_STATS.fallback++;
-            return fallbackFourPart(scale, degree, seventh, tonesOverride);
+            return fallbackFourPart(scale, degree, seventh, nTones);
         }
 
         const a = prevMidis;
+        // 九音解决（第四十四轮）：上一小节带九音时，本小节的高声部**尽量不要高于**它。
+        //   教材里九音必须下行级进；不能下行时至少是"保持"或更低，绝不是往上跳。
+        //   做成"有就优先、没有就算了"的软硬两档：候选池里存在不往上的解就只从里面挑，
+        //   全都得往上时（结构上躲不开）才放开 —— 硬拦会让整个阶梯一候选不剩、退到兜底。
+        const noUp = (cands) => {
+            if (ctx && ctx.prevNinthPc != null && a && a.length === 4) {
+                const t = cands.filter((c) => c.midis[3] <= a[3]);
+                if (t.length) return t;
+            }
+            return cands;
+        };
         let fbNoCap = null;         // 无平行 + 无超越
         let fbNoOverlap = null;     // 只保证无平行
         let fbAny = null;           // 任何候选
@@ -1044,12 +1122,12 @@
             if (clean.length) {
                 if (rv < 0) {
                     FOURPART_STATS.cleanStep[step]++;
-                    return pick(clean);
+                    return pick(noUp(clean));
                 }
                 const ok = clean.filter((c) => resolvesOk(c.midis));
                 if (ok.length) {
                     FOURPART_STATS.cleanStep[step]++;
-                    return pick(ok);
+                    return pick(noUp(ok));
                 }
                 // 能配但解决不了 → 记下最严的那一池，继续放宽去找能解决的
                 if (!fbStrict) fbStrict = clean;
@@ -1072,10 +1150,10 @@
         //     声部规则比"导音这一次没上去"更重要，听起来差得少。
         if (fbStrict) { FOURPART_STATS.fbNoCap++; return pick(fbStrict); }
         if (fbNoCap) { FOURPART_STATS.fbNoCap++; return pick(fbNoCap); }
-        if (fbNoOverlap) { FOURPART_STATS.fbNoOverlap++; return pick(fbNoOverlap); }
-        if (fbAny) { FOURPART_STATS.fbAny++; return pick(fbAny); }
+        if (fbNoOverlap) { FOURPART_STATS.fbNoOverlap++; return pick(fbNoOverlap, false); }
+        if (fbAny) { FOURPART_STATS.fbAny++; return pick(fbAny, false); }
         FOURPART_STATS.fallback++;
-        return fallbackFourPart(scale, degree, seventh, tonesOverride);
+        return fallbackFourPart(scale, degree, seventh, nTones);
     }
 
     // 把一个候选写回 chord 对象（midis / notes / doubledRole 同步）
@@ -1110,9 +1188,15 @@
                     scale, chord.applied ? chord.applied.localDegree : chord.degree,
                     !!chord.seventh, true, chord.applied ? false : allowSecondInv, relax,
                     // 音集覆盖：离调用自己的 tone 表；无调性按 rootPc + 性质现算；
+                    //   九和弦（第四十四轮）用"省五音"的 4 音表（根-三-七-九）——
+                    //   不传的话会被当成普通七和弦重排，九音会掉进内声部。
                     // 自然和弦传 null → 内部按调内级数查表（有调性路径一个字节都没变）。
                     chord.applied ? appliedTones(chord.applied)
-                        : (chord.rootPc != null ? atonalTones(chord.rootPc, chord.quality).tones : null)
+                        : chord.ninth ? fourPartNinthTones(scale, chord.degree)
+                            : (chord.rootPc != null ? atonalTones(chord.rootPc, chord.quality).tones : null),
+                    undefined,
+                    // 九音必须留在高声部：不传这个下标，修补一次九音就掉到中声部去了。
+                    chord.ninth ? 3 : -1
                 ).filter((c) => c.inv === chord.inversion);
 
                 const before = (m >= 2) ? chords[m - 2].midis : null;
@@ -1179,7 +1263,8 @@
     //     例：5/Ⅴ、5⁷/Ⅴ、5⁶₅/Ⅴ、5⁷/ⅱ
     //   ★ 转位数字永远挂在**左边**那个（它属于副调内的和弦），与教材一致。
     function romanOf(degree, seventh, inversion, applied, ninth) {
-        // 九和弦（第四十一轮）：只有流行键盘模式会出，恒原位，数字记法直接写 9。
+        // 九和弦（第四十一轮）：只出现在流行键盘 / 四部和声里（第四十四轮扩到四部），
+        //   恒原位（四部九和弦没有转位写法、流行键盘也不用转位），数字记法直接写 9。
         //   ★ 第四十三轮：改用上标 ⁹（以前是普通 '9'，和 ⁷ 不是一个字号，谱面上看着像两个系统）。
         if (ninth) return (ROMAN_MAJOR[degree - 1] || '') + SUP[9];
         const fig = figuresOf(seventh, inversion).text;
@@ -1595,6 +1680,7 @@
         };
 
         let pendingResolve = null;    // 上一小节是副属和弦时，它留给这一小节解决要求
+        let prevNinth = false;        // 上一小节是不是九和弦（四部不连用，见下）
         for (let i = 0; i < N; i++) {
             const ap = appliedAt ? (appliedAt.get(i) || null) : null;
             // 这一小节是不是某个离调事件的"解决到达点"（自然和弦，但要三和弦 + 重复根音）
@@ -1611,11 +1697,22 @@
                 : ((isFirst || isLast)
                     ? false
                     : (Math.random() * 100 < (settings.seventhProb[degree] || 0)));
-            // 九音（第四十一轮）：**条件概率** —— 只有这一小节已经是七和弦，才再掷一次。
-            //   离调小节恒 false（用户定：离调仍是七和弦）；首尾恒三和弦，天然不命中。
-            //   只在流行键盘模式生效 —— 另两种模式 4 个声部/3 个音装不下九音。
-            const ninth = !!(popMode && seventh && !ap && settings.ninthProb &&
-                (Math.random() * 100 < (settings.ninthProb[degree] || 0)));
+            // 九音（第四十一轮，第四十四轮扩到四部和声）：**条件概率** ——
+            //   只有这一小节已经是七和弦，才再掷一次。离调小节恒 false（用户定：离调仍是七和弦）；
+            //   首尾恒三和弦，天然不命中。
+            //   生效范围 = 流行键盘（5 个音：左手根+五 / 右手 3-7-9）+ 四部和声（省五音，九音进高声部）。
+            //   键盘和声（三音柱式）装不下 5 个音，恒不出。
+            //   ★ 概率为 0 时**连骰子都不掷** —— 默认配置下随机流与改造前逐字节一致，
+            //     和声回归的 sha256 黄金值才不会漂。
+            const nProb = (settings.ninthProb && settings.ninthProb[degree]) || 0;
+            //   ★ 四部还多一条「九和弦不连用」：九音必须下行级进解决，
+            //     而它又必须占着高声部 —— 两个九和弦挨在一起时，高声部既要当下一个九音
+            //     又要"从上一个九音下行二度"，结构上不可能同时成立（实测连用时下行解决率只有 8%）。
+            //     教材里九和弦本来就是色彩和弦、不做连续平行使用，所以直接不掷这一颗骰子。
+            //     流行键盘不受此限（那边不做声部进行，九音连用就是正常的 3-7-9 平行块）。
+            let ninth = !!((popMode || fourPart) && seventh && !ap && nProb > 0 &&
+                !(fourPart && prevNinth) &&
+                (Math.random() * 100 < nProb));
             // ★ 解决到达的那一小节也是**自然和弦**，所以它的三/七和弦跟「自然和弦」页走
             //   （用户 2026-10-24 明确：目标不一定是七和弦，规则听自然页的）。
             //   代价：如果它是七和弦，四个音各一次 → 主音只剩低音一处，
@@ -1637,16 +1734,30 @@
             //   看的是它在**副调**里的身份（5/x、4/x 重复根音，2/x 重复三音）
             const vDeg = ap ? ap.localDegree : degree;
 
-            const v = fourPart
-                ? chooseFourPartVoicing(
+            let v;
+            if (fourPart) {
+                v = chooseFourPartVoicing(
                     scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, ctx,
-                    apTones, resolveIsTriad || undefined, resolveReqUse
-                )
-                : popMode
-                    ? choosePopVoicing(scale, vDeg, seventh, ninth, prevMidis, apPcs)
-                    : chooseVoicing(
-                        scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, apPcs
+                    apTones, resolveIsTriad || undefined, resolveReqUse, ninth
+                );
+                // ★ 第四十四轮：九和弦的形态被写死（原位 + 九音在高声部 + 省五音），
+                //   碰上"怎么排都躲不开平行五八度/声部超越"的小节就只能硬着头皮上。
+                //   这时**放弃九音、退回七和弦**（七和弦有 4 个转位 × 各种排列，一定能配干净）。
+                //   取舍：声部规则是教材硬错误，九音只是色彩 —— 不能为了色彩破规则。
+                if (ninth && v.clean === false) {
+                    ninth = false;
+                    v = chooseFourPartVoicing(
+                        scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, ctx,
+                        apTones, resolveIsTriad || undefined, resolveReqUse, false
                     );
+                }
+            } else if (popMode) {
+                v = choosePopVoicing(scale, vDeg, seventh, ninth, prevMidis, apPcs);
+            } else {
+                v = chooseVoicing(
+                    scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, apPcs
+                );
+            }
             prevMidis = v.midis;
 
             const notes = ap
@@ -1685,11 +1796,15 @@
             ctx.prevSeventhPc = seventh
                 ? (ap ? apTones[3].pc : chordToneSpelled(scale, degree, true)[3].pc)
                 : null;
+            // 九音（第四十四轮）：把"这一小节九音是哪个 pc"留给下一小节，
+            //   fourPartCost 据此罚"九音往上跑"、奖"下行级进解决"。非九和弦传 null。
+            ctx.prevNinthPc = ninth ? chordToneSpelled(scale, degree, true, true)[4].pc : null;
             ctx.leadingPc = ap ? (nextResolves ? ap.leadingPc : null) : scale[6].pc;
             ctx.tonicPc = ap ? ap.targetPc : scale[0].pc;
             pendingResolve = (ap && nextResolves)
                 ? { leadingPc: ap.leadingPc, tonicPc: ap.targetPc }
                 : null;
+            prevNinth = ninth;      // 四部「九和弦不连用」用；降级成七和弦时这里已是 false
         }
 
         // 四部模式：贪心配声偶尔会因上一小节的极端摆位而"死锁"出超越 →
@@ -1818,7 +1933,10 @@
         //   这套配声的形态本身就是"左手低音 + 右手高音块"，压进一个八度会把
         //   九音折回到根音旁边（变成刺耳的二度），也会把左手根音抬到右手堆里。
         //   压缩只降八度不改音名，视觉与听觉都会彻底走样 → 直接原样返回。
-        if (settings.voicingMode === 'pop') {
+        // ★ 第四十四轮：四部和声的九和弦同理 —— 九度必然超过八度，压进来就把九音
+        //   折成二度（音名还是"九音"，音高却成了"二度"），卡片数字与谱面也会打架。
+        //   所以按**和弦**判断，而不是按模式判断。
+        if (settings.voicingMode === 'pop' || (chord && chord.ninth)) {
             return {
                 midis: (chord && chord.midis) ? chord.midis.slice() : [],
                 notes: (chord && chord.notes) ? chord.notes.slice() : []
@@ -3610,7 +3728,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 44;
+    const APP_VERSION = 45;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -7257,7 +7375,7 @@
     }
 
     // 和弦音角色 → 中文标注（chordToneSpelled 返回的是英文 role）
-    const AID_ROLE_LABEL = { root: '根音', third: '三音', fifth: '五音', seventh: '七音' };
+    const AID_ROLE_LABEL = { root: '根音', third: '三音', fifth: '五音', seventh: '七音', ninth: '九音' };
 
     // 辅助窗右侧那一列：**按音高自下而上**（最低音在最下）。
     //   ★ 第十六轮改（用户 2026-10-06）：
@@ -7292,7 +7410,7 @@
             ? appliedTones(c.applied)
             : (c.rootPc != null
                 ? atonalTones(c.rootPc, c.quality).tones
-                : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh) : []));
+                : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh, !!c.ninth) : []));
         aidNotes.forEach((n, i) => {                  // notes 已按 MIDI 升序（低 → 高）
             if (!n || !n.letter) return;
             const midi = midis[i];
@@ -7973,6 +8091,7 @@
         _generateChordProgression: generateChordProgression,
         _doubledToneIndex: doubledToneIndex,
         _buildFourPartCandidates: buildFourPartCandidates,
+        _fourPartNinthTones: fourPartNinthTones,
         _fourPartCost: fourPartCost,
         _chooseFourPartVoicing: chooseFourPartVoicing,
         _hasParallel: hasParallel,
