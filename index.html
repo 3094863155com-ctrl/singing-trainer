@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=46"></script>
+<script src="chord_recognition.js?v=47"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=46" defer></script>
+<script src="social.js?v=47" defer></script>
     <style>
         * {
             margin: 0;
@@ -1300,6 +1300,138 @@
             height: 3px;
             border-radius: 3px 3px 0 0;
             background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        }
+
+        /* ============================================================
+           渐进模糊：滚动内容在「上边缘 / 下边缘」逐渐化开（第 46 轮）
+           ------------------------------------------------------------
+           用户给的参照：rit3zh 的活动页（expo-backdrop 的 ProgressiveBlurView）。
+           要点是**没有硬边**——照片滚到顶栏底下、播放条上面时不是被一刀切掉，
+           而是一路糊过去，颜色还透得出来；中间正在看的那条始终清楚。
+
+           做法（原生 CSS，不引库）：
+             ① 一条 fixed 的宽带子，里面叠 5 层 backdrop-filter；
+             ② 每层从边缘量一段「满强度」的距离（--pb-hold，正好是顶栏 / 悬浮件
+                盖住的那一段，内容钻进去就该全糊），之后按各自的长度化到透明；
+                糊得最狠的那层化得最快，最清的那层伸得最远 → 越往里越清楚；
+             ③ 最上面再盖一道「雾」（页面底色渐变）：文字压到只剩轮廓，
+                但色块、颜色还能透上来。雾和底色同色，所以带子里空着时它隐形；
+             ④ 只有真滚起来才亮（data-on），回顶/到底就淡出 —— 静止时和平常一样。
+
+           上下两边**同一套公式**（只是 hold 取值不同）+ 镜像方向，改一处两边都变。
+
+           旋钮：
+             --pb-ramp   从"被盖住的那段"再往里化开多长（越大过渡越长）
+             --pb-tint   边缘处的雾浓度（调小 = 更透色，调大 = 更像毛玻璃）
+             五层的 --pb-b / --pb-r   糊度 / 这一层化开的长度（见下方 nth-child）
+           ★ 整块可整体删掉：删 <div id="pb-top"> / <div id="pb-bot"> + 这一段
+             CSS + 页面末尾那段 scroll 监听，再把 .app-nav 的底色改回 var(--bg-page)。
+           ============================================================ */
+        .scroll-edge {
+            --pb-ramp: 110px;         /* 过渡长度（不含被盖住的那段） */
+            --pb-hold: var(--nav-h);  /* 满强度段：上边=顶栏高，下边=底部悬浮件高 */
+            --pb-tint: rgba(246, 247, 249, 0.64);
+            position: fixed;
+            left: 0;
+            right: 0;
+            z-index: 39;              /* 压在内容之上、顶栏(z-40)之下、悬浮件(z-50)之下 */
+            height: calc(var(--pb-hold) + var(--pb-ramp));
+            pointer-events: none;      /* 绝不能挡住下面的点击/滚动 */
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.2s linear, visibility 0s linear 0.2s;
+        }
+
+        /* 只在「真有内容滚到边上」时亮起 */
+        .scroll-edge[data-on="1"] {
+            opacity: 1;
+            visibility: visible;
+            transition: opacity 0.2s linear, visibility 0s linear 0s;
+        }
+
+        .scroll-edge--top {
+            top: 0;
+        }
+
+        /* 下边缘：从屏幕最底铺上来，一直盖到悬浮件上沿再往上 110px。
+           --pb-bot-off 由 JS 实测（播放条 + 「设置未应用」条是一坨，量最上沿）。
+           ★ 铺到 bottom:0 而不是停在悬浮件上沿：悬浮件是浮着的胶囊，
+             四周有缝，内容若停在它上沿就"缝里还是清楚的"，像被贴了张纸。 */
+        .scroll-edge--bottom {
+            bottom: 0;
+            --pb-hold: var(--pb-bot-off, calc(var(--mp-safe) + var(--mp-bar-h)));
+        }
+
+        /* 一层 = 一次高斯的叠加。mask 只管"这一层还剩多少"：
+           从边到 --pb-hold 满强度，之后在 --pb-r 里线性化到 0。 */
+        .scroll-edge__layer {
+            --pb-dir: to bottom;
+            position: absolute;
+            inset: 0;
+            -webkit-backdrop-filter: blur(var(--pb-b));
+            backdrop-filter: blur(var(--pb-b));
+            -webkit-mask-image: linear-gradient(var(--pb-dir), #000 0,
+                #000 var(--pb-hold), transparent calc(var(--pb-hold) + var(--pb-r)));
+            mask-image: linear-gradient(var(--pb-dir), #000 0,
+                #000 var(--pb-hold), transparent calc(var(--pb-hold) + var(--pb-r)));
+            -webkit-mask-repeat: no-repeat;
+            mask-repeat: no-repeat;
+            -webkit-mask-size: 100% 100%;
+            mask-size: 100% 100%;
+        }
+
+        /* ★ 糊得最狠的那层管得最短（贴着边），越清的那层伸得越深。
+           反过来写（大模糊铺满全带）会变成"整条带子一样糊"，看不出渐变。 */
+        .scroll-edge__layer:nth-child(1) { --pb-b: 12px;  --pb-r: 32px; }
+        .scroll-edge__layer:nth-child(2) { --pb-b: 8px;   --pb-r: 53px; }
+        .scroll-edge__layer:nth-child(3) { --pb-b: 5px;   --pb-r: 74px; }
+        .scroll-edge__layer:nth-child(4) { --pb-b: 3px;   --pb-r: 92px; }
+        .scroll-edge__layer:nth-child(5) { --pb-b: 1.5px; --pb-r: 110px; }
+
+        /* 雾：页面底色的渐变，和 --bg-page 同色 → 底下空着时看不见它 */
+        .scroll-edge__tint {
+            --pb-dir: to bottom;
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(var(--pb-dir),
+                var(--pb-tint) 0,
+                var(--pb-tint) var(--pb-hold),
+                rgba(246, 247, 249, 0.34) calc(var(--pb-hold) + 36px),
+                rgba(246, 247, 249, 0) calc(var(--pb-hold) + var(--pb-ramp)));
+        }
+
+        /* 下边缘 = 同一套公式镜像（方向朝上、hold 换成底部那坨的高度） */
+        .scroll-edge--bottom .scroll-edge__layer,
+        .scroll-edge--bottom .scroll-edge__tint {
+            --pb-dir: to top;
+        }
+
+        /* 顶栏让位：实底 + 下缘硬线 → 半透明 + 无硬线。
+           底色 = --bg-page 加 66% 不透明（内容在底下滚过时能透出颜色）；
+           那根 1px 分界线改由 ::after 画 —— 静止时在，一滚起来就淡掉（见下）。 */
+        .app-nav {
+            background: rgba(246, 247, 249, 0.66);
+            border-bottom-color: transparent;
+        }
+
+        /* 静止时的分界线（等价于原来的 border-bottom）；滚动时淡出，
+           否则会出现"硬线压在糊掉的内容上"——正是这一轮要消掉的东西。
+           ★ -1px 那条是 border 的位置：写在 padding box 的 0 上会盖住 tab 底部
+             那条 3px 紫色指示条（伪元素比子元素后画），所以往下让出 1px。 */
+        .app-nav::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -1px;
+            height: 1px;
+            background: var(--border-strong);
+            opacity: 1;
+            transition: opacity 0.2s linear;
+        }
+
+        .app-nav[data-scrolled="1"]::after {
+            opacity: 0;
         }
 
         /* 和弦谱面容器（与 #sheet-music 同样式） */
@@ -2941,6 +3073,19 @@
             <button class="app-tab app-tab--icon" data-root="social" aria-label="社交"><svg class="ic" aria-hidden="true"><use href="#i-social"/></svg></button>
         </nav>
 
+        <!-- 渐进模糊的两条边（第 46 轮）：上边贴着顶栏往下化开，下边贴着播放条往上化开。
+             五层 backdrop-blur 各管一段高度 → 越靠边越糊；最后盖一道底色雾。
+             层数与每层的糊度/高度都在 CSS 的 .scroll-edge__layer:nth-child() 里。
+             ★ pointer-events:none，绝不能挡住下面的点击。 -->
+        <div class="scroll-edge scroll-edge--top" id="pb-top" aria-hidden="true">
+            <i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i>
+            <span class="scroll-edge__tint"></span>
+        </div>
+        <div class="scroll-edge scroll-edge--bottom" id="pb-bot" aria-hidden="true">
+            <i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i><i class="scroll-edge__layer"></i>
+            <span class="scroll-edge__tint"></span>
+        </div>
+
 
         <!-- ============ 视图二：和弦听辨（默认视图） ============ -->
         <div id="view-chord">
@@ -3837,6 +3982,7 @@
             if (root === 'social' && window.SocialUI) {
                 SocialUI.onShow(); // 切过来立刻探测连接 + 拉新留言
             }
+            pbSync();               // 换页后内容高度变了，两条模糊边要重判
         }
 
         if (appNav) {
@@ -3847,6 +3993,60 @@
 
         // 供 chord_recognition.js 的「错题练习」从数据库页切回主页
         window.appRouter = { goHome: () => switchRoot('home') };
+
+        // ============================================================
+        // 渐进模糊的两条边（第 46 轮）
+        //   · 顶边：滚过 1px 就亮 —— 内容开始钻到顶栏底下，该化了
+        //   · 底边：滚到底才灭 —— 下面还有内容才可能钻进带子里
+        //   · 底边的锚点要实测：播放条 + 「设置未应用」条是一坨（#chord-mp），
+        //     应用条一冒出来整坨上移，所以量的是这坨的最上沿，不是条子本身。
+        //     结果写进 --pb-bot-off，只有值变了才写，避免每帧触发样式重算。
+        //   · 静止时两条带子都是 display 级的关（visibility:hidden），
+        //     不参与合成 —— 叠 5 层 backdrop-filter 不该在不动的时候烧电。
+        // ============================================================
+        const pbTop = document.getElementById('pb-top');
+        const pbBot = document.getElementById('pb-bot');
+        const pbBar = document.getElementById('chord-mp');
+        let pbLastOff = -1;
+        function pbSync() {
+            if (!pbTop || !pbBot) return;
+            const doc = document.documentElement;
+            const y = window.scrollY || doc.scrollTop || 0;
+            const max = Math.max(0, doc.scrollHeight - window.innerHeight);
+            pbTop.dataset.on = y > 1 ? '1' : '0';
+            pbBot.dataset.on = max - y > 1 ? '1' : '0';
+            // 顶栏那根 1px 分界线跟着同一条判据淡出（内容钻到底下了就不该有硬线）
+            if (appNav) appNav.dataset.scrolled = pbTop.dataset.on;
+            if (pbBar) {
+                const br = pbBar.getBoundingClientRect();
+                if (br.height > 0) {
+                    const off = Math.max(0, Math.round(window.innerHeight - br.top));
+                    if (off !== pbLastOff) {
+                        pbLastOff = off;
+                        doc.style.setProperty('--pb-bot-off', off + 'px');
+                    }
+                } else if (pbLastOff !== -1) {
+                    // 播放条被藏起来时退回 CSS 默认值，别把带子顶到屏幕外
+                    pbLastOff = -1;
+                    doc.style.removeProperty('--pb-bot-off');
+                }
+            }
+        }
+        let pbRaf = 0;
+        function pbSyncSoon() {
+            if (pbRaf) return;
+            pbRaf = requestAnimationFrame(() => { pbRaf = 0; pbSync(); });
+        }
+        addEventListener('scroll', pbSyncSoon, { passive: true });
+        addEventListener('resize', pbSyncSoon);
+        // 折叠板块 / 弹出浮窗都会改内容高度，边界的"该不该亮"跟着变
+        if (window.ResizeObserver) {
+            const pbRO = new ResizeObserver(pbSyncSoon);
+            pbRO.observe(document.body);
+            // 底部这坨的高度也会变（「设置未应用」条冒出来时整坨长高）→ 锚点要跟着重算
+            if (pbBar) pbRO.observe(pbBar);
+        }
+        pbSync();
 
         // ★ 默认页面 =「主页（和弦听辨）」。
         //   switchRoot 会顺带调 ChordRecognition.activate()，
