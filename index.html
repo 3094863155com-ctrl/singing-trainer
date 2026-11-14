@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=41"></script>
+<script src="chord_recognition.js?v=42"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=41" defer></script>
+<script src="social.js?v=42" defer></script>
     <style>
         * {
             margin: 0;
@@ -631,23 +631,110 @@
         }
 
         /* 「参与级数」折叠行（唯一使用 .srow--btn 的元素）
-           ★ 第三十七轮（用户："这个选项折叠视觉上要做处理，不然跟其他选项看上去一样，
-             不知道他里面实际上包含了这么多东西"）：
-             整行做成一条**内嵌浅灰块**（左右各留 10px 内边距、10px 圆角），
-             和普通白底行区分开 —— 读起来是"一个能展开的容器"，不是一条普通选项。
-             右侧再给「已开/总数」的小计数（.dsum__count）+ 7 个级数 chip 概览。 */
+           ★ 第三十七轮把整行做成内嵌浅灰块 —— 用户反馈"还是没有差异化，
+             看不出里面包含了很多子选项"。第四十一轮改成**真正的容器**：
+             ① 描边 + 白底 + 轻微投影 + 左右内缩（和普通白底行不再同层）；
+             ② 左侧加一个「列表」图标，明示"这里面装的是一组东西"；
+             ③ 展开后边框染成品牌色（is-open），读起来是"这个容器现在是打开的"。
+             右侧仍给「已开/总数」计数（.dsum__count）+ 7 个级数 chip 概览。 */
         .srow--btn {
-            padding: 0 10px;
-            background: rgba(16, 24, 40, 0.045);
-            border-radius: 10px;
+            margin: 12px 10px 2px;
+            padding: 0 8px 0 12px;
+            background: var(--surface);
+            border: 1px solid rgba(16, 24, 40, 0.10);
+            border-radius: 12px;
+            box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
             cursor: pointer;
             -webkit-user-select: none;
             user-select: none;
-            transition: background 0.18s ease;
+            transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
         }
 
         .srow--btn.is-open {
-            background: rgba(16, 24, 40, 0.028);
+            background: rgba(220, 38, 38, 0.04);
+            border-color: rgba(220, 38, 38, 0.22);
+            box-shadow: none;
+        }
+
+        /* 图标 + 文字的组合：让「参与级数」这一行看起来是一个入口，不是一条选项 */
+        .srow--btn > span:first-child {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .srow--btn .srow__ic {
+            --ic: 17px;
+            color: var(--text-secondary);
+            flex: 0 0 auto;
+        }
+
+        .srow--btn.is-open .srow__ic {
+            color: #dc2626;
+        }
+
+        /* 容器变窄（左右各内缩 10px）后，7 个级数 chip 放不下会溢出被裁掉 ——
+           允许换行，右侧内容整块右对齐。 */
+        .srow--btn .srow__side {
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            row-gap: 4px;
+            min-width: 0;
+        }
+
+        .srow--btn .dsum {
+            flex-wrap: wrap;
+            justify-content: flex-end;
+            row-gap: 3px;
+        }
+
+        /* 折叠行右侧：chevron 绝对定位钉在行尾，把整块宽度让给「7/7 + 级数 chip」，
+           否则三个元素各自换行会变成三行高。 */
+        .srow--btn {
+            position: relative;
+            padding-right: 36px;
+        }
+
+        .srow--btn .srow__chev {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            margin-top: -15px;
+        }
+
+        /* 这一行里 7 个 chip 自己就说明了"有 7 项"，再挤一个「7/7」必然换行 ——
+           计数只在展开后的正式列表里保留。chip 也缩一档，保证 7 个排成一行。 */
+        .srow--btn .dsum__count {
+            display: none;
+        }
+
+        /* 7 个 chip 在 340px 宽里横着排必然换行，而且换得难看（最后两个各占一行）。
+           改成"两行式"的竖排容器：第一行图标 + 名称（箭头绝对定位钉在右侧），
+           第二行整排 chip 左对齐 —— 换行变成有意设计，而不是挤不下。 */
+        .srow--btn {
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: center;
+            gap: 6px;
+            padding-top: 10px;
+            padding-bottom: 10px;
+        }
+
+        .srow--btn .srow__side {
+            width: 100%;
+            justify-content: flex-start;
+        }
+
+        .srow--btn .dsum {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: flex-start;
+            gap: 3px;
+        }
+
+        .srow--btn .dsum i {
+            font-size: 11px;
+            padding: 2px 4px;
         }
 
         /* 「转位没勾 → 6₄ 也勾不了」：整行压暗（用户 2026-10-24 明确） */
@@ -720,29 +807,54 @@
         }
 
         /* 概率视图：滑块与读数同比放大（轨道 96 → 132px，内边距回到 9px 与把手对齐） */
-        #degree-grid[data-view="prob"] .drow .meter {
+        #degree-grid:is([data-view="prob"], [data-view="ninth"]) .drow .meter {
             --meter-pad: 9px;
             gap: 10px;
         }
 
-        #degree-grid[data-view="prob"] .drow .meter__track {
+        #degree-grid:is([data-view="prob"], [data-view="ninth"]) .drow .meter__track {
             width: 132px;
             height: 22px;
         }
 
-        #degree-grid[data-view="prob"] .drow .meter--sm i {
+        #degree-grid:is([data-view="prob"], [data-view="ninth"]) .drow .meter--sm i {
             height: 10px;
         }
 
-        #degree-grid[data-view="prob"] .drow .meter__thumb {
+        #degree-grid:is([data-view="prob"], [data-view="ninth"]) .drow .meter__thumb {
             width: 18px;
             height: 18px;
             margin: -9px 0 0 -9px;
         }
 
-        #degree-grid[data-view="prob"] .drow .meter__val {
+        #degree-grid:is([data-view="prob"], [data-view="ninth"]) .drow .meter__val {
             min-width: 46px;
             font-size: 14px;
+        }
+
+        /* ------------------------------------------------------------
+           九和弦概率视图（第四十一轮）
+           九和弦是**条件概率**：只有这一小节先成为七和弦，才可能继续加九音。
+           所以这一屏里：
+             · 七和弦概率为 0（或未勾选）的级数行压暗 —— 逻辑上永远出不了九音；
+             · 滑块样式与七和弦视图完全一致（共用 :is() 那组放大规则）。
+           ============================================================ */
+        #degree-grid[data-view="ninth"] .drow [data-role="pick"] {
+            display: none;
+        }
+
+        #degree-grid[data-view="ninth"] .drow [data-role="prob"] {
+            display: none;
+        }
+
+        /* 另外两个视图里，九和弦那条滑块永远不出现 */
+        #degree-grid[data-view="switch"] .drow [data-role="nprob"],
+        #degree-grid[data-view="prob"] .drow [data-role="nprob"] {
+            display: none;
+        }
+
+        #degree-grid[data-view="ninth"] .drow.no-seventh {
+            opacity: 0.42;
         }
 
         /* 折叠态概览：直接摆级数罗马数字（用户："标上罗马数字，不用文字说明"）。
@@ -2767,6 +2879,15 @@
             <path d="M14.8 4.6H6.9a2.9 2.9 0 0 0-2.9 2.9v4a2.9 2.9 0 0 0 2.9 2.9h.5v3.1l3.5-3.1h3.9a2.9 2.9 0 0 0 2.9-2.9v-4a2.9 2.9 0 0 0-2.9-2.9z"/>
             <path d="M18.2 9.7h.2a2.6 2.6 0 0 1 2.6 2.6v3.3a2.6 2.6 0 0 1-2.6 2.6h-.4v2.7l-3.1-2.7h-3.1"/>
         </symbol>
+
+        <!-- ---------- 列表（第四十一轮：「参与级数」折叠行的左侧图标，
+                     用来明示"这一行里面装着一组子选项"） ---------- -->
+        <symbol id="i-list" viewBox="0 0 24 24">
+            <path d="M9 6.5h10.5M9 12h10.5M9 17.5h10.5"/>
+            <circle cx="5" cy="6.5" r="1.15"/>
+            <circle cx="5" cy="12" r="1.15"/>
+            <circle cx="5" cy="17.5" r="1.15"/>
+        </symbol>
     </svg>
 
     <div class="container">
@@ -2811,6 +2932,7 @@
                             <div class="seg" id="chord-voicing-seg" role="radiogroup" aria-label="配声模式">
                                 <button type="button" class="seg__opt" data-voicing="triad" role="radio" aria-checked="false">键盘和声</button>
                                 <button type="button" class="seg__opt" data-voicing="fourpart" role="radio" aria-checked="false">四部和声</button>
+                                <button type="button" class="seg__opt" data-voicing="pop" role="radio" aria-checked="false">流行键盘</button>
                             </div>
                         </div>
 
@@ -2921,7 +3043,7 @@
                                          一格只做一件事，控件才能做大。 -->
                                     <div class="srow srow--btn" id="chord-degree-toggle" role="button" tabindex="0"
                                          aria-expanded="false" aria-controls="degree-grid">
-                                        <span>参与级数</span>
+                                        <span><svg class="ic srow__ic" aria-hidden="true"><use href="#i-list"/></svg>参与级数</span>
                                         <span class="srow__side"><span class="dsum__count" id="chord-degree-count-num"></span><span class="dsum" id="chord-degree-count"></span>
                                             <span class="srow__chev" aria-hidden="true"><svg class="ic"><use href="#i-chevron-right"/></svg></span></span>
                                     </div>
@@ -2931,6 +3053,7 @@
                                             <div class="seg" id="chord-degree-view" role="radiogroup" aria-label="级数设置显示">
                                                 <button type="button" class="seg__opt" data-dview="switch" role="radio" aria-checked="true">和弦开关</button>
                                                 <button type="button" class="seg__opt" data-dview="prob" role="radio" aria-checked="false">七和弦概率</button>
+                                                <button type="button" class="seg__opt" data-dview="ninth" role="radio" aria-checked="false">九和弦</button>
                                             </div>
                                         </div>
                                     </div>

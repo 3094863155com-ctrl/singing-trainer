@@ -108,6 +108,14 @@
         //     40 / 10 / 70 / 30 **故意不动** —— 改了会改掉出题结果，
         //     和声回归快照（accept.mjs 的 sha256 黄金值）会跟着漂。
         seventhProb: { 1: 0, 2: 40, 3: 0, 4: 10, 5: 70, 6: 0, 7: 30 },
+        // 九和弦概率（第四十一轮）：**条件概率** —— 只有这一小节已经被判成七和弦，
+        //   才再掷一次骰子决定要不要在七和弦上面继续加九音（用户原话：
+        //   "只有一个和弦生成为七和弦，才有概率进一步出现九音"）。
+        //   实际出九和弦的概率 = seventhProb × ninthProb。
+        //   ★ 只在「流行键盘」配声模式下生效 —— 另外两种模式的音数容纳不了 5 个音，
+        //     开成 100 也不会出九和弦（见 doGenerate 里的 ninth 判定）。
+        //   默认全 0 ⇒ 出题结果与第四十轮逐字节一致。
+        ninthProb: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 },
         // 强调低音（用户 2026-10-07）：把**每小节的最低音**（谱面最下面那个音）单独提亮，
         //   帮听辨时抓住低声部。数值 = 低音增益要提升的百分比：
         //     0   = 完全不强调（**默认**，此时混音路径与改造前逐字节一致）
@@ -311,9 +319,24 @@
         return MAJOR_KEYS[Math.floor(Math.random() * MAJOR_KEYS.length)];
     }
 
-    function chordTonePcs(scale, degree, seventh) {
-        const steps = seventh ? [0, 2, 4, 6] : [0, 2, 4];
+    function chordTonePcs(scale, degree, seventh, ninth) {
+        const steps = ninth ? [0, 2, 4, 6, 8] : (seventh ? [0, 2, 4, 6] : [0, 2, 4]);
         return steps.map((s) => scale[(degree - 1 + s) % 7].pc);
+    }
+
+    // 「大谱表」配声模式：四部和声 + 流行键盘（第四十一轮）。
+    //   两者音数结构不同（4 vs 3~5），但**谱面形态完全一样**（两行谱、按 ⌊n/2⌋ 分上下），
+    //   所以绘制/排版/判定框全部共用一条路径 —— 只要把 voicingMode 认成"大谱表"即可。
+    //   ★ 判据统一走这个函数，别在调用点写死 === 'fourpart'，否则加模式必漏。
+    function isGrandVoicing(mode) {
+        return mode === 'fourpart' || mode === 'pop';
+    }
+
+    // 配声模式的中文名（卡片 footer / 封面 / 概要文字共用一个来源）
+    function voicingLabel(mode) {
+        if (mode === 'fourpart') return '四部和声';
+        if (mode === 'pop') return '流行键盘';
+        return '键盘和声';
     }
 
     // 生成候选配声：各（允许的）转位 × 若干八度位置，升序柱式，收敛到 [VOICE_LO, VOICE_HI]
@@ -432,6 +455,82 @@
         const best = scored[0].cost;
         const pool = scored.filter((s) => s.cost <= best + 2.5).map((s) => s.c);
         return pool[Math.floor(Math.random() * pool.length)];
+    }
+
+    // ============================================================
+    // 流行键盘配声（第四十一轮）
+    //   用户定调："我的和声排列还是以流行为主"。流行/爵士钢琴弹九和弦
+    //   几乎只有一种标准拆法：
+    //     左手 = 根音 + 五音（低音区只放"根基"，塞三音必糊）
+    //     右手 = 3 → 7 → 9 依次向上叠（五音已经交给左手，右手不再重复）
+    //   于是三种和弦自然长成：
+    //     三和弦：根 + 5 | 3        （3 音）
+    //     七和弦：根 + 5 | 3, 7     （4 音）
+    //     九和弦：根 + 5 | 3, 7, 9  （5 音，九音永远在最高处）
+    //   ★ 这正是古典"九和弦省五音 + 九音放高音声部"的另一种说法：
+    //     五音没有消失，只是搬到了低音（左手），所以右手那块只剩 3-7-9。
+    //   ★ 与四部和声的区别：不做重复音、不要求导音解决、不修平行五八 ——
+    //     流行/爵士是"低音 + 和声块"的纵向思维，横向只求就近、平滑。
+    //   ★ 恒用原位：低音必是根音（这套形态里没有转位的位置）。
+    // ============================================================
+    const POP_BASS_RANGE = [40, 52];    // 左手根音可能的音区：E2 ~ E3
+    const POP_UPPER_BASE = 60;          // 右手和声块的起点（中央 C 以上）
+    const POP_TOP_LIMIT = 90;           // 最高别顶穿钢琴高音区（避免加太多线）
+
+    function popVoicingMidis(scale, degree, seventh, ninth, pcsOverride, rootMidi) {
+        const pcs = pcsOverride || chordTonePcs(scale, degree, seventh, ninth);
+        const fifthPc = pcs[2];
+        // 右手音块：三音 → 七音 → 九音（五音不在里面，它在左手）
+        const upperPcs = [pcs[1]];
+        if (seventh) upperPcs.push(pcs[3]);
+        if (seventh && ninth) upperPcs.push(pcs[4]);
+
+        let fifth = fifthPc;
+        while (fifth <= rootMidi) fifth += 12;      // 五音必须在根音之上
+        const arr = [rootMidi, fifth];
+        let prev = fifth;
+        for (const pc of upperPcs) {
+            let m = pc;
+            while (m < POP_UPPER_BASE) m += 12;
+            // 与下面一个音至少隔小三度：防止五音和右手第一音挤成半音（会刺）
+            while (m < prev + 3) m += 12;
+            arr.push(m);
+            prev = m;
+        }
+        return arr;
+    }
+
+    function choosePopVoicing(scale, degree, seventh, ninth, prevMidis, pcsOverride) {
+        const pcs = pcsOverride || chordTonePcs(scale, degree, seventh, ninth);
+        const rootPc = ((pcs[0] % 12) + 12) % 12;
+        // 低音根音的候选 = 音区内的所有同名音，挑与上一小节低音衔接最顺的那个
+        const cands = [];
+        for (let r = POP_BASS_RANGE[0]; r <= POP_BASS_RANGE[1]; r++) {
+            if ((((r % 12) + 12) % 12) !== rootPc) continue;
+            const arr = popVoicingMidis(scale, degree, seventh, ninth, pcsOverride, r);
+            if (arr[arr.length - 1] > POP_TOP_LIMIT) continue;
+            cands.push(arr);
+        }
+        if (!cands.length) {
+            // 兜底：音区放不下（极端调号的九和弦）→ 取最靠近中央 C 的那个八度，允许超高
+            let r = rootPc;
+            while (r < 48) r += 12;
+            cands.push(popVoicingMidis(scale, degree, seventh, ninth, pcsOverride, r));
+        }
+        let best = cands[0], bestCost = Infinity;
+        for (const arr of cands) {
+            let cost = 0;
+            if (prevMidis && prevMidis.length) {
+                cost += Math.abs(arr[0] - prevMidis[0]);            // 低音位移为主
+                const m = Math.min(arr.length, prevMidis.length);
+                for (let i = 1; i < m; i++) cost += Math.abs(arr[i] - prevMidis[i]) * 0.5;
+                if (arr.length !== prevMidis.length) cost += 3;      // 音数变化（加不加九音）轻微罚
+            } else {
+                cost += Math.abs(arr[0] - 48) * 0.4;
+            }
+            if (cost < bestCost) { bestCost = cost; best = arr; }
+        }
+        return { midis: best, inv: 0, doubledRole: null };
     }
 
     // ============================================================
@@ -1076,7 +1175,9 @@
     //   离调和弦（applied 存在）：阿拉伯 = 副调内的级数，罗马 = 目标在原调的级数，斜杠分隔。
     //     例：5/Ⅴ、5⁷/Ⅴ、5⁶₅/Ⅴ、5⁷/ⅱ
     //   ★ 转位数字永远挂在**左边**那个（它属于副调内的和弦），与教材一致。
-    function romanOf(degree, seventh, inversion, applied) {
+    function romanOf(degree, seventh, inversion, applied, ninth) {
+        // 九和弦（第四十一轮）：只有流行键盘模式会出，恒原位，数字记法直接写 9。
+        if (ninth) return (ROMAN_MAJOR[degree - 1] || '') + '9';
         const fig = figuresOf(seventh, inversion).text;
         if (applied) {
             return String(applied.localDegree)
@@ -1477,6 +1578,10 @@
         const chords = [];
         let prevMidis = null;
         const fourPart = (settings.voicingMode === 'fourpart');
+        // 流行键盘（第四十一轮）：同样走大谱表，但配声是"左手 1+5 / 右手 3-7-9"。
+        //   九和弦**只在这个模式里出现**（另外两种模式的音数容纳不了 5 个音）。
+        //   ★ 无调性生成路径也会拿到这个值但没有用到 —— 无调性不参与九和弦/流行配声。
+        const popMode = (settings.voicingMode === 'pop');
         // 四部专用上下文：导音 pc 用于"必须上行解决"的判定
         const ctx = {
             scale,
@@ -1502,6 +1607,11 @@
                 : ((isFirst || isLast)
                     ? false
                     : (Math.random() * 100 < (settings.seventhProb[degree] || 0)));
+            // 九音（第四十一轮）：**条件概率** —— 只有这一小节已经是七和弦，才再掷一次。
+            //   离调小节恒 false（用户定：离调仍是七和弦）；首尾恒三和弦，天然不命中。
+            //   只在流行键盘模式生效 —— 另两种模式 4 个声部/3 个音装不下九音。
+            const ninth = !!(popMode && seventh && !ap && settings.ninthProb &&
+                (Math.random() * 100 < (settings.ninthProb[degree] || 0)));
             // ★ 解决到达的那一小节也是**自然和弦**，所以它的三/七和弦跟「自然和弦」页走
             //   （用户 2026-10-24 明确：目标不一定是七和弦，规则听自然页的）。
             //   代价：如果它是七和弦，四个音各一次 → 主音只剩低音一处，
@@ -1528,9 +1638,11 @@
                     scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, ctx,
                     apTones, resolveIsTriad || undefined, resolveReqUse
                 )
-                : chooseVoicing(
-                    scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, apPcs
-                );
+                : popMode
+                    ? choosePopVoicing(scale, vDeg, seventh, ninth, prevMidis, apPcs)
+                    : chooseVoicing(
+                        scale, vDeg, seventh, prevMidis, allowInv, isLast, allowSecondInv, apPcs
+                    );
             prevMidis = v.midis;
 
             const notes = ap
@@ -1549,12 +1661,15 @@
                 inversion: v.inv,
                 midis: v.midis,
                 notes,
-                roman: romanOf(degree, seventh, v.inv, ap),
+                roman: romanOf(degree, seventh, v.inv, ap, ninth),
                 doubledRole: v.doubledRole || null,
-                voices4: fourPart
+                voices4: fourPart || popMode
             };
             // ★ 只在离调上加这个键。自然和弦一个键都不加 —— 基线快照 JSON 因此不变。
             if (ap) chord.applied = ap;
+            // ★ 同理：只有真是九和弦才挂 ninth 键。非流行模式下 JSON 与旧版逐字节一致，
+            //   和声回归的 sha256 黄金值才不会漂。
+            if (ninth) chord.ninth = true;
             chords.push(chord);
 
             // ctx 描述的是**这个**和弦留给下一和弦的解决倾向：
@@ -1577,7 +1692,10 @@
         // 做一次局部回溯修补（只换排列，不动转位与重复音）
         if (fourPart) repairFourPartOverlaps(scale, chords, settings.allowSecondInvNatural);
 
-        return { key, scale, keySig, chords, voicingMode: fourPart ? 'fourpart' : 'triad' };
+        return {
+            key, scale, keySig, chords,
+            voicingMode: fourPart ? 'fourpart' : (popMode ? 'pop' : 'triad')
+        };
     }
 
     // ------------------------------------------------------------
@@ -1692,6 +1810,16 @@
     // 唯一读开关的地方：调用点不用各写一遍三元。
     //   ★ 必须读 settings（已生效值），不能读 pv()（设置页控件值，含未应用项）。
     function uiVoicing(chord) {
+        // ★ 第四十一轮：流行键盘模式下「八度内排列」必须失效。
+        //   这套配声的形态本身就是"左手低音 + 右手高音块"，压进一个八度会把
+        //   九音折回到根音旁边（变成刺耳的二度），也会把左手根音抬到右手堆里。
+        //   压缩只降八度不改音名，视觉与听觉都会彻底走样 → 直接原样返回。
+        if (settings.voicingMode === 'pop') {
+            return {
+                midis: (chord && chord.midis) ? chord.midis.slice() : [],
+                notes: (chord && chord.notes) ? chord.notes.slice() : []
+            };
+        }
         if (chord && settings.stackOctave) return stackedForUI(chord);
         return {
             midis: (chord && chord.midis) ? chord.midis.slice() : [],
@@ -1788,6 +1916,10 @@
         const chords = [];
         let prevMidis = null;
         const fourPart = (settings.voicingMode === 'fourpart');
+        // 流行键盘（第四十一轮）：同样走大谱表，但配声是"左手 1+5 / 右手 3-7-9"。
+        //   九和弦**只在这个模式里出现**（另外两种模式的音数容纳不了 5 个音）。
+        //   ★ 无调性生成路径也会拿到这个值但没有用到 —— 无调性不参与九和弦/流行配声。
+        const popMode = (settings.voicingMode === 'pop');
         // 四部专用上下文：导音 pc 用于"必须上行解决"的判定
         const ctx = {
             scale,
@@ -1809,9 +1941,11 @@
                 ? chooseFourPartVoicing(
                     scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInvNatural, ctx
                 )
-                : chooseVoicing(
-                    scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInvNatural
-                );
+                : popMode
+                    ? choosePopVoicing(scale, degree, seventh, false, prevMidis, null)
+                    : chooseVoicing(
+                        scale, degree, seventh, prevMidis, allowInv, isLast, settings.allowSecondInvNatural
+                    );
             prevMidis = v.midis;
             ctx.prevSeventhPc = seventh ? chordToneSpelled(scale, degree, true)[3].pc : null;
             chords.push({
@@ -1923,7 +2057,7 @@
         const shownKey = rel ? rel.key : key;
         const shownKeySig = rel ? rel.keySig : keySig;
         const chords = rel ? rel.chords : data.chords;   // 同名覆盖 → 下游绘制代码零改动
-        const fourPart = (data.voicingMode === 'fourpart');
+        const fourPart = isGrandVoicing(data.voicingMode);
         const beatsPerMeasure = 4;
         // 全音符每小节只占很窄一格，一行放 4 小节（16 小节 = 4 行，8 小节 = 2 行）
         const measuresPerLine = 4;
@@ -2831,7 +2965,9 @@
         settings.allowSecondInvNatural = (typeof s.allowSecondInvNatural === 'boolean')
             ? s.allowSecondInvNatural : (legacySecond !== null ? legacySecond : false);
         settings.allowSecondInvApplied = false;
-        if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart') settings.voicingMode = s.voicingMode;
+        if (s.voicingMode === 'triad' || s.voicingMode === 'fourpart' || s.voicingMode === 'pop') {
+            settings.voicingMode = s.voicingMode;
+        }
         if (typeof s.autoContinue === 'boolean') settings.autoContinue = s.autoContinue;
         if (typeof s.portable === 'boolean') settings.portable = s.portable;
         // 「八度内排列」（第三十四轮起是纯"放出来的音"项，但仍是用户偏好 → 必须记住；
@@ -2840,7 +2976,9 @@
         // 卡片答案两档 / 参与级数的显示视图（第三十六、三十七轮）：纯显示偏好，漏登记就会"自己变回去"
         if (s.cardMode === 'hold' || s.cardMode === 'toggle') settings.cardMode = s.cardMode;
         else if (typeof s.hideCard === 'boolean') settings.cardMode = s.hideCard ? 'hold' : 'toggle';
-        if (s.degreeView === 'switch' || s.degreeView === 'prob') settings.degreeView = s.degreeView;
+        if (s.degreeView === 'switch' || s.degreeView === 'prob' || s.degreeView === 'ninth') {
+            settings.degreeView = s.degreeView;
+        }
         // 强调低音只剩四档 0 / 10 / 30 / 75（关闭 / 轻微 / 中等 / 明显）：旧值就近落档
         if (typeof s.bassEmphasis === 'number' && isFinite(s.bassEmphasis)) {
             const v = Math.max(0, Math.min(100, Math.round(s.bassEmphasis)));
@@ -2892,6 +3030,14 @@
                 //   吸附会改掉生成结果（回归基线会跟着变）。读数按真实值显示，
                 //   把手按最近的档摆，点一下才真正落到档位上（第三十六轮起只有 0/30/80 三档）。
                 if (!isNaN(v)) settings.seventhProb[d] = Math.max(0, Math.min(100, v));
+            }
+        }
+        // 九和弦概率（第四十一轮）：同样只夹紧、不吸附档位。
+        //   老配置没有这个键 → 保持默认全 0，出题结果与第四十轮一致。
+        if (s.ninthProb && typeof s.ninthProb === 'object') {
+            for (let d = 1; d <= 7; d++) {
+                const v = parseInt(s.ninthProb[d]);
+                if (!isNaN(v)) settings.ninthProb[d] = Math.max(0, Math.min(100, v));
             }
         }
         settings.degrees[1] = true;   // 端点强制
@@ -3450,7 +3596,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 41;
+    const APP_VERSION = 42;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -3489,9 +3635,12 @@
     const TEMPO_STEPS = [40, 50, 65, 80];
     // 强调低音只剩三档（用户 2026-10-24："只要三格就行"，选 关闭 / 中等 / 明显）。
     //   三格 → 关闭 0 格、中等 2 格、明显 3 格（留出"中间差一截"的视觉落差）。
-    const EMPH_STEPS = [0, 30, 75];
+    const EMPH_STEPS = [0, 15, 75];
     const EMPH_LABELS = ['关闭', '中等', '明显'];
     const EMPH_FILL = [0, 2, 3];
+    // ★ 第四十一轮：第一档"中等"从 30 降到 15（用户：中等加强只有原来的一半）。
+    //   实际低音增益 = (值/100) * BASS_EMPH_MAX(2.0) ⇒ 30 时 ×1.6，15 时 ×1.3。
+    //   第二档 75 未动。历史存下的 30 会在 loadSettings 里吸附到 15。
     const TEMPO_FILL = [1, 2, 3, 4];
     // 七和弦概率只有三档（第三十六轮，用户："只给三档，0% 30% 80%"）。
     //   原来五档 0/25/50/75/100 —— 25 和 75 这种中间档在实际听觉上没区别，
@@ -3729,6 +3878,29 @@
     //   ★ 第三十六轮：顶部多了一个「和弦开关 / 七和弦概率」二选一切换框（静态 HTML，
     //     放在 #degree-grid 里当第一个子节点）—— 所以这里**不能**再 innerHTML=''，
     //     只清掉 7 个 .drow，否则切换框会被一起抹掉。
+    // 概率滑块工厂（第四十一轮抽出）：七和弦与九和弦两条滑块结构完全相同，
+    //   只有 data-role 不同 —— 视图切换靠 CSS 显隐，两条件始终并存于 DOM。
+    function makeProbMeter(role, valRole, d) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'meter meter--sm';
+        btn.dataset.role = role;
+        btn.dataset.degree = String(d);
+        const track = document.createElement('span');
+        track.className = 'meter__track';
+        for (let i = 0; i < DEG_STEPS.length; i++) track.appendChild(document.createElement('i'));
+        const knob = document.createElement('b');
+        knob.className = 'meter__thumb';
+        track.appendChild(knob);
+        btn.appendChild(track);
+        const val = document.createElement('span');
+        val.className = 'meter__val';
+        val.dataset.role = valRole;
+        val.dataset.degree = String(d);
+        btn.appendChild(val);
+        return btn;
+    }
+
     function buildDegreeGrid() {
         if (!els.grid) return;
         Array.prototype.slice.call(els.grid.querySelectorAll('.drow')).forEach((n) => n.remove());
@@ -3741,24 +3913,11 @@
             name.className = 'drow__name';
             name.textContent = DEGREE_CHOICES[d - 1];
 
-            const prob = document.createElement('button');
-            prob.type = 'button';
-            prob.className = 'meter meter--sm';
-            prob.dataset.role = 'prob';
-            prob.dataset.degree = String(d);
-            // 滑块结构：刻度（i）× 档数 + 把手（第三十三轮）
-            const track = document.createElement('span');
-            track.className = 'meter__track';
-            for (let i = 0; i < DEG_STEPS.length; i++) track.appendChild(document.createElement('i'));
-            const knob = document.createElement('b');
-            knob.className = 'meter__thumb';
-            track.appendChild(knob);
-            prob.appendChild(track);
-            const val = document.createElement('span');
-            val.className = 'meter__val';
-            val.dataset.role = 'probVal';
-            val.dataset.degree = String(d);
-            prob.appendChild(val);
+            // 两条概率滑块：七和弦（prob）与九和弦（nprob）。
+            //   九和弦是**条件概率** —— 只有先成为七和弦才有机会出九音，
+            //   所以七和弦概率为 0 的级数行在九和弦视图里会压暗（见 paintDegreeRow）。
+            const prob = makeProbMeter('prob', 'probVal', d);
+            const nprob = makeProbMeter('nprob', 'nprobVal', d);
 
             const cb = document.createElement('input');
             cb.type = 'checkbox';
@@ -3771,6 +3930,7 @@
 
             row.appendChild(name);
             row.appendChild(prob);
+            row.appendChild(nprob);
             row.appendChild(cb);
             els.grid.appendChild(row);
 
@@ -3794,6 +3954,16 @@
         paintMeter(row.querySelector('[data-role="prob"]'), idx, DEG_FILL);
         const val = row.querySelector('[data-role="probVal"]');
         if (val) val.textContent = raw + '%';
+
+        // 九和弦概率（第四十一轮）：同样的档位算法，读数写真实值
+        const nraw = (pv('ninthProb') || {})[d] || 0;
+        const nidx = nraw > 0 ? Math.max(1, degIndex(nraw)) : 0;
+        paintMeter(row.querySelector('[data-role="nprob"]'), nidx, DEG_FILL);
+        const nval = row.querySelector('[data-role="nprobVal"]');
+        if (nval) nval.textContent = nraw + '%';
+
+        // 条件概率的可视化：这一级七和弦概率是 0 → 九音永远出不来 → 压暗
+        row.classList.toggle('no-seventh', raw === 0);
     }
 
     function syncCard(d) {
@@ -3835,7 +4005,8 @@
     //   所以能做到"开关和进度条都做大还简洁"。
     function applyDegreeView() {
         if (!els.grid) return;
-        const v = (pv('degreeView') === 'prob') ? 'prob' : 'switch';
+        const dv = pv('degreeView');
+        const v = (dv === 'prob' || dv === 'ninth') ? dv : 'switch';
         els.grid.dataset.view = v;
         if (els.degreeViewSeg) {
             markSeg(els.degreeViewSeg, (btn) => btn.dataset.dview === v);
@@ -4746,7 +4917,7 @@
                 atonal: true,
                 quality: q.key,
                 suffix: q.suffix,
-                footer: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
+                footer: voicingLabel(data.voicingMode),
                 pos: (m + 1) + ' / ' + data.chords.length
             };
         }
@@ -4781,7 +4952,7 @@
                 ? uiVoicing(c).notes.map((n) => degreeOfNote(n, data.scale).text)
                 : []).join('   '),
             // ★ 去掉调名（用户 2026-10-24：「索性去掉调性」）：只留配声方式。
-            footer: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
+            footer: voicingLabel(data.voicingMode),
             pos: (m + 1) + ' / ' + data.chords.length,
             // 低音在调内的级数（简谱数字，字符串；查不到时是音名）
             bassDegree: bassScale ? String(bassScale.degree)
@@ -4839,7 +5010,7 @@
             : c.roman;
         host.setNowPlaying({
             title: '第 ' + (m + 1) + ' 小节 · ' + label,
-            artist: (data.voicingMode === 'fourpart') ? '四部和声' : '键盘和声',
+            artist: voicingLabel(data.voicingMode),
             album: '和弦听辨',
             artwork: art
         });
@@ -5074,8 +5245,8 @@
             ? settings.allowInversionAtonal
             : (settings.allowInversionNatural || settings.allowInversionApplied))
             ? '开启转位（和弦间平稳连接）' : '全部原位';
-        const modeText = (data.voicingMode === 'fourpart')
-            ? '四部和声 · 大谱表'
+        const modeText = isGrandVoicing(data.voicingMode)
+            ? voicingLabel(data.voicingMode) + ' · 大谱表'
             : '键盘和声 · 单行谱';
         const appliedText = (!data.atonal && settings.appliedEnabled) ? ' · 含离调' : '';
         // 无调性：没有调、也不谈级数，写成"无调性 · 只看和弦性质"
@@ -5589,6 +5760,15 @@
                 paintDegreeRow(d);
                 updateAppliedPreview();
             });
+            // 九和弦概率（第四十一轮）：同样三档，同样即时进待应用
+            bindSliderDrag(els.grid, '[data-role="nprob"]', (btn, i) => {
+                const d = parseInt(btn.dataset.degree, 10);
+                if (((pv('ninthProb') || {})[d] || 0) === DEG_STEPS[i]) return;
+                const next = Object.assign({}, pv('ninthProb') || {});
+                next[d] = DEG_STEPS[i];
+                stageSetting('ninthProb', next, 'content');
+                paintDegreeRow(d);
+            });
         }
 
         // 参与级数：折叠行（收起时只显示「N 项已选」）
@@ -5611,7 +5791,8 @@
             els.degreeViewSeg.addEventListener('click', (e) => {
                 const btn = e.target.closest ? e.target.closest('.seg__opt') : null;
                 if (!btn || !btn.dataset.dview) return;
-                settings.degreeView = (btn.dataset.dview === 'prob') ? 'prob' : 'switch';
+                const dv = btn.dataset.dview;
+                settings.degreeView = (dv === 'prob' || dv === 'ninth') ? dv : 'switch';
                 saveSettings();
                 applyDegreeView();
             });
