@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=43"></script>
+<script src="chord_recognition.js?v=44"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=43" defer></script>
+<script src="social.js?v=44" defer></script>
     <style>
         * {
             margin: 0;
@@ -630,29 +630,18 @@
             white-space: nowrap;
         }
 
-        /* 配声模式（第四十二轮）：三个选项在 430px 宽度放不进一行 —— 原来会折成
-           「键盘和声 四部和声 / 流行键盘」两行，第三颗孤零零吊在下面，看起来像"点不到"。
-           改法：标签独占一行，三颗胶囊在下面整宽均分（读起来就是一个三段式选择器）。
-           ★ 只作用于这一行；其他 .srow 仍是"标签左、控件右"。 */
-        .srow--stack {
-            flex-direction: column;
-            align-items: stretch;
-            justify-content: flex-start;
-            gap: 8px;
-            padding: 10px 0 2px;
-        }
-
-        .srow--stack > .seg {
-            display: flex;
-            flex-wrap: nowrap;
+        /* 配声模式（第四十二轮试过"标签独占一行"，第四十三轮改回单行）：
+           三个选项要挤进一行，只收窄这一组胶囊的横向内边距 —— 字号、高度、右侧
+           外缘（与「长度 / 卡片答案」同一根 383 竖线）全部保持与其它行一致。
+           ★ 别的行不许学这一手：它们是 2 个选项，宽宽松松正好。 */
+        #chord-voicing-seg {
             gap: 6px;
-            justify-content: flex-start;
+            flex-wrap: nowrap;
         }
 
-        .srow--stack > .seg .seg__opt {
-            flex: 1 1 0;
-            min-width: 0;
-            padding: 8px 6px;
+        #chord-voicing-seg .seg__opt {
+            padding-left: 8px;
+            padding-right: 8px;
         }
 
         /* 「参与级数」折叠行（唯一使用 .srow--btn 的元素）
@@ -663,7 +652,9 @@
              ③ 展开后边框染成品牌色（is-open），读起来是"这个容器现在是打开的"。
              右侧仍给「已开/总数」计数（.dsum__count）+ 7 个级数 chip 概览。 */
         .srow--btn {
-            margin: 12px 10px 2px;
+            /* ★ 第四十三轮：左右不再各内缩 10px —— 和其它行共用同一根左缘 / 右缘
+               （之前它比上下几行窄 20px，一眼就是"没对齐"）。左右留白交给内边距。 */
+            margin: 12px 0 2px;
             padding: 0 8px 0 12px;
             background: var(--surface);
             border: 1px solid rgba(16, 24, 40, 0.10);
@@ -748,6 +739,9 @@
         .srow--btn .srow__side {
             width: 100%;
             justify-content: flex-start;
+            /* ★ 第四十三轮：chip 缩进 = 图标 17 + 间距 8 —— 让第二行从「参与级数」
+               这四个字的左缘起排，而不是从图标左缘起排（差 25px，一眼歪）。 */
+            padding-left: 25px;
         }
 
         .srow--btn .dsum {
@@ -810,10 +804,28 @@
            理由（用户原话）："开关和进度条都能独占做大还简洁"。
            ★ 显隐只靠 #degree-grid[data-view] 这两条规则，JS 只写 data-view 属性。
            ============================================================ */
+        /* 级数设置的三档视图（和弦开关 / 七和弦概率 / 九和弦）
+           ★ 第四十三轮：从"靠左的松散三颗"改成**整宽三等分的分段控件** ——
+             它管的是下面整张级数表，横跨整行才读得出"这是表头"；
+             左缘右缘也与上面的参与级数容器、下面的 7 行级数对齐。 */
         .dview {
             display: flex;
             justify-content: flex-start;
             padding: 2px 0 10px;
+        }
+
+        .dview .seg {
+            display: flex;
+            flex: 1 1 auto;
+            gap: 6px;
+            flex-wrap: nowrap;
+        }
+
+        .dview .seg__opt {
+            flex: 1 1 0;
+            min-width: 0;
+            padding-left: 4px;
+            padding-right: 4px;
         }
 
         #degree-grid[data-view="switch"] .drow [data-role="prob"] {
@@ -2952,7 +2964,7 @@
                             </div>
                         </div>
 
-                        <div class="srow srow--stack">
+                        <div class="srow">
                             <span>配声模式</span>
                             <div class="seg" id="chord-voicing-seg" role="radiogroup" aria-label="配声模式">
                                 <button type="button" class="seg__opt" data-voicing="triad" role="radio" aria-checked="false">键盘和声</button>

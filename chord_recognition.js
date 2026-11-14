@@ -39,7 +39,10 @@
     const DEGREE_CHOICES = ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ', 'Ⅶ'];
 
     // 转位数字（上标/下标）
-    const SUP = { 6: '⁶', 7: '⁷' };
+    //   ★ 第四十三轮补 9：九和弦的记号是 Ⅴ⁹（上标 9），与 Ⅴ⁷ 同一套写法。
+    //     以前罗马数字那两处（romanOf / romanParts）都只认 6/7，九和弦要么写成一个
+    //     与正文同高的普通 9、要么干脆丢掉 —— 谱面与卡片就会互相对不上。
+    const SUP = { 6: '⁶', 7: '⁷', 9: '⁹' };
     const SUB = { 2: '₂', 3: '₃', 4: '₄', 5: '₅', 6: '₆' };
 
     const SETTINGS_KEY = 'chordTrainerSettings';
@@ -1177,7 +1180,8 @@
     //   ★ 转位数字永远挂在**左边**那个（它属于副调内的和弦），与教材一致。
     function romanOf(degree, seventh, inversion, applied, ninth) {
         // 九和弦（第四十一轮）：只有流行键盘模式会出，恒原位，数字记法直接写 9。
-        if (ninth) return (ROMAN_MAJOR[degree - 1] || '') + '9';
+        //   ★ 第四十三轮：改用上标 ⁹（以前是普通 '9'，和 ⁷ 不是一个字号，谱面上看着像两个系统）。
+        if (ninth) return (ROMAN_MAJOR[degree - 1] || '') + SUP[9];
         const fig = figuresOf(seventh, inversion).text;
         if (applied) {
             return String(applied.localDegree)
@@ -3606,7 +3610,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 43;
+    const APP_VERSION = 44;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -4615,7 +4619,12 @@
     //   所以拆开、自己控字号与位置（见 drawCover）。
     //   ★ 离调档额外带一个 target（罗马基号），自然档**连这个键都不出现**，
     //     所以旧的调用方（含锁屏封面）零影响。
-    function romanParts(degree, seventh, inversion, applied) {
+    function romanParts(degree, seventh, inversion, applied, ninth) {
+        // ★ 第四十三轮：九和弦（只出现在流行键盘模式）→ 基号 + 上标 9，不带转位数字。
+        //   以前这里没有 ninth 参数，卡片与锁屏封面就把 Ⅴ⁹ 画成 Ⅴ⁷（和弦音却是 5 个）。
+        if (ninth) {
+            return { base: ROMAN_MAJOR[degree - 1] || '', sup: '9', sub: '' };
+        }
         if (applied) {
             const f = figuresOf(seventh, inversion);
             return {
@@ -4931,7 +4940,7 @@
                 pos: (m + 1) + ' / ' + data.chords.length
             };
         }
-        const parts = romanParts(c.degree, c.seventh, c.inversion, c.applied);
+        const parts = romanParts(c.degree, c.seventh, c.inversion, c.applied, c.ninth);
         // 「按住卡片只显示低音级数」那一档要用：这个和弦**低音**在调内的简谱数字。
         //   低音 = midis[0]（转位时就是那个转位音）。和弦音全来自调内音级 → 一定能在
         //   data.scale 里查到；真查不到（理论上不会）退回音名兜底，别把 'undefined' 画上屏。
