@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=45"></script>
+<script src="chord_recognition.js?v=46"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=45" defer></script>
+<script src="social.js?v=46" defer></script>
     <style>
         * {
             margin: 0;
@@ -2901,6 +2901,11 @@
         <symbol id="i-pause-solid" viewBox="0 0 24 24">
             <rect x="6.4" y="4.8" width="4" height="14.4" rx="1.7"/>
             <rect x="13.6" y="4.8" width="4" height="14.4" rx="1.7"/>
+        </symbol>
+        <!-- 重播（第四十五轮）：整段播完时，播放键换成这个形状 —— "再听一遍整段"。
+             实心版规则同样适用（纯符号键），所以整条路径都是 fill，不带 stroke。 -->
+        <symbol id="i-replay-solid" viewBox="0 0 24 24">
+            <path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
         </symbol>
 
         <!-- ---------- 手势类：一只手（食指按下） ---------- -->

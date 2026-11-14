@@ -3728,7 +3728,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 45;
+    const APP_VERSION = 46;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -5171,7 +5171,7 @@
             if (next === cur) return true;      // 已在头/尾，照样吃掉这次点击
             if (playing) { doPlay(lastPlayMode, next); return true; }
             mpShowMeasureOnly(next);
-            mpPauseJumpTo = next;
+            mpSetPauseJump( next );
             mpPreviewChord(next);
             return true;
         }
@@ -5398,7 +5398,7 @@
 
     async function doGenerate(auto) {
         stopChordPlayback();
-        mpPauseJumpTo = -1;             // 换了新的一段 → "暂停态切过和弦"的待重定位作废
+        mpSetPauseJump( -1 );             // 换了新的一段 → "暂停态切过和弦"的待重定位作废
         // 错题练习：出题换成"错误组合 + Ⅰ 胶水"的固定序列（每次进入重洗一次顺序）
         // ★ 无调性走独立入口：不与有调性共享控制流，所以有调性的出题路径一个字节都没动。
         data = practiceMode
@@ -5593,7 +5593,7 @@
         const myToken = mpPlayToken;    // ★ 本次起播的身份证：每个 await 之后都比一次，过期就放弃
         const cleanSeek = mpNeedsCleanSeek;   // 本次是否要先重置媒体管线（见 mpNeedsCleanSeek）
         mpNeedsCleanSeek = false;
-        mpPauseJumpTo = -1;             // 真开始播了 → 待重定位消费掉（避免下次按播放又跳一次）
+        mpSetPauseJump( -1 );             // 真开始播了 → 待重定位消费掉（避免下次按播放又跳一次）
         if (!data || !data.chords.length || isRendering) return;
         if (!auto) {
             cancelAutoNext();          // 用户手动播放 / 点小节 → 作废在途的自动接力
@@ -6159,7 +6159,7 @@
                     return;
                 }
                 mpShowMeasureOnly(m);
-                mpPauseJumpTo = m;
+                mpSetPauseJump( m );
                 mpPreviewChord(m);
             });
         }
@@ -6708,7 +6708,7 @@
         mpNudge('left');
         if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }
         mpShowMeasureOnly(next);
-        mpPauseJumpTo = next;
+        mpSetPauseJump( next );
         mpPreviewChord(next);
     }
 
@@ -6781,7 +6781,7 @@
         mpNudge('right');
         if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }
         mpShowMeasureOnly(next);
-        mpPauseJumpTo = next;
+        mpSetPauseJump( next );
         mpPreviewChord(next);
     }
 
@@ -7064,26 +7064,61 @@
         return '<svg class="ic' + (solid ? ' ic--solid' : '') + '" aria-hidden="true"><use href="#' + id + '"/></svg>';
     }
 
+    // 整段播完了吗？（第四十五轮：播完 → 播放键变「重播键」）
+    //   判据要三层，缺一不可：
+    //     ① `ended` —— 元素已经走到结尾；
+    //     ② `src === blobUrl` —— 加载的确实是**这一段的真实音频**。渲染期间那个静音占位
+    //        WAV 也会 ended，只看 ① 的话"正在生成"时播放键就会变成重播键；
+    //     ③ `blobUrl` 存在 —— 从没渲染过（页面刚刷新）时不能算"播完了"。
+    function mpSegmentEnded() {
+        return !!(chordAudioEl && chordAudioEl.ended &&
+            blobUrl && chordAudioEl.getAttribute('src') === blobUrl);
+    }
+
+    // 播放键此刻该显示成「重播」吗？（第四十五轮）
+    //   = 整段已播完 **且** 用户没有另行挑一小节。
+    //   播完后再点「上一个/下一个」的人，是想"从挑中的那一节开始"，不是"整段重来" ——
+    //   这时候键上要是还画着环形箭头，就会骗他"按下去会从头放"。
+    //   所以 mpPauseJumpTo >= 0（已挑好一节）时退回普通播放三角。
+    function mpReplayKeyShown() {
+        return !mpIsPlaying() && mpPauseJumpTo < 0 && mpSegmentEnded();
+    }
+
     function mpSyncPlayIcon() {
         if (!els) return;
         const playing = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
+        // ★ 第四十五轮：三态。播完时那颗键不是"播放"而是"重播"——
+        //   用户看到一圈进度走满 + 播放三角，会以为"还没开始"，再点是"从头放"还是"接着放"
+        //   在图标上完全看不出来。换成环形箭头，语义就跟行为一致了（点一下 = 整段重来）。
+        const ended = mpReplayKeyShown();
         // 纯符号播放键（无文字、键又小）→ 实心，一眼可辨
-        const iconId = playing ? 'i-pause-solid' : 'i-play-solid';
+        const iconId = playing ? 'i-pause-solid' : (ended ? 'i-replay-solid' : 'i-play-solid');
         // ★ 只改 <use> 的引用，**不要**写 innerHTML：
         //   收起条那颗播放键里除了图标，还有外圈那根进度环（方案 B），
         //   整块 innerHTML 重写会把环一起抹掉 —— 环还在 DOM 引用里、却已脱离文档，
         //   表现为"进度一直在写、画面上却没有"。踩过一次。
+        const label = playing ? '暂停' : (ended ? '重播' : '播放');
         const sync = (btn) => {
             if (!btn) return;
             const use = btn.querySelector('use');
             if (use) use.setAttribute('href', '#' + iconId);
             else btn.innerHTML = iconSvg(iconId, true);   // 兜底：万一按钮里没有 <use>
             btn.classList.toggle('is-playing', playing);
+            btn.classList.toggle('is-ended', ended);
+            btn.setAttribute('aria-label', label);
         };
         sync(els.mpPlayPause);
         sync(els.mpPlayPauseMin);
         // 收起条波形动画的开关
         if (els.mpExpand) els.mpExpand.classList.toggle('is-playing', playing);
+    }
+
+    // 记住"下次按播放从哪一节起"（第四十五轮收口）
+    //   ★ 这个值同时决定播放键画"播放三角"还是"重播环"（见 mpReplayKeyShown），
+    //     所以任何一次变动都必须顺手同步键面 —— 否则"播完 → 点上一个 → 键面还写着重播"。
+    function mpSetPauseJump(v) {
+        mpPauseJumpTo = v;
+        mpSyncPlayIcon();
     }
 
     // 播放 / 暂停。
@@ -7102,10 +7137,20 @@
         }
         // ★ 第十六轮：暂停期间用「上一个/下一个」切过和弦 → 这里要**从新切到的那一小节起播**，
         //   而不是回到暂停点原地续播（否则"看着在第 5 小节、一播又从第 2 小节响"）。
+        //   ★ 第四十五轮：这条排在"重播"之前 —— 播完以后用户可能先点了「上一个」挑一节，
+        //     那时候他要的是"从挑中的这一节播"，不是"整段从头再来"。
         if (mpPauseJumpTo >= 0) {
             const t = mpPauseJumpTo;
-            mpPauseJumpTo = -1;
+            mpSetPauseJump( -1 );
             await doPlay(lastPlayMode, t);
+            return;
+        }
+        // ★ 第四十五轮：整段已经播完 → 这颗键是「重播键」，行为 = 从第 0 小节重来。
+        //   不能走下面那句 `chordAudioEl.play()`：那是"续播"语义，虽然浏览器在 ended 上
+        //   调 play() 通常也会回到 0，但落点、进度环起点、封面全都靠浏览器自觉 ——
+        //   而且 blobData 换过段的极端情况下会放到别的音频上。统一走 doPlay 才和"从头播"一致。
+        if (mpSegmentEnded()) {
+            await doPlay(lastPlayMode, 0);
             return;
         }
         if (chordAudioEl && blobData === data && blobUrl) {
@@ -7163,12 +7208,39 @@
     function mpJump(dir) {
         if (!data || !data.chords.length) return;
         mpCancelGesture();                   // 显式导航 = 手势结束（含解冻）
+        // ★ 第四十五轮：正在播、且这一小节已经"弹到第三下"了（第 3 拍响起之后），
+        //   点「上一个」= **把当前这个和弦再播一遍**，不是退到上一小节。
+        //   用户的心智：听到第三下才发现没听清，想重听的是"这一个"；退到上一小节
+        //   等于为了重听它先多退一格。想真往后退就再点一下 —— 那时位置已回到第 1 拍，
+        //   自然走下面的正常分支（自洽，不需要额外冷却）。
+        //   ★ 必须排在 `next === mpMeasure` 那句之前：在第 1 小节点「上一个」时
+        //     next 恒等于 mpMeasure，先判边界的话这里会直接 return，一下都不响。
+        if (dir < 0 && mpMeasureReplayDue()) {
+            const cur = Math.min(data.chords.length - 1, mpMeasureOf(chordAudioEl.currentTime));
+            doPlay(lastPlayMode, cur);
+            return;
+        }
         const next = Math.max(0, Math.min(data.chords.length - 1, mpMeasure + dir));
         if (next === mpMeasure) return;      // 已在头 / 尾
         if (mpIsPlaying()) { doPlay(lastPlayMode, next); return; }   // 正在播：维持原行为（seek + 接着播）
         mpShowMeasureOnly(next);             // 暂停：只切显示
-        mpPauseJumpTo = next;                // 记住"下次按播放要从这里起"
+        mpSetPauseJump( next );                // 记住"下次按播放要从这里起"（并顺手同步键面）
         mpPreviewChord(next);                // 把这个和弦试听一下
+    }
+
+    // 这一小节已经"弹到第三下"了吗？（第四十五轮）
+    //   一小节 4 拍、柱式每拍一下 → "第三下"= 第 3 拍响起，也就是小节内走过一半。
+    //   判据只认"小节内相对位置"，不认绝对时间，所以：
+    //     · 柱式（每拍一下）→ 正好卡在第三下响起之后；
+    //     · 分解/单音模式下一小节也是 4 拍，含义同样成立（"这个和弦你已经听完大半了"）。
+    const MP_REPLAY_AFTER_BEATS = 2;     // 0 起算：第 3 拍（index 2）
+    function mpMeasureReplayDue() {
+        if (!mpIsPlaying() || !chordAudioEl) return false;
+        const md = measureDuration();
+        if (!(md > 0)) return false;
+        const t = Number(chordAudioEl.currentTime) || 0;
+        const pos = t - Math.floor(t / md) * md;      // 在本小节内走了多久
+        return pos >= (md / 4) * MP_REPLAY_AFTER_BEATS;
     }
 
     // 换一段（生成键恒为「⏭ 下一首」——固定功能，不再管"开始播放"分流；
@@ -7595,7 +7667,7 @@
         //   否则会沿用**更早**留下的 mpPauseJumpTo（暂停态点过「上一个」时记下的那一节，
         //   可能比按住的小节还早一格）—— 用户点播放键就"回到按住那个的前一个"。
         else if (at >= 0) {
-            mpPauseJumpTo = at;
+            mpSetPauseJump( at );
             //   ★ 第二十三轮：这一支不起播，但用户下一次按播放键照样是"从暂停态起播"
             //     → 把"先重置管线"的标记交下去（doPlay 会消费它）。
             mpNeedsCleanSeek = true;
@@ -8207,6 +8279,12 @@
             gesturePhase: mpGesture ? mpGesture.phase : null,
             gestureAxis: mpGesture ? mpGesture.axis : null,
             playing: !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended),
+            // 第四十五轮：整段播完（事实状态，播放键此刻通常是「重播键」）
+            ended: mpSegmentEnded(),
+            // 第四十五轮：此刻按钮上画的是不是「重播」这一形态
+            replayKey: mpReplayKeyShown(),
+            // 第四十五轮：此刻点「上一个」会不会走"重播本小节"分支
+            replayDue: mpMeasureReplayDue(),
             // 第十六轮：暂停态切过和弦后"待重定位到的小节"（-1 = 没有）
             pauseJumpTo: mpPauseJumpTo,
             errorOpen: !!(els && els.mpError && !els.mpError.hidden),
