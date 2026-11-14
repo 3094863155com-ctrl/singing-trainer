@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=42"></script>
+<script src="chord_recognition.js?v=43"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=42" defer></script>
+<script src="social.js?v=43" defer></script>
     <style>
         * {
             margin: 0;
@@ -628,6 +628,31 @@
             font-size: 14px;
             color: var(--text-secondary);
             white-space: nowrap;
+        }
+
+        /* 配声模式（第四十二轮）：三个选项在 430px 宽度放不进一行 —— 原来会折成
+           「键盘和声 四部和声 / 流行键盘」两行，第三颗孤零零吊在下面，看起来像"点不到"。
+           改法：标签独占一行，三颗胶囊在下面整宽均分（读起来就是一个三段式选择器）。
+           ★ 只作用于这一行；其他 .srow 仍是"标签左、控件右"。 */
+        .srow--stack {
+            flex-direction: column;
+            align-items: stretch;
+            justify-content: flex-start;
+            gap: 8px;
+            padding: 10px 0 2px;
+        }
+
+        .srow--stack > .seg {
+            display: flex;
+            flex-wrap: nowrap;
+            gap: 6px;
+            justify-content: flex-start;
+        }
+
+        .srow--stack > .seg .seg__opt {
+            flex: 1 1 0;
+            min-width: 0;
+            padding: 8px 6px;
         }
 
         /* 「参与级数」折叠行（唯一使用 .srow--btn 的元素）
@@ -2927,7 +2952,7 @@
                             </div>
                         </div>
 
-                        <div class="srow">
+                        <div class="srow srow--stack">
                             <span>配声模式</span>
                             <div class="seg" id="chord-voicing-seg" role="radiogroup" aria-label="配声模式">
                                 <button type="button" class="seg__opt" data-voicing="triad" role="radio" aria-checked="false">键盘和声</button>

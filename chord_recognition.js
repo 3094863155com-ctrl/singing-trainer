@@ -1834,6 +1834,9 @@
             !settings.atonalQualities || settings.atonalQualities[q.key] !== false);
         const pool = picked.length ? picked : [ATONAL_QUALITIES[0]];
         const fourPart = (settings.voicingMode === 'fourpart');
+        // ★ 四十二轮：无调性也要认「流行键盘」，否则选了 pop 却悄悄按键盘和声配 3 个音，
+        //   谱面标签写着流行键盘、实际听的是三音柱式。无调性不参与九和弦（ninth 恒 false）。
+        const popMode = (settings.voicingMode === 'pop');
         // 配声只在这一处用到 scale（音集全走 override），给个固定脚手架即可 ——
         //   ★ 绝不能把它挂到 data.scale 上：那样 chordRootMidi 会把全曲根音算成同一个 pc，
         //     随身听模式末拍的根音整段错。根音改由每个 chord 的 rootPc 携带。
@@ -1870,9 +1873,11 @@
                 ? chooseFourPartVoicing(
                     scale, 1, seventh, prevMidis, allowInv, isLast, allowSecondInv, ctx, t.tones
                 )
-                : chooseVoicing(
-                    scale, 1, seventh, prevMidis, allowInv, isLast, allowSecondInv, t.pcs
-                );
+                : popMode
+                    ? choosePopVoicing(scale, 1, seventh, false, prevMidis, t.pcs)
+                    : chooseVoicing(
+                        scale, 1, seventh, prevMidis, allowInv, isLast, allowSecondInv, t.pcs
+                    );
             prevMidis = v.midis;
             ctx.prevSeventhPc = seventh ? t.tones[3].pc : null;
 
@@ -1886,7 +1891,7 @@
                 notes: spellMidis(v.midis, t.tones),
                 roman: '',        // 无调性不画谱面、不写罗马数字；留空串防任何人读 .length
                 doubledRole: v.doubledRole || null,
-                voices4: fourPart,
+                voices4: fourPart || popMode,
                 rootPc: ((rootPc % 12) + 12) % 12,
                 quality: q.key
             });
@@ -1897,7 +1902,7 @@
         return {
             key: null, scale: null, keySig: null,
             chords,
-            voicingMode: fourPart ? 'fourpart' : 'triad',
+            voicingMode: fourPart ? 'fourpart' : (popMode ? 'pop' : 'triad'),
             atonal: true
         };
     }
@@ -1956,11 +1961,16 @@
                 notes: v.midis.map((m) => midiToSpelled(m, scale)),
                 roman: romanOf(degree, seventh, v.inv),
                 doubledRole: v.doubledRole || null,
-                voices4: fourPart
+                voices4: fourPart || popMode
             });
         }
         if (fourPart) repairFourPartOverlaps(scale, chords, settings.allowSecondInvNatural);
-        return { key, scale, keySig, chords, voicingMode: fourPart ? 'fourpart' : 'triad' };
+        // ★ 四十二轮修：这里也要带上 'pop'，否则错题练习选流行键盘时 data.voicingMode 回落成
+        //   'triad' → 谱面按单行高音谱表画 5 个音（挤成一坨），卡片标签也写错。
+        return {
+            key, scale, keySig, chords,
+            voicingMode: fourPart ? 'fourpart' : (popMode ? 'pop' : 'triad')
+        };
     }
 
     // ------------------------------------------------------------
@@ -3596,7 +3606,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 42;
+    const APP_VERSION = 43;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -5656,11 +5666,16 @@
         }
 
         // 配声模式：键盘和声（triad，单行谱 3 音）/ 四部和声（fourpart，大谱表 4 音）
+        //           / 流行键盘（pop，大谱表 5 音：左手根+五、右手 3-7-9）
+        //   ★ 四十二轮修：这里原来写的是 `=== 'fourpart' ? 'fourpart' : 'triad'`，
+        //     三元把第三个选项 'pop' 一并折叠成 'triad' —— 点「流行键盘」等于点「键盘和声」，
+        //     看起来就是"这个选项选不上"。改成白名单，新增模式不用再回来改三元。
         if (els.voicingSeg) {
             els.voicingSeg.addEventListener('click', (e) => {
                 const opt = e.target.closest ? e.target.closest('.seg__opt') : null;
                 if (!opt || !opt.dataset.voicing) return;
-                const v = (opt.dataset.voicing === 'fourpart') ? 'fourpart' : 'triad';
+                const v = opt.dataset.voicing;
+                if (v !== 'triad' && v !== 'fourpart' && v !== 'pop') return;
                 if (v === pv('voicingMode')) return;
                 stageSetting('voicingMode', v, 'content');
                 markSeg(els.voicingSeg, (b) => b.dataset.voicing === pv('voicingMode'));
