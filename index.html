@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=47"></script>
+<script src="chord_recognition.js?v=48"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=47" defer></script>
+<script src="social.js?v=48" defer></script>
     <style>
         * {
             margin: 0;
@@ -2479,6 +2479,69 @@
             text-align: center;
         }
 
+        /* 和弦对比那一排（第四十七轮）
+           「对比」两个字做标签，后面三颗胶囊等分剩余宽度。
+           ★ 高度刻意做矮（34px）：它是辅助动作，不能抢上面数字列的主视觉。 */
+        .mp-aid__cmp {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .mp-aid__cmp[hidden] {
+            display: none;
+        }
+
+        .mp-aid__cmp-label {
+            flex: 0 0 auto;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            padding-right: 2px;
+        }
+
+        .mp-aid__cmp-opt {
+            flex: 1 1 0;
+            min-width: 0;
+            height: 34px;
+            padding: 0 6px;
+            font-family: inherit;
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            background: var(--surface-hover);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            cursor: pointer;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+            -webkit-tap-highlight-color: transparent;
+            transition: background 0.15s linear, color 0.15s linear, border-color 0.15s linear;
+        }
+
+        /* 当前正在听的那一档 */
+        .mp-aid__cmp-opt.is-on {
+            color: #fff;
+            background: var(--accent);
+            border-color: transparent;
+        }
+
+        /* 题目里本来就是这一档 → 加一个极淡的底，方便"回到原样" */
+        .mp-aid__cmp-opt.is-orig:not(.is-on) {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .mp-aid__cmp-opt:disabled {
+            opacity: 0.38;
+            cursor: default;
+        }
+
+        .mp-aid__cmp-opt:active:not(:disabled) {
+            filter: brightness(0.95);
+        }
+
         /* ============================================================
            数据库页（听辨统计）
            ============================================================ */
@@ -3539,6 +3602,14 @@
                     <button class="mp-aid__opt" id="chord-mp-aid-block"><svg class="ic" aria-hidden="true"><use href="#i-chord-block"/></svg>柱式</button>
                 </div>
                 <div class="mp-aid__tones" id="chord-mp-aid-tones"></div>
+            </div>
+            <!-- 和弦对比（第四十七轮）：同一个和弦换三 / 七 / 九和弦的形态听，专门听"有没有七音 / 九音"。
+                 内容固定，JS 只切 is-on / disabled / hidden —— 不重建 DOM。 -->
+            <div class="mp-aid__cmp" id="chord-mp-aid-cmp" role="group" aria-label="和弦对比" hidden>
+                <span class="mp-aid__cmp-label">对比</span>
+                <button class="mp-aid__cmp-opt" type="button" data-lv="3" aria-pressed="false">三和弦</button>
+                <button class="mp-aid__cmp-opt" type="button" data-lv="7" aria-pressed="false">七和弦</button>
+                <button class="mp-aid__cmp-opt" type="button" data-lv="9" aria-pressed="false">九和弦</button>
             </div>
             <div class="mp-aid__hint">点简谱数字试听（可多指同时按）· 点窗外关闭并从这一小节继续</div>
         </div>

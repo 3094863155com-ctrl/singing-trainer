@@ -1689,17 +1689,24 @@
             const degree = seq[i];
             const isFirst = (i === 0);
             const isLast = (i === N - 1);
-            // 首尾强制三和弦原位（调性明确、收束干净）
-            //   ★ 离调小节的三和弦/七和弦在规划阶段就定了（buildAppliedMap），这里不再掷骰子；
-            //     解决小节同理必须是三和弦，否则导音解决不了（见 buildAppliedMap 注释）。
+            // 首尾：首小节强制三和弦（调性锚点）；★ 第四十七轮起**末尾不再强制** ——
+            //   用户 2026-11-17："每道题末尾的一级不必是三和弦，只要是原位，三七九概率跟着设置来"。
+            //   原位由 allowInv（恒 false）与 voicingCost 的 isLast 罚项保证，不需要额外处理。
+            //   ★ 概率为 0 时连骰子都不掷：默认配置（七音 Ⅰ=0）下随机流与改造前逐字节一致。
+            //   ★ 中间小节那一支保持原样（无论概率是不是 0 都掷一颗）—— 改它会让整条随机流位移，
+            //     和声回归的 sha256 黄金值当场漂掉。
+            const p7 = settings.seventhProb[degree] || 0;
             const seventh = ap
                 ? ap.seventh
-                : ((isFirst || isLast)
+                : (isFirst
                     ? false
-                    : (Math.random() * 100 < (settings.seventhProb[degree] || 0)));
+                    : (isLast
+                        ? (p7 > 0 && Math.random() * 100 < p7)
+                        : (Math.random() * 100 < p7)));
             // 九音（第四十一轮，第四十四轮扩到四部和声）：**条件概率** ——
-            //   只有这一小节已经是七和弦，才再掷一次。离调小节恒 false（用户定：离调仍是七和弦）；
-            //   首尾恒三和弦，天然不命中。
+            //   只有这一小节已经是七和弦，才再掷一次。离调小节恒 false（用户定：离调仍是七和弦）。
+            //   ★ 第四十七轮：末尾那一级现在也可能是七和弦 → 九音自然也能落到结尾（原位由
+            //     isLast 的代价罚项保证）。首小节仍是三和弦，天然不命中。
             //   生效范围 = 流行键盘（5 个音：左手根+五 / 右手 3-7-9）+ 四部和声（省五音，九音进高声部）。
             //   键盘和声（三音柱式）装不下 5 个音，恒不出。
             //   ★ 概率为 0 时**连骰子都不掷** —— 默认配置下随机流与改造前逐字节一致，
@@ -1947,6 +1954,148 @@
             midis: (chord && chord.midis) ? chord.midis.slice() : [],
             notes: (chord && chord.notes) ? chord.notes.slice() : []
         };
+    }
+
+    // ------------------------------------------------------------
+    // 「实际音区」对照表（第 47 轮，用户 2026-11-17 改口径）
+    //   第三十四轮的「八度内排列」只改"放出来的音"，发声键 / 听辨窗用的是压缩版。
+    //   现在改成：**排列还是重排后的顺序，但响的是它在题目里的实际音区** ——
+    //   压缩把音挪了八度，按下去听到的音高就不是刚才题里那个了。
+    //     显示顺序：C3 E3 G3（压缩版，3 颗键）
+    //     实际音高：C3 E4 G3（同一个音在四部里的真实位置）
+    //   实现：压缩不改 pc、遇到同名音只保留**第一次出现**的那个 → 按 pc 反查原和弦即可。
+    //   ★ 只在"压缩真的动过"时才反查：否则压缩版 = 原样，反查会把重复音错映射到
+    //     第一次出现的那个八度（重复根音很常见）。
+    function uiActualMidis(chord) {
+        const src = (chord && chord.midis) ? chord.midis : [];
+        const v = uiVoicing(chord);
+        const same = v.midis.length === src.length && v.midis.every((m, i) => m === src[i]);
+        if (same) return v.midis.slice();
+        return v.midis.map((m) => {
+            const pc = ((m % 12) + 12) % 12;
+            for (let i = 0; i < src.length; i++) {
+                if ((((src[i] % 12) + 12) % 12) === pc) return src[i];
+            }
+            return m;
+        });
+    }
+
+    // ------------------------------------------------------------
+    // 和弦对比（第 47 轮，只出现在听辨辅助窗里）
+    //
+    //   目的：同一个和弦在「三 / 七 / 九」三档下对比着听，专门练"有没有七音 / 九音"。
+    //   用户给的约束：四部和声只有 4 个声部，所以要**尽可能小的改动** ——
+    //   把某个声部的音改成七音 / 九音，其余声部一律不动。对应到三种换档：
+    //     三和弦 → 七和弦：把**重复**的那个音改成七音（4 声部正好 4 个不同音）
+    //     七和弦 → 九和弦：把**五音**改成九音（四部九和弦本来就省五音，与第四十四轮同口径）
+    //     反向：把七音 / 九音换回被省掉的那个音（重复音回来）
+    //
+    //   做法：低音不动（原位 / 转位都保留现状），只在**上方声部**上求"总位移最小"的一组
+    //   排列 —— 穷举（每声部 ≤ 十来个候选，3 声部 ≈ 千级），先窄窗口（±15 半音）再放宽，
+    //   四部还要过一遍音域与相邻间距。
+    //   ★ 纯试听副本：绝不写回 data.chords —— 谱面 / 主播放 / 统计一个字节都不动。
+    // ------------------------------------------------------------
+    const CMP_WINDOW = 15;      // 单个声部最多挪多少半音（第一轮搜索）
+    const CMP_WINDOW2 = 26;     // 第二轮（九音常常要跨一个八度以外）
+
+    // 这个和弦在「三 / 七 / 九」某一档下应有的和弦音（pc + 角色 + 拼写）。
+    //   离调只到七和弦（第二十八轮口径）；无调性没有"调内级数"，不做对比（返回 null）。
+    function aidLevelTones(chord, lv) {
+        if (!chord) return null;
+        const want7 = lv >= 7, want9 = lv >= 9;
+        if (chord.applied) {
+            if (want9) return null;
+            const t = appliedTones(chord.applied);
+            return want7 ? t : t.slice(0, 3);
+        }
+        if (chord.rootPc != null) return null;             // 无调性
+        if (!data || !data.scale || !chord.degree) return null;
+        const t = chordToneSpelled(data.scale, chord.degree, want7, want9);
+        // 九和弦：四部和声**省五音**（根-三-七-九）；流行键盘的五音在左手，要留着。
+        if (want9 && settings.voicingMode !== 'pop') return t.filter((x) => x.role !== 'fifth');
+        return t;
+    }
+
+    function compareVoicing(chord, lv) {
+        const src = (chord && chord.midis) ? chord.midis.slice() : [];
+        if (src.length < 2) return null;
+        const tones = aidLevelTones(chord, lv);
+        if (!tones) return null;
+        const bass = src[0];
+        const bassPc = ((bass % 12) + 12) % 12;
+        // 低音必须承担这个形态里的某个和弦音。承担不了的情形只有一种：6₄ 的低音正好是
+        //   九和弦省掉的五音 —— 那时这一档不做对比（返回 null，胶囊置灰）。
+        if (!tones.some((t) => t.pc === bassPc)) return null;
+
+        const want7 = lv >= 7, want9 = lv >= 9;
+        // 流行键盘：直接按原规则重建（左手 根+五 不动，右手块加 / 减 7、9）
+        if (settings.voicingMode === 'pop') {
+            return { midis: popVoicingMidis(null, 1, want7, want9, tones.map((t) => t.pc), bass), tones: tones };
+        }
+
+        const n = Math.max(src.length, tones.length);      // 目标音数（键盘和声要补第 4 个音）
+        const upperN = n - 1;
+        // 上方声部必须补齐的 pc：跳过"低音占用的那一个"
+        const need = [];
+        let bassTaken = false;
+        for (const t of tones) {
+            if (!bassTaken && t.pc === bassPc) { bassTaken = true; continue; }
+            need.push(t.pc);
+        }
+        if (need.length > upperN) return null;
+        const allowed = tones.map((t) => t.pc);           // 重复声部只能在这几个和弦音里挑
+
+        const candsOf = (win) => {
+            const out = [];
+            for (let i = 0; i < upperN; i++) {
+                const base = (src[i + 1] != null) ? src[i + 1] : (bass + 4 + 12 * i);
+                const lo = Math.max(43, base - win), hi = Math.min(93, base + win);
+                const list = [];
+                for (const pc of allowed) {
+                    for (let m = pc; m <= hi; m += 12) if (m >= lo) list.push(m);
+                }
+                out.push(list.length ? list : [base]);
+            }
+            return out;
+        };
+
+        const solve = (win, strict) => {
+            const cs = candsOf(win);
+            let best = null, bestCost = Infinity;
+            const pick = new Array(upperN);
+            const seen = {};
+            const dfs = (i, prev, cost) => {
+                if (cost >= bestCost) return;
+                if (i === upperN) {
+                    for (const pc of need) if (!seen[pc]) return;   // 该形态的音一个都不能少
+                    if (strict && n === 4 && !inStandardRange([bass].concat(pick))) return;
+                    best = pick.slice();
+                    bestCost = cost;
+                    return;
+                }
+                for (const m of cs[i]) {
+                    if (m <= prev) continue;                       // 声部不得交叉（保持升序）
+                    if (strict && n === 4 && m - prev > (i === 0 ? 19 : 12)) continue;
+                    const old = (src[i + 1] != null) ? src[i + 1] : prev + 4;
+                    const d = Math.abs(m - old);
+                    const pc = ((m % 12) + 12) % 12;
+                    seen[pc] = (seen[pc] || 0) + 1;
+                    pick[i] = m;
+                    dfs(i + 1, m, cost + d + (d > 7 ? 3 : 0));     // 跳进额外罚一点
+                    if (--seen[pc] === 0) delete seen[pc];
+                }
+            };
+            dfs(0, bass, 0);
+            return best ? [bass].concat(best) : null;
+        };
+
+        let midis = solve(CMP_WINDOW, true) || solve(CMP_WINDOW2, true)
+            || solve(CMP_WINDOW2, false) || solve(60, false);
+        if (!midis) return null;
+        const notes = chord.applied
+            ? spellMidis(midis, appliedTones(chord.applied))
+            : midis.map((m) => midiToSpelled(m, data.scale));
+        return { midis: midis, notes: notes, tones: tones };
     }
 
     function buildAtonalSchedule(settings) {
@@ -3706,8 +3855,17 @@
     //     听着挺乱"。80ms 正好是钢琴采样**起振**的长度 —— 跳过它 = 新和弦没有音头，
     //     听感上剩下的就是**上一小节那颗还在满音量衰减的尾音**，于是像"前一个和弦叠上来"。
     //     20ms 足够躲开"落点被取整到 k*md-ε"（误差只有微秒级），又完整保留音头。
-    //   想更保守/更激进就只改这一个数（0 = 恢复旧行为）。
-    const MP_RESUME_LEAD_S = 0.02;
+    //   ★ 第四十七轮：0.02 → 0.001（先试过 0.006，实测还不够靠前）。
+    //     把渲染出来的 WAV 解码后逐点量（第 47 轮 pb58）：小节线那一刻振幅是 **0**
+    //     （TAIL_TRIM_AT_BARLINE 让上一小节的淡出正好收在线上），线后
+    //     0.5ms ≈ 0.000、1ms ≈ 0.001、2ms ≈ 0.02、3ms ≈ 0.09、6ms ≈ 0.18、20ms 可达 0.44。
+    //     也就是说：落点每往后挪一点，进来那一下就从一个**非零振幅**开始 —— 用户
+    //     "每次切换都有爆音"里最响的一半就是它（20ms 正好落在起振之后的高点）。
+    //     1ms 处振幅 ≤0.002（等于 0），进来那侧几乎无跳变，音头一点也不丢。
+    //   ★ 别再往 0 上压：0 会和"落点被取整到 k*md-ε"撞在一起，而 mpMeasureOf 用的是
+    //     floor → 会被判成上一小节。1ms 是"干净"和"不越界"之间的那条缝。
+    //   想更保守/更激进就只改这一个数（0.02 = 恢复旧行为）。
+    const MP_RESUME_LEAD_S = 0.001;
     //   起播落点自检的**下限**：落后少于这个值一律不管（刚起播的正常滞后）。
     //   ★ 第二十三轮：真正的门槛是"半小节"（见 mpGuardLanding 的 need），这个数只当下限。
     //     （原先它是 mpEnsureSeek 的判据，而"play 后读一次"太脆 → 会把正常播放再 seek 一次。）
@@ -3728,7 +3886,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 47;
+    const APP_VERSION = 48;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -3988,6 +4146,8 @@
             mpAid: document.getElementById('chord-mp-aid'),
             mpAidBlock: document.getElementById('chord-mp-aid-block'),
             mpAidTones: document.getElementById('chord-mp-aid-tones'),
+            // 和弦对比那一排（第 47 轮）：三和弦 / 七和弦 / 九和弦
+            mpAidCmp: document.getElementById('chord-mp-aid-cmp'),
             // ---- 数据库页（听辨统计）----
             dbMatrix: document.getElementById('db-matrix'),
             dbTop: document.getElementById('db-top'),
@@ -4600,8 +4760,9 @@
     function mpTonePlay(measure, i) {
         const cur = (data && data.chords) ? data.chords[measure] : null;
         if (!cur || !cur.midis) return;
-        // ★ 现取压缩版：响的就是"八度排列后"的第 i 个音（低音那颗不变）
-        const midi = uiVoicing(cur).midis[i];
+        // ★ 第四十七轮：**响它在题里的实际音区**，只有"排在第几颗"跟着八度内排列走。
+        //   （原来取 uiVoicing 的音高 → 压缩把音挪了八度，按下去听到的不是刚听到的那个音。）
+        const midi = uiActualMidis(cur)[i];
         if (midi == null) return;
         // 'gliss' 档：更短的 hold + 更低的增益 —— 快速滑过时上一颗的余音不能糊住下一颗
         playInstantChord([midi], 'gliss').catch(() => {});
@@ -5572,6 +5733,70 @@
         });
     }
 
+    // ============================================================
+    // 「软切」（第 47 轮）：切小节 / 换段 / 开窗时的爆音
+    // ------------------------------------------------------------
+    //   症状（用户 2026-11-17）："每次点击上一个下一个切换都有爆音"。
+    //   成因有两条，都发生在**出声音的那一侧**：
+    //     ① <audio> 被硬 seek —— 正在响的钢琴音从任意振幅一步跳到 0，
+    //        波形不连续 = 一下"啪"。柱式是连奏（前一颗淡出才收），小节里几乎没有静音点，
+    //        所以每一次切都会撞上。
+    //     ② 新落点原本取"小节起点 + 20ms"（MP_RESUME_LEAD_S），正好落在音头之后 ——
+    //        进来那一下也是从一个非零振幅跳上去（第二声"啪"）。
+    //   做法：
+    //     ① seek 之前先把音量在 45ms 内斜坡降到 0（**只削尾**）；
+    //     ② 落点从 20ms 收到 6ms（音头的 4ms 起振还在，进来到的是接近 0 的振幅）；
+    //     ③ 回来的时候直接给满音量、不加淡入 —— 用户要的钢琴音头一点不削。
+    //   ★ 为什么不做"淡入"：钢琴的音头本身就是从 0 起振的，再叠一层淡入只会把音头糊掉。
+    //   ★ iOS 的 <audio>.volume 是只读的（写了不生效）→ 探测一次，写不进去就跳过斜坡，
+    //     只保留 ②③ 两条，代价是 iPhone 上还剩一点点切点声，但音头绝不会被削。
+    const MP_CUT_FADE_MS = 45;
+    let mpVolWritable = null;          // null = 还没测过
+
+    function mpVolumeWritable(el) {
+        if (mpVolWritable !== null) return mpVolWritable;
+        if (!el) return false;
+        try {
+            const before = el.volume;
+            el.volume = 0.42;
+            mpVolWritable = Math.abs(el.volume - 0.42) < 0.02;
+            el.volume = before;
+        } catch (e) { mpVolWritable = false; }
+        return mpVolWritable;
+    }
+
+    // 把正在响的音淡掉（只削尾）。不响 / 音量写不进去 → 立刻返回，不拖时间。
+    //   ★ 必须带超时兜底：自动连播是在后台跑的，rAF 在后台会被冻结 —— 没有这道闸，
+    //     await 会一直挂着，整条播放链就卡死了。
+    function mpFadeOutEl(el, ms) {
+        return new Promise((res) => {
+            if (!el || el.paused || el.ended || document.hidden || !mpVolumeWritable(el)) return res();
+            const t0 = (window.performance && performance.now) ? performance.now() : Date.now();
+            let done = false;
+            const fin = () => {
+                if (done) return;
+                done = true;
+                res();
+            };
+            setTimeout(fin, ms + 80);
+            const step = () => {
+                if (done) return;
+                const now = (window.performance && performance.now) ? performance.now() : Date.now();
+                const p = Math.min(1, (now - t0) / ms);
+                try { el.volume = 1 - p; } catch (e) {}
+                if (p < 1) requestAnimationFrame(step); else fin();
+            };
+            try { el.volume = 1; } catch (e) {}
+            step();
+        });
+    }
+
+    // 音量复位：任何一条早退路径都要保证播出来是满音量（否则会"静音播放"）
+    function mpRestoreVol(el) {
+        if (!el) return;
+        try { el.volume = 1; } catch (e) {}
+    }
+
     // seek 之后的兜底：**只负责显示对齐**。
     //   setMeasureHighlight(k) 开头是 `if (m === highlightedMeasure) return;`，所以
     //   "高亮已经就是 k"或"按住期间音乐照常播、高亮已走到 k+2"这两种情况下它会直接 return，
@@ -5629,6 +5854,10 @@
         if (blobData === data && blobMode === mode && blobUrl) {
             try {
                 seeking = true;
+                // ★ 第四十七轮：动 currentTime 之前先把正在响的音淡掉（45ms，只削尾）。
+                //   不淡的话就是硬切 → 每次切小节都"啪"一下（见 mpFadeOutEl 的注释）。
+                await mpFadeOutEl(chordAudioEl, MP_CUT_FADE_MS);
+                if (myToken !== mpPlayToken) { mpRestoreVol(chordAudioEl); return; }
                 // ★ 第二十三轮：「从暂停态回来」先把媒体管线重置一次，再 seek。
                 //   用户反馈（第二十二轮修好落点之后）：位置对了，但**一上来把前面那个和弦
                 //   叠在第一拍**、听着挺乱。上一轮已经改成"等 seeked 再 play"，所以不再是
@@ -5695,11 +5924,15 @@
             } finally {
                 seeking = false;
                 mpCleanLoading = false;      // 任何早退都不能把它留在 true（否则进度跟随会一直停摆）
+                mpRestoreVol(chordAudioEl);  // ★ 第四十七轮：早退也不能把音量留在 0（会变成"静音播放"）
             }
             return;
         }
 
         const silentWav = 'data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2teleQk=';
+        // ★ 第四十七轮：换段（重新渲染）也是硬切 —— 先把旧段淡掉再换 src。
+        await mpFadeOutEl(chordAudioEl, MP_CUT_FADE_MS);
+        mpRestoreVol(chordAudioEl);
         chordAudioEl.src = silentWav;
         chordAudioEl.play().catch(() => {});
 
@@ -6194,6 +6427,18 @@
         //   ★ 第十八轮：「和弦分解」按钮已删（用户要求），所以这里只绑柱式。
         //     开窗那一响与 pointerup 兜底补放仍然是分解/琶音 —— 那两处在 mpOpenAid / finish 里，未动。
         if (els.mpAidBlock) els.mpAidBlock.addEventListener('click', () => mpReplayAid('block'));
+        // 和弦对比（第 47 轮）：三和弦 / 七和弦 / 九和弦 三颗胶囊。
+        //   ★ 与数字列同样是 pointerdown（指下即响、不等合成 click）。
+        //   ★ 内容固定写在 HTML 里（不重建），所以这里可以一次绑死。
+        if (els.mpAidCmp) {
+            els.mpAidCmp.addEventListener('pointerdown', (e) => {
+                const b = (e.target && e.target.closest) ? e.target.closest('[data-lv]') : null;
+                if (!b || b.disabled) return;
+                try { e.preventDefault(); } catch (err) {}
+                const lv = parseInt(b.dataset.lv, 10);
+                if (lv === 3 || lv === 7 || lv === 9) mpAidCompare(lv);
+            });
+        }
         // 数字列做事件委托（内容是每次开窗重画的，不能逐个挂）。
         //   ★ 按 data-midi 认音，不按数字 —— 两个 1 是不同音高。
         //   ★ 第十六轮：**从 click 改成 pointerdown**。三个理由：
@@ -7418,32 +7663,123 @@
 
     async function mpOpenAid(frozen) {
         if (!frozen || frozen.seg !== mpSeg) return;      // 跨段快照作废
+        const chordNow = (data && data.chords) ? data.chords[frozen.measure] : null;
         const midis = (frozen.midis && frozen.midis.length)
             ? frozen.midis
-            : ((data && data.chords[frozen.measure] || {}).midis);
+            : ((chordNow || {}).midis);
         if (!midis || !midis.length) return;
-        // ★ 第三十四轮「八度内排列」：这一窗也是"放出来的音" → 整窗用压缩版
-        //   （开窗那声琶音 / 数字列 / 单音试听 / 整和弦试听全走 mpAid.midis）。
-        //   前提是 midis 与 notes 同长同序，所以统一从和弦本体取；取不到才退回快照。
-        const chordNow = (data && data.chords) ? data.chords[frozen.measure] : null;
-        const ui = uiVoicing((chordNow && chordNow.midis) ? chordNow : { midis: midis, notes: [] });
         // ★ 第二十轮：开窗 = "我要停下来听这个和弦" → 在途的自动连播接力立刻作废。
         //   否则（尤其开窗前音频刚好播完 → wasPlaying=false → 关窗时根本没有 doPlay 去取消它）
         //   1.05 秒后接力照样到点：生成新的一段、从第 0 小节起播 —— 用户看到的就是
         //   "关窗后从头开始 / 直接变成下一首"。这是本次"概率性复现"的主因。
         cancelAutoNext();
+        // ★ 第四十七轮：暂停前先把正在响的音淡掉（只削尾），否则开窗那一下也是"啪"的一声。
         const wasPlaying = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
-        if (chordAudioEl && wasPlaying) { try { chordAudioEl.pause(); } catch (e) {} }
+        if (chordAudioEl && wasPlaying) {
+            await mpFadeOutEl(chordAudioEl, MP_CUT_FADE_MS);
+            try { chordAudioEl.pause(); } catch (e) {}
+            mpRestoreVol(chordAudioEl);
+        }
         // ★ 第二十四轮：开窗 = 停下来听 → 顺手作废在途的起播（否则它醒过来又把音乐响起来，
         //   而窗还开着 —— 与我们前面"开窗后不许有声音"的约定相悖）。
         mpPlayToken++;
         mpSyncPlayIcon();                                  // pause 事件会同步，这里兜底
         //   openedAt：关窗那一下的"开窗保护窗"要用（见 MP_AID_OPEN_GUARD_MS）
-        mpAid = { measure: frozen.measure, midis: ui.midis, notes: ui.notes,
-                  sources: [], wasPlaying, openedAt: Date.now() };
-        mpPaintAidTones(frozen.measure);
+        mpAid = { measure: frozen.measure, sources: [], wasPlaying: wasPlaying,
+                  openedAt: Date.now(), level: 3, origLevel: 3 };
+        const c = (chordNow && chordNow.midis) ? chordNow : { midis: midis, notes: [] };
+        mpAidSetLevel(c, mpAidLevelOf(c));
         if (els && els.mpAid) els.mpAid.hidden = false;
-        try { await playInstantChord(ui.midis, 'arp'); } catch (e) {}   // 失败静默：浮窗仍在，可手点重放
+        // ★ 第四十七轮：开窗那一声回到**题目里的实际排列**（不再是压缩到八度内的版本）——
+        //   用户要听的就是刚才题里那个和声。点单颗键发哪个音也走实际音区（见 mpAidSetLevel）。
+        try { await playInstantChord(mpAid.playMidis, 'arp'); } catch (e) {}
+    }
+
+    // 这个和弦"本来"是哪一档（3 = 三和弦 / 7 = 七和弦 / 9 = 九和弦）
+    function mpAidLevelOf(c) {
+        if (!c) return 3;
+        if (c.ninth) return 9;
+        if (c.seventh) return 7;
+        return 3;
+    }
+
+    // 和弦各音的「角色」（根音 / 三音 / 五音 / 七音 / 九音）——听辨窗右侧那列副标注用。
+    //   离调走 appliedTones（按"目标级的自然和弦"推会全错）；无调性走 atonalTones。
+    function aidRolesOf(c) {
+        if (!c) return [];
+        if (c.applied) return appliedTones(c.applied);
+        if (c.rootPc != null) return atonalTones(c.rootPc, c.quality).tones;
+        return (data && data.scale)
+            ? chordToneSpelled(data.scale, c.degree, !!c.seventh, !!c.ninth) : [];
+    }
+
+    // 把听辨窗切到某一档（lv = 3 / 7 / 9）。
+    //   原档（= 题目里那个和弦）：显示顺序仍用压缩版（与 1234 键同一套），
+    //     但**发声用实际音区**；整窗试听（琶音 / 柱式）用题目里的原排列。
+    //   对比档：compareVoicing 造出来的临时形态（最小改动），显示与发声都按它。
+    //   返回 false = 这一档做不出来（调用方不用再放音）。
+    function mpAidSetLevel(c, lv) {
+        if (!mpAid || !c) return false;
+        const orig = mpAidLevelOf(c);
+        let view = null, tones = null;
+        if (lv === orig) {
+            const ui = uiVoicing(c);
+            view = {
+                midis: ui.midis,
+                notes: ui.notes,
+                srcMidis: uiActualMidis(c),          // 显示顺序 → 实际音高
+                playMidis: (c.midis || []).slice()   // 整窗试听：题目原样
+            };
+            tones = aidRolesOf(c);
+        } else {
+            const cmp = compareVoicing(c, lv);
+            if (!cmp) return false;
+            view = { midis: cmp.midis, notes: cmp.notes,
+                     srcMidis: cmp.midis.slice(), playMidis: cmp.midis.slice() };
+            tones = cmp.tones;
+        }
+        mpAid.level = lv;
+        mpAid.origLevel = orig;
+        mpAid.chord = c;
+        mpAid.midis = view.midis;
+        mpAid.notes = view.notes;
+        mpAid.srcMidis = view.srcMidis;
+        mpAid.playMidis = view.playMidis;
+        mpAid.tones = tones || [];
+        mpPaintAidTones(mpAid.measure);
+        mpPaintAidCmp();
+        return true;
+    }
+
+    // 对比那一排胶囊的可用状态（没有对比可做时整排收起）
+    function mpPaintAidCmp() {
+        if (!els || !els.mpAidCmp) return;
+        const box = els.mpAidCmp;
+        const c = (mpAid && data && data.chords) ? data.chords[mpAid.measure] : null;
+        // 无调性没有"调内级数"这回事（aidLevelTones 返回 null）→ 整排收起
+        if (!c || !aidLevelTones(c, 3)) { box.hidden = true; return; }
+        const orig = mpAid.origLevel || 3;
+        let any = false;
+        Array.prototype.forEach.call(box.querySelectorAll('[data-lv]'), (b) => {
+            const lv = parseInt(b.dataset.lv, 10);
+            const ok = (lv === orig) || !!compareVoicing(c, lv);
+            const on = (mpAid.level === lv);
+            b.disabled = !ok;
+            b.classList.toggle('is-on', on);
+            b.classList.toggle('is-orig', lv === orig);
+            b.setAttribute('aria-pressed', on ? 'true' : 'false');
+            if (ok && lv !== orig) any = true;
+        });
+        box.hidden = !any;      // 只有原档可用 = 没什么可对比的
+    }
+
+    function mpAidCompare(lv) {
+        if (!mpAid || !data || !data.chords) return;
+        const c = data.chords[mpAid.measure];
+        if (!c) return;
+        if (!mpAidSetLevel(c, lv)) return;
+        mpStopAidVoices();
+        playInstantChord(mpAid.playMidis, 'arp').catch(() => {});
     }
 
     // 和弦音角色 → 中文标注（chordToneSpelled 返回的是英文 role）
@@ -7472,20 +7808,22 @@
             && mpAid.notes.length && mpAid.notes.length === mpAid.midis.length);
         const aidNotes = useAid ? mpAid.notes : c.notes;
         const midis = useAid ? mpAid.midis : (c.midis || []);
+        // ★ 第四十七轮：按钮**绑的是实际音高**（mpAid.srcMidis），重排只决定"排在第几颗"。
+        //   压缩版把音挪了八度，用户要听的是"它在题里那个音区"。
+        const srcMidis = (useAid && mpAid.srcMidis && mpAid.srcMidis.length === midis.length)
+            ? mpAid.srcMidis : midis;
         // 和弦各音的"角色"：直接复用 chordToneSpelled —— 它按调内级数推出和弦音，
         //   **转位天然正确**（角色由根音定义，跟哪个音落在低音无关）；四部重复音时
         //   同一个角色会出现两枚，这也是对的（和声学上就是重复了那个音）。
         //   ★ 离调和弦不能走 chordToneSpelled（它会按"目标级数的自然和弦"推音，音全错），
         //     走 appliedTones —— 那里才是这个和弦真正的根/三/五/七。
         //   ★ 无调性同理走 atonalTones（data.scale 是 null，chordToneSpelled 会空表）。
-        const ct = c.applied
-            ? appliedTones(c.applied)
-            : (c.rootPc != null
-                ? atonalTones(c.rootPc, c.quality).tones
-                : ((data && data.scale) ? chordToneSpelled(data.scale, c.degree, !!c.seventh, !!c.ninth) : []));
+        //   ★ 第四十七轮：对比档换成"那一档"的音表（七音 / 九音才有角色可标），
+        //     由 mpAidSetLevel 存进 mpAid.tones；原档仍按和弦本身算。
+        const ct = (useAid && mpAid.tones && mpAid.tones.length) ? mpAid.tones : aidRolesOf(c);
         aidNotes.forEach((n, i) => {                  // notes 已按 MIDI 升序（低 → 高）
             if (!n || !n.letter) return;
-            const midi = midis[i];
+            const midi = srcMidis[i];
             const pc = ((midi % 12) + 12) % 12;
             // ★ 级数走 degreeOfNote（卡片同一套）：变化音显示 ♯4 而不是音名 F#。
             const dg = (data && data.scale)
@@ -7691,7 +8029,9 @@
     function mpReplayAid(style) {
         if (!mpAid) return;
         mpStopAidVoices();
-        playInstantChord(mpAid.midis, style).catch(() => {});
+        // ★ 第四十七轮：整窗试听走**题目里的实际排列**（原来的 mpAid.midis 是压缩版），
+        //   对比档时就是那一档造出来的形态。两者都已在 mpAid.playMidis 里。
+        playInstantChord(mpAid.playMidis || mpAid.midis, style).catch(() => {});
     }
 
     // 点辅助窗右侧的某个简谱数字 → 只发这一个音高。
@@ -8352,11 +8692,28 @@
         _getAidAudio: () => ({
             open: !!mpAid,
             midis: mpAid ? mpAid.midis.slice() : null,
+            // 第四十七轮：整窗试听真正放出来的音（题目里的实际排列 / 对比档造出来的形态）
+            playMidis: mpAid ? (mpAid.playMidis || mpAid.midis).slice() : null,
             voices: mpAid ? mpAid.sources.length : 0,
             ctx: (global.ChordHost && global.ChordHost.audioContext)
                 ? global.ChordHost.audioContext.state : null,
             last: mpAidLast ? Object.assign({}, mpAidLast) : null
         }),
+        // ---- 第四十七轮：和弦对比（三 / 七 / 九）+ 实际音区对照（自测用）----
+        _compareVoicing: (m, lv) => {
+            const c = (data && data.chords) ? data.chords[m] : null;
+            return c ? compareVoicing(c, lv) : null;
+        },
+        _uiActualMidis: (m) => {
+            const c = (data && data.chords) ? data.chords[m] : null;
+            return c ? uiActualMidis(c) : null;
+        },
+        _aidCompare: (lv) => { mpAidCompare(lv); return mpAid ? mpAid.level : null; },        _getAidLevel: () => (mpAid ? {
+            level: mpAid.level, orig: mpAid.origLevel,
+            display: mpAid.midis.slice(), src: mpAid.srcMidis.slice(),
+            play: mpAid.playMidis.slice(),
+            tones: (mpAid.tones || []).map((t) => t.role)
+        } : null),
         // 收起条播放键的外圈进度（方案 B）
         _getRingDashoffset: () => (els && els.mpRingBar ? els.mpRingBar.style.strokeDashoffset : null),
         // 自测用：整段音频的播放位置 / 总时长（证明进度环是"按时间连续"的，而不是按小节跳的）。
@@ -8366,6 +8723,8 @@
             ? { t: chordAudioEl.currentTime, d: chordAudioEl.duration,
                 paused: chordAudioEl.paused, ended: chordAudioEl.ended }
             : null),
+        // 第四十七轮：主音轨的实时音量（<audio> 没挂进 DOM，querySelector 拿不到它）
+        _getVol: () => (chordAudioEl ? chordAudioEl.volume : null),
         // 第十六轮：音频自愈相关的两个口子
         //   _unlockAudioNow：手动唤醒上下文（验收用；也可以在真机控制台里敲）
         //   _reloadSamples：宿主重建 AudioContext 后，bufferCache 被清空 → 由这里重新解码
