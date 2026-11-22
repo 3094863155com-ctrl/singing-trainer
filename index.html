@@ -8,9 +8,9 @@
 <!-- ★ 每次发布把 v= 后面的数字 +1：GitHub Pages 给的是 cache-control: max-age=600，
      iOS Safari 对子资源的缓存还更顽固 —— 不带版本号时，改完再打开很可能跑的还是旧 js
      （表现就是"改了但没生效"）。 -->
-<script src="chord_recognition.js?v=48"></script>
+<script src="chord_recognition.js?v=49"></script>
 <!-- 社交页（局域网留言板）：逻辑独立、可整体摘除；接口见 backend/DEPLOY.md -->
-<script src="social.js?v=48" defer></script>
+<script src="social.js?v=49" defer></script>
     <style>
         * {
             margin: 0;
@@ -1836,6 +1836,10 @@
             position: relative;
             flex: 1 1 auto;
             min-height: 0;
+            /* ★ 第四十八轮：1234 沉到最下面一排之后，整列离底只剩 12px（安全边距）。
+               这里裁一道，是为了 canvas 永远别把舞台撑出去（替换元素的 max-height:100%
+               在高度未定的 flex 项里算不出结果）—— 现在实测不溢出（922/932），当保险留着。 */
+            overflow: hidden;
             display: flex;
             align-items: center;
             justify-content: center;
@@ -2135,7 +2139,9 @@
             align-items: center;
             justify-content: center;
             gap: 6px;
-            min-height: var(--mp-btn);
+            /* ★ 第四十八轮（用户："上一个下一个纵向再长一点点，更容易点到"）：
+               var(--mp-btn) → +10px（桌面 74px，430px 宽的手机 74px、320px 窄屏 58px）。 */
+            min-height: calc(var(--mp-btn) + 10px);
             padding: 0 12px;
             font-family: inherit;
             font-size: 17px;
@@ -3054,6 +3060,11 @@
             <path d="M10.2 21h3.6"/>
             <path d="M12 3a6 6 0 0 0-3.6 10.8c.5.4.8 1 .8 1.6v.6h5.6v-.6c0-.6.3-1.2.8-1.6A6 6 0 0 0 12 3z"/>
         </symbol>
+        <symbol id="i-swipe" viewBox="0 0 24 24">
+            <path d="M4.6 12h14.8"/>
+            <path d="M8.2 8.4 4.4 12l3.8 3.6"/>
+            <path d="M15.8 8.4 19.6 12l-3.8 3.6"/>
+        </symbol>
         <symbol id="i-target" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="8.5"/>
             <circle cx="12" cy="12" r="4.5"/>
@@ -3533,8 +3544,10 @@
                 <button class="mp-icon-btn" id="chord-mp-close" aria-label="收起播放器"><svg class="ic" aria-hidden="true"><use href="#i-chevron-down"/></svg>收起</button>
                 <!-- 卡片⇄谱表 切换键（占原来中央播放键的位置；播放键已挪到底部） -->
                 <button class="mp-icon-btn" id="chord-mp-sheet-toggle" aria-label="切换卡片与谱表"><svg class="ic" aria-hidden="true"><use href="#i-staff"/></svg>谱表</button>
-                <!-- 错题练习开关：关=点进入（重新生成覆盖当前），开=点退出（同样重新生成） -->
-                <button class="mp-icon-btn" id="chord-mp-exit-practice" aria-label="错题练习开关"><svg class="ic" aria-hidden="true"><use href="#i-target"/></svg>错题练习</button>
+                <!-- 手势模式开关（第四十八轮，取代原来的「错题练习」入口）：
+                     开=整个面板任意位置左滑上一个 / 右滑下一个，长按看答案照旧 —— 为闭眼盲操作。
+                     错题练习本身没删，入口还在数据库页那张卡上（startPractice）。 -->
+                <button class="mp-icon-btn" id="chord-mp-gesture" aria-label="手势模式开关" aria-pressed="false"><svg class="ic" aria-hidden="true"><use href="#i-swipe"/></svg>手势模式</button>
             </div>
 
             <!-- 长按热区：整个舞台。按住=揭示答案；按住上滑=报错；按住下滑=听辩辅助；
@@ -3554,9 +3567,9 @@
                 </div>
             </div>
 
-            <!-- 当前和弦的各音：从低到高的发声按钮（不写音高，按下去出声、可多指同时按）
-                 按钮数量跟实际音数走（键盘和声三和弦 3 个 / 七和弦 4 个）。 -->
-            <div class="mp-tones" id="chord-mp-tones" role="group" aria-label="当前和弦的各音（从低到高）"></div>
+            <!-- ★ 第四十八轮（用户）：行序改成 上一个/下一个 → 播放/下一首 → **1234**。
+                 1234 是"边听边点"最常按的一排 → 沉到最下面一排，拇指最容易够到；
+                 上一个/下一个同时加高一点（见 .mp-action-btn 的 min-height）。 -->
             <div class="mp-sheet__mode" id="chord-mp-mode-note" hidden></div>
 
             <div class="mp-sheet__actions">
@@ -3568,6 +3581,11 @@
                 <button class="mp-play-main" id="chord-mp-playpause" aria-label="播放或暂停"><svg class="ic ic--solid" aria-hidden="true"><use href="#i-play-solid"/></svg></button>
                 <button class="btn btn-primary mp-generate" id="chord-mp-generate"><svg class="ic" aria-hidden="true"><use href="#i-skip-next"/></svg>下一首</button>
             </div>
+
+            <!-- 当前和弦的各音：从低到高的发声按钮（不写音高，按下去出声、可多指同时按）
+                 按钮数量跟实际音数走（键盘和声三和弦 3 个 / 七和弦 4 个）。
+                 ★ 第四十八轮：挪到**最下面一排**（原来在舞台正下方）。 -->
+            <div class="mp-tones" id="chord-mp-tones" role="group" aria-label="当前和弦的各音（从低到高）"></div>
         </div>
     </div>
 

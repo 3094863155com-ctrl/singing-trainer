@@ -1997,6 +1997,14 @@
     // ------------------------------------------------------------
     const CMP_WINDOW = 15;      // 单个声部最多挪多少半音（第一轮搜索）
     const CMP_WINDOW2 = 26;     // 第二轮（九音常常要跨一个八度以外）
+    // ★ 第四十八轮（用户）：「高音以最小幅度运动 —— 区分的是性质，高音一动就有旋律性，
+    //   听的人会被旋律带走，注意力就不在'有没有七音/九音'上了。」
+    //   做法：代价函数里给**最高声部**一个重权（其余声部 1）。权重足够大时，求解器会
+    //   优先"高音原地不动、只改内声部"—— 这正是听得出性质差别、又听不到旋律的形态：
+    //       三→七：重复的那个音留在高音不动，改**下面**重复的那一份成七音；
+    //       七→九：高音若是七音（保留音）就不动，九音插在它下面。
+    //   高音实在保不住（比如它正好是九和弦要省掉的五音）才按最小半音数去挪。
+    const CMP_TOP_W = 20;
 
     // 这个和弦在「三 / 七 / 九」某一档下应有的和弦音（pc + 角色 + 拼写）。
     //   离调只到七和弦（第二十八轮口径）；无调性没有"调内级数"，不做对比（返回 null）。
@@ -2045,10 +2053,28 @@
         if (need.length > upperN) return null;
         const allowed = tones.map((t) => t.pc);           // 重复声部只能在这几个和弦音里挑
 
+        // 每个声部的候选窗口以"它原来那个音"为中心。
+        //   ★ 第四十八轮修：上方声部不够（三和弦要补成四音形态）时，多出来的那个声部
+        //     贴着**原高音**找，而不是按 bass+4+12i 一路往上外推 —— 后者会把补出来的
+        //     声部甩到高音上方十几二十个半音（实测三→九高音被迫抬 7~12 个半音）。
+        const srcTop = src[src.length - 1];
+        // ★ 第四十八轮补：要补的声部（三和弦 → 九和弦就是补两个）**均匀插在低音与高音之间**。
+        //   原来补位声部的起点是 `bass + 4 + 12*i` —— 那是"从低音一路往上外推"，
+        //   第 3 个补位声部直接落到 bass+28，把高音挤得无处可去（实测键盘和声 三→九
+        //   高音被顶高 7~12 个半音，而理论下界只有 4）。改成插值后，补位声部只是
+        //   "在内声部找地方"，高音不再被外推的起点绑架。
+        const missN = Math.max(0, upperN - (src.length - 1));
         const candsOf = (win) => {
             const out = [];
+            let missIdx = 0;
             for (let i = 0; i < upperN; i++) {
-                const base = (src[i + 1] != null) ? src[i + 1] : (bass + 4 + 12 * i);
+                let base;
+                if (i === upperN - 1) base = srcTop;                 // 顶声部永远贴着原高音
+                else if (src[i + 1] != null) base = src[i + 1];      // 原来就有的声部：原位
+                else {
+                    missIdx++;
+                    base = bass + (srcTop - bass) * (missIdx / (missN + 1));
+                }
                 const lo = Math.max(43, base - win), hi = Math.min(93, base + win);
                 const list = [];
                 for (const pc of allowed) {
@@ -2059,7 +2085,20 @@
             return out;
         };
 
-        const solve = (win, strict) => {
+        // ★ 第四十八轮：先「钉住高音」再谈别的。
+        //   原来只做了"代价加权"，但四档搜索是 `a || b || c || d` —— 只要更严格的那一档
+        //   找得到解就直接采纳，而严格档的间距限制往往把高音挤到别处（实测 三→九 时
+        //   高音被顶高 7 个半音，只高了 3 个半音的方案在宽松档里）。现在：
+        //     ① 目标形态里仍有这个音（且它不是低音那个音）→ **把最高声部钉在原音高**，
+        //        只求内声部；这是"听着只觉得和弦变了、旋律没动"的形态。
+        //     ② 钉不住（高音正好是被省掉的五音）→ 四档全跑一遍，**取"高音动得最少"的那档**
+        //        （平手时保留更严格的那档）。
+        const top0 = src[src.length - 1];
+        const topPc0 = ((top0 % 12) + 12) % 12;
+        const topIsBassPc = (topPc0 === bassPc);
+        const pinTop = (!topIsBassPc && allowed.indexOf(topPc0) >= 0) ? top0 : null;
+
+        const solve = (win, strict, pin) => {
             const cs = candsOf(win);
             let best = null, bestCost = Infinity;
             const pick = new Array(upperN);
@@ -2074,6 +2113,7 @@
                     return;
                 }
                 for (const m of cs[i]) {
+                    if (pin != null && i === upperN - 1 && m !== pin) continue;   // 高音钉死
                     if (m <= prev) continue;                       // 声部不得交叉（保持升序）
                     if (strict && n === 4 && m - prev > (i === 0 ? 19 : 12)) continue;
                     const old = (src[i + 1] != null) ? src[i + 1] : prev + 4;
@@ -2081,7 +2121,9 @@
                     const pc = ((m % 12) + 12) % 12;
                     seen[pc] = (seen[pc] || 0) + 1;
                     pick[i] = m;
-                    dfs(i + 1, m, cost + d + (d > 7 ? 3 : 0));     // 跳进额外罚一点
+                    // 最高声部（i === upperN-1）按 CMP_TOP_W 加权；跳进只罚普通声部
+                    const w = (i === upperN - 1) ? CMP_TOP_W : 1;
+                    dfs(i + 1, m, cost + w * d + (w === 1 && d > 7 ? 3 : 0));
                     if (--seen[pc] === 0) delete seen[pc];
                 }
             };
@@ -2089,8 +2131,48 @@
             return best ? [bass].concat(best) : null;
         };
 
-        let midis = solve(CMP_WINDOW, true) || solve(CMP_WINDOW2, true)
-            || solve(CMP_WINDOW2, false) || solve(60, false);
+        // 四档搜索都跑一遍，按"高音位移 → 档位先后"取最优
+        const tryPasses = (pin) => {
+            const seq = [[CMP_WINDOW, true], [CMP_WINDOW2, true], [CMP_WINDOW2, false], [60, false]];
+            let best = null, bestMove = Infinity;
+            for (const p of seq) {
+                const v = solve(p[0], p[1], pin);
+                if (!v) continue;
+                const mv = Math.abs(v[v.length - 1] - top0);
+                if (mv < bestMove) { best = v; bestMove = mv; }
+                if (bestMove === 0) break;        // 已经一个半音都不动了，不用再找
+            }
+            return best;
+        };
+
+        // 高音逐落点枚举（见上面的调用注释）。按 |落点 − 原高音| 升序试，
+        //   第一个"排得下"的就是高音动得最少的形态；同一距离内先试更严格的窗口。
+        const TRY_SEQ = [[CMP_WINDOW, true], [CMP_WINDOW2, true], [CMP_WINDOW2, false], [60, false]];
+        const tryPinEach = () => {
+            const cands = [];
+            for (const pc of allowed) {
+                for (let m = top0 - 12; m <= top0 + 12; m++) {
+                    if ((((m % 12) + 12) % 12) === pc && m > bass) cands.push(m);
+                }
+            }
+            cands.sort((a, b) => Math.abs(a - top0) - Math.abs(b - top0) || a - b);
+            for (const t of cands) {
+                for (const p of TRY_SEQ) {
+                    const v = solve(p[0], p[1], t);
+                    if (v) return v;
+                }
+            }
+            return null;
+        };
+
+        let midis = (pinTop != null) ? tryPasses(pinTop) : null;
+        // ★ 第四十八轮补：高音那个音在目标形态里没有了（正好是被替换掉的那一个）→
+        //   **逐个枚举高音能落到哪**，按"离原高音最近"的顺序试，第一个排得下就采纳。
+        //   光靠"总位移加权"治不住这种情况：3 个内声部各让出几步，总代价就能压过
+        //   高音多走 3~8 个半音的那点惩罚（实测 下界 4 的解输给高音 +7 的解）。
+        //   用户要的是"听着旋律没动"，所以高音位移是**第一目标**，总位移只是次级。
+        if (!midis) midis = tryPinEach();
+        if (!midis) midis = tryPasses(null);
         if (!midis) return null;
         const notes = chord.applied
             ? spellMidis(midis, appliedTones(chord.applied))
@@ -3036,7 +3118,25 @@
             if (h + CHORD_RELEASE <= room) return h;      // 不跨线 → 原样
             return Math.max(0.06, room - CHORD_RELEASE);  // 收窄到"淡出刚好压线结束"
         };
-        const slot = (e) => e.time + holdTrimmed(e) + CHORD_RELEASE;
+        const slot = (e) => e.time + barHeadGap(e) + holdSeconds(e) + CHORD_RELEASE;
+
+        // ★ 第四十八轮：小节第一拍**延后 20ms 起振**，让"小节线之后 0~20ms"是一段真空。
+        //   起因（实证）：把渲染出来的 WAV 解出来按小节线切片（.accept/pb66.mjs）——
+        //     线前 5ms 振幅 0.002~0.006、线上 0.0003（是干净的），
+        //     但**线后 1ms 就到 0.055~0.34、5ms 就到 0.44**（钢琴攻击段）。
+        //   所以上一轮把落点从 20ms 收到 1ms 是**反了**：落点越靠后，切进去那一下越狠；
+        //   而 1ms 只留了 1ms 余量，iOS 的 seek 只要偏后几毫秒，就正好切在攻击段上
+        //   → "每次切换都啪一下"。现在两头一起改：
+        //     ① 渲染时留出 20ms 真空（这里）；
+        //     ② 落点设在 +8ms（MP_RESUME_LEAD_S），seek 误差 ±8ms 都落在静音里。
+        //   代价：每小节第一拍晚 20ms 起音（120bpm 下是 4% 拍长），听感上无差别。
+        //   想恢复原样：把 BAR_HEAD_GAP 改成 0（只改这一处）。
+        const BAR_HEAD_GAP = 0.02;
+        const nearBarHead = (e) =>
+            (e.time - Math.floor(e.time / measureSpan0 + 1e-6) * measureSpan0) < 0.005;
+        const barHeadGap = (e) => (nearBarHead(e) ? BAR_HEAD_GAP : 0);
+        // 起音后移多少，hold 就减多少 —— 否则淡出尾巴又跨过小节线（TAIL_TRIM 就白做了）
+        const holdSeconds = (e) => Math.max(0.03, holdTrimmed(e) - barHeadGap(e));
 
         let total = 0;
         events.forEach((e) => { total = Math.max(total, slot(e)); });
@@ -3081,8 +3181,8 @@
                 // 连奏包络：4ms 起音 → 按住（hold）→ 短淡出。
                 // 注意：这里**不再**人为做指数衰减 —— 之前的写法把这颗音从 0dB 强压到 -80dB，
                 // 比钢琴自身的衰减快十几倍，听着就是"弹一下就没了"。现在让采样自己衰减。
-                const t = e.time;
-                const hold = holdTrimmed(e);      // 按住多久（秒）—— 已按"不跨小节线"收窄过
+                const t = e.time + barHeadGap(e);          // 小节第一拍延后起振（见 BAR_HEAD_GAP）
+                const hold = holdSeconds(e);              // 按住多久（秒）—— 已按"不跨小节线"收窄过
                 gain.gain.setValueAtTime(0, t);
                 gain.gain.linearRampToValueAtTime(gg, t + 0.004);
                 gain.gain.setValueAtTime(gg, t + hold);
@@ -3107,6 +3207,107 @@
         return host.audioBufferToWav(out);
     }
 
+    // ============================================================
+    // 第四十八轮：即时音的两条命门
+    // ------------------------------------------------------------
+    // ① **上下文没在跑就别排程**（用户："这条线有概率出不了声，锁屏再开就好了"）。
+    //    <audio> 主播放暂停/结束后，iOS 的 AudioContext 会落到 Safari 私有的
+    //    'interrupted' 态：此时给它排 BufferSource，时钟是照走的 —— 等它活过来，
+    //    这些源早就"过期"，一个音都不响，而且永远不会补。锁屏再开之所以能好，
+    //    是因为那一下触发了 visibilitychange → ensureAudioLive → resume。
+    //    所以：只在 state === 'running' 时排程；不是就**挂起来**，等上下文活过来再补。
+    // ② 停止必须带斜坡。stop() 是硬切：正在响的钢琴音从任意振幅一步归零 = 一下"啪"。
+    //    切档对比 / 关窗 / 连点剪枝以前都直接 stop()，这就是"切换和弦有爆音"的一个来源。
+    //    （主播放轨那一路是 <audio>，iOS 的 .volume 只读 → 那边只能靠落点，见 mpFadeOutEl。）
+    // ============================================================
+    const MP_VOICE_FADE_MS = 22;      // 收声斜坡：只削尾，22ms 听不出"变短"
+
+    // 把一批声源在 ms 内淡到 0 再停。条目可以是 {src, gain} 或裸 BufferSource（旧数据兜底）。
+    function mpKillVoices(list, ms) {
+        if (!list || !list.length) return;
+        const d = (ms == null ? MP_VOICE_FADE_MS : ms) / 1000;
+        list.forEach((v) => {
+            const src = (v && v.src) ? v.src : v;
+            const gain = (v && v.gain) ? v.gain : null;
+            try {
+                if (gain && gain.gain && src && typeof src.stop === 'function') {
+                    const ctx = gain.context || null;
+                    const now = ctx ? ctx.currentTime : 0;
+                    const g = gain.gain;
+                    try {
+                        // cancelAndHoldAtTime 能把"当前正在斜坡上"的值原地冻住，最平滑
+                        if (typeof g.cancelAndHoldAtTime === 'function') g.cancelAndHoldAtTime(now);
+                        else {
+                            const cur = Number(g.value) || 0;
+                            g.cancelScheduledValues(now);
+                            g.setValueAtTime(Math.max(0, Math.min(1.5, cur)), now);
+                        }
+                    } catch (e) {}
+                    try { g.linearRampToValueAtTime(0, now + d); } catch (e) {}
+                    src.stop(now + d + 0.02);
+                    return;
+                }
+                src.stop();
+            } catch (e) {}
+        });
+    }
+
+    // 「等你一下」队列：上下文没在跑时挂起，活过来立刻补放。
+    //   延迟表第一档是 0 —— resume() 是异步的，下一个 task 往往就已经 running 了，
+    //   所以刚上手的第一次点击不会真的等 70ms。
+    const MP_INSTANT_RETRY_MS = [0, 45, 100, 180, 300, 520, 900, 1400];
+    const MP_INSTANT_MAX_AGE = 3600;   // 超过这么久就不补了（补出来也莫名其妙）
+    let mpInstantQueue = [];
+
+    // ★ 第四十八轮：「这条音路偶尔不出声」的**最后一环** —— 唤醒即补放。
+    //   用户的现成解法是"锁屏再开就好"，那说明上下文卡在 iOS 的 'interrupted'
+    //   （Safari 私有态，resume() 在这种态下不一定立刻生效），而锁屏再开会让系统
+    //   重新激活音频会话。我们不能等他锁屏，于是：**任何一次用户激活（pointerdown）/
+    //   回到前台，只要刚才那一声没响成、且还没过 2.6 秒，就当场补放一次**。
+    //   过了这个窗口就不补了 —— 隔几秒再突然响一声比没响更莫名其妙。
+    let mpLastInstantReq = null;
+    let mpSuppressWake = false;          // playInstantChord 自己那一趟不要补放（否则两声叠在一起）
+    const MP_INSTANT_WAKE_MS = 2600;
+
+    function mpWakeInstant() {
+        if (mpSuppressWake) return;
+        const q = mpLastInstantReq;
+        const fresh = !!(q && !q.played && (Date.now() - q.at) <= MP_INSTANT_WAKE_MS);
+        if (!mpInstantQueue.length && !fresh) return;
+        // 挂起的先清掉定时器、立刻重试一遍
+        if (mpInstantQueue.length) {
+            const list = mpInstantQueue.splice(0);
+            list.forEach((e) => { if (e.timer) clearTimeout(e.timer); });
+            list.forEach((e) => {
+                if (Date.now() - e.at > MP_INSTANT_MAX_AGE) return;
+                const r = mpPlayInstantNow(e.midis, e.style);
+                if (!r.ok && e.style !== 'gliss') mpQueueInstant(e.midis, e.style, (e.tries || 0) + 1);
+            });
+        }
+        if (!fresh) return;
+        const r = mpPlayInstantNow(q.midis, q.style);
+        if (r.ok) q.played = true;
+    }
+
+    function mpQueueInstant(midis, style, tries) {
+        const entry = { midis: midis.slice(), style: style, at: Date.now(),
+                        tries: tries || 0, timer: 0 };
+        const k = Math.min(entry.tries, MP_INSTANT_RETRY_MS.length - 1);
+        entry.timer = setTimeout(() => {
+            const i = mpInstantQueue.indexOf(entry);
+            if (i >= 0) mpInstantQueue.splice(i, 1);
+            if (Date.now() - entry.at > MP_INSTANT_MAX_AGE) return;
+            const r = mpPlayInstantNow(entry.midis, entry.style);
+            if (!r.ok) mpQueueInstant(entry.midis, entry.style, entry.tries + 1);
+        }, MP_INSTANT_RETRY_MS[k]);
+        mpInstantQueue.push(entry);
+        // 连点时队列别无限长（12 条 ≈ 十几秒的积压，够了）
+        if (mpInstantQueue.length > 12) {
+            const e = mpInstantQueue.shift();
+            if (e && e.timer) clearTimeout(e.timer);
+        }
+    }
+
     // 现场起 BufferSource 播一小撮音（不走离线渲染），供听辩辅助窗用。
     //   style 'arp'   上行「和弦分解」：**如实按和弦里的音个数**、原序（低 → 高）——
     //                 三和弦 3 个音、七和弦 4 个音，**不再把低音翻高八度重复一遍**
@@ -3116,7 +3317,7 @@
     //   style 'note'  单音（点辅助窗右侧的简谱数字试听）：包络同柱式，只响一个音
     //   style 'gliss' 发声键滑奏（第三十六轮）：也只响一个音，但**更短更轻** ——
     //                 手指快速滑过时，上一颗的余音不能糊住下一颗，否则听不出"分解和弦"。
-    //   音源全部登记进 mpAid.sources，关窗/重放前可随时 stop()。采样缺失只 warn 不抛。
+    //   音源全部登记进 mpAid.sources（存 {src, gain}，收声时要淡出），采样缺失只 warn 不抛。
     //
     //   ★ 解锁必须"同步"发生（2026-10-06 修「上滑与窗里按钮都没声」）：
     //     ① initAudio() 与 resume() 都**不要 await** —— 它们内部本身是同步的
@@ -3129,13 +3330,31 @@
     //     见 bindStageGesture 的 pointerdown（unlockAudioNow）与 finish() 的 pointerup 补放。
     //   返回 { ok, ctxState, scheduled } 供验收断言（"有没有真的排上程"）。
     async function playInstantChord(midis, style) {
-        const host = global.ChordHost;
-        if (!host) return { ok: false, reason: 'no-host', scheduled: 0 };
         // 同步解锁（绝不 await）：initAudio + resume 都在用户手势的同步栈里跑。
         //   走 unlockAudioNow 是为了复用「宿主有自愈版就用自愈版」这条逻辑。
+        mpSuppressWake = true;              // 这一趟自己会放，别让 unlock 顺手补上一条旧的
         unlockAudioNow();
+        mpSuppressWake = false;
+        const r = mpPlayInstantNow(midis, style);
+        // 没响成（上下文没在跑 / 采样还没回来）→ 挂起来等，不 gliss（滑奏过了就过了）
+        if (!r.ok && style !== 'gliss') mpQueueInstant(midis, style, 0);
+        // 记下"这一声"，供下一次用户激活时补放（见 mpWakeInstant）
+        mpLastInstantReq = { midis: midis.slice(), style: style, at: Date.now(), played: r.ok };
+        return r;
+    }
+
+    // 真正排程的那一半（同步）。只在上下文 running 时动手。
+    function mpPlayInstantNow(midis, style) {
+        const host = global.ChordHost;
+        if (!host) return { ok: false, reason: 'no-host', scheduled: 0, ctxState: null };
         const ctx = host.audioContext;
-        if (!ctx) return { ok: false, reason: 'no-ctx', scheduled: 0 };
+        if (!ctx) return { ok: false, reason: 'no-ctx', scheduled: 0, ctxState: null };
+        // ★ 关键闸门：不是 running 就一个音都不排（排了也是白排，见上面 ①）
+        if (ctx.state !== 'running') {
+            mpAidLast = { style: style, ok: false, queued: true, ctxState: ctx.state,
+                          scheduled: 0, midis: midis.slice() };
+            return { ok: false, reason: 'ctx-' + ctx.state, ctxState: ctx.state, scheduled: 0 };
+        }
 
         const isBlock = (style === 'block' || style === 'note');
         const isGliss = (style === 'gliss');
@@ -3171,18 +3390,18 @@
             gain.gain.linearRampToValueAtTime(0, t + n.hold + CHORD_RELEASE);
             src.start(t);
             src.stop(t + n.hold + CHORD_RELEASE + 0.05);
-            if (mpAid) mpAid.sources.push(src);
+            if (mpAid) mpAid.sources.push({ src: src, gain: gain });
             scheduled++;
         }
         if (missing > 0) {
             console.warn('听辩辅助：有 ' + missing + ' 个音找不到采样（音源/和弦钢琴/ 是否已加载？）');
         }
         // 点音名可以连点（用户要"叠着响，像弹琴"）→ 声源会累积，偶尔剪掉最老的几个
+        //   ★ 第四十八轮：剪枝也走淡出，硬 stop() 就是一下"啪"。
         if (mpAid && mpAid.sources.length > 40) {
-            const old = mpAid.sources.splice(0, 16);
-            old.forEach((s) => { try { s.stop(); } catch (e) {} });
+            mpKillVoices(mpAid.sources.splice(0, 16), MP_VOICE_FADE_MS);
         }
-        const ok = (ctx.state === 'running' && scheduled > 0);
+        const ok = (scheduled > 0);
         // 记下这一声的音高（验收要断言"点哪个音名就发哪个音高"，光看 scheduled 不够）
         mpAidLast = { style: style, ok: ok, ctxState: ctx.state,
                       scheduled: scheduled, midis: midis.slice() };
@@ -3201,15 +3420,20 @@
         const host = global.ChordHost;
         if (!host) return;
         try {
-            if (typeof host.ensureAudioLive === 'function') { host.ensureAudioLive(); return; }
-            if (!host.audioContext) host.initAudio();
-            const ctx = host.audioContext;
-            // ★ resume() 返回 Promise，失败时**必须** catch —— 否则会产生未捕获 rejection
-            //   （验收里有"无未捕获异常"这一条，也会污染控制台）。
-            if (ctx && ctx.state !== 'running') {
-                try { ctx.resume().catch(() => {}); } catch (e) {}
+            if (typeof host.ensureAudioLive === 'function') {
+                host.ensureAudioLive();       // 注意：这里不能 return —— 下面还要补放
+            } else {
+                if (!host.audioContext) host.initAudio();
+                const ctx = host.audioContext;
+                // ★ resume() 返回 Promise，失败时**必须** catch —— 否则会产生未捕获 rejection
+                //   （验收里有"无未捕获异常"这一条，也会污染控制台）。
+                if (ctx && ctx.state !== 'running') {
+                    try { ctx.resume().catch(() => {}); } catch (e) {}
+                }
             }
         } catch (e) {}
+        // 唤醒之后：刚才没响成的那一声补上（见 mpWakeInstant 的注释）
+        try { mpWakeInstant(); } catch (e) {}
     }
 
     // ------------------------------------------------------------
@@ -3864,8 +4088,16 @@
     //     1ms 处振幅 ≤0.002（等于 0），进来那侧几乎无跳变，音头一点也不丢。
     //   ★ 别再往 0 上压：0 会和"落点被取整到 k*md-ε"撞在一起，而 mpMeasureOf 用的是
     //     floor → 会被判成上一小节。1ms 是"干净"和"不越界"之间的那条缝。
-    //   想更保守/更激进就只改这一个数（0.02 = 恢复旧行为）。
-    const MP_RESUME_LEAD_S = 0.001;
+    //   ★ 第四十八轮：0.001 → 0.008。落点对，但**余量不对**。
+    //     重新按正确的小节时长量了一遍（.accept/pb66.mjs，之前 pb58 把 md 算成
+    //     duration/n，多了 1.6s 尾音余量 → 量出来的"线上=0"其实是错位的）：
+    //       线前 5ms ≈ 0.004 | 线上 ≈ 0.0003 | 线后 1ms ≈ 0.06~0.34 | 线后 5ms ≈ 0.44
+    //     → 线后 1ms 就**已经是很响的攻击段**了。落点 1ms 只留 1ms 余量，
+    //       iOS 的 seek 偏后几毫秒就切在 0.3 的振幅上，"每次切换都啪"。
+    //     配套改动在渲染侧（BAR_HEAD_GAP = 20ms）：现在小节线后 0~20ms 是一段真空，
+    //     落点取 8ms（真空正中），seek 误差 ±8ms 都落在静音里。
+    //     这两个数要一起改：BAR_HEAD_GAP 归零时，这里也该回到 0.001。
+    const MP_RESUME_LEAD_S = 0.008;
     //   起播落点自检的**下限**：落后少于这个值一律不管（刚起播的正常滞后）。
     //   ★ 第二十三轮：真正的门槛是"半小节"（见 mpGuardLanding 的 need），这个数只当下限。
     //     （原先它是 mpEnsureSeek 的判据，而"play 后读一次"太脆 → 会把正常播放再 seek 一次。）
@@ -3886,7 +4118,7 @@
     //   之前靠 ?dbg=1 调试行确认"用户跑的是哪一版"，但那行要加参数才出现、还容易被
     //   "播放中"覆盖、也容易被忽略 —— 于是反复出现"我改了但你说没生效"（其实是 iOS 缓存了旧 JS）。
     //   现在无条件在左下角挂一个 v 号，一打开就知道加载的是哪一版，省得来回猜。
-    const APP_VERSION = 48;
+    const APP_VERSION = 49;
     (function mountVersionTag() {
         // Node 环境（tools/*.js 审计脚本 require 本文件）没有 document，直接跳过
         if (typeof document === 'undefined') return;
@@ -4135,6 +4367,10 @@
             mpNext: document.getElementById('chord-mp-next'),
             mpGenerate: document.getElementById('chord-mp-generate'),
             mpExitPractice: document.getElementById('chord-mp-exit-practice'),
+            // ★ 第四十八轮：顶行第三个键从「错题练习」换成「手势模式」（#chord-mp-exit-practice
+            //   在 HTML 里已经不存在 → 上面那行取到 null，practiceMode 的所有 UI 分支都是空守卫，
+            //   错题练习仍可从数据库页进入）。
+            mpGesture: document.getElementById('chord-mp-gesture'),
             // 当前和弦各音的发声按钮（取代原来那行手势提示）
             mpTones: document.getElementById('chord-mp-tones'),
             mpModeNote: document.getElementById('chord-mp-mode-note'),
@@ -6507,6 +6743,8 @@
         }
 
         // 错题练习开关：面板顶部按钮 = 开/关切换；数据库页按钮 = 快捷进入
+        //   ★ 第四十八轮：面板顶行那个键换成了「手势模式」，这里取到 null（守卫空转）；
+        //     错题练习只保留数据库页的入口，功能一点没删。
         if (els.dbPractice) els.dbPractice.addEventListener('click', () => { startPractice(); });
         if (els.mpExitPractice) els.mpExitPractice.addEventListener('click', () => {
             if (practiceMode) { exitPractice(); return; }
@@ -6514,11 +6752,23 @@
                 if (!ok) renderInfoText('还没有错题记录，先在普通模式练几题', false);
             });
         });
+        // 手势模式开关（第四十八轮）：点一下开、再点一下关，选择记在 localStorage 里
+        if (els.mpGesture) {
+            if (!GESTURE_MODE_ENABLED) {
+                els.mpGesture.hidden = true;
+            } else {
+                bindFastTap(els.mpGesture, () => applyGestureUi(!gestureMode));
+                try { gestureMode = localStorage.getItem(GESTURE_KEY) === '1'; } catch (e) {}
+                applyGestureUi(gestureMode);
+            }
+        }
 
         // 长按看的答案：按住揭示、按住上滑报错、按住左/右滑上一个/下一个（左右互通）
         bindStageGesture();
         // 展开面板：从最左侧往右滑收起（第三十六轮）
         bindEdgeSwipe();
+        // 手势模式：面板任意位置横划 = 上一个 / 下一个（第四十八轮，开关打开时才生效）
+        bindSheetSwipe();
 
         // ★ 第十六轮：任意一次点击都顺手"续一下"音频上下文。
         //   为什么挂在 document 的 capture 阶段：它比所有目标处理器都早跑，
@@ -7275,7 +7525,9 @@
                 //   守卫用"上一次 ok 为假才补"，所以第一次真排上程了绝不会出现双声。
                 //   ★ 第二十三轮：再叠一道"开窗久了就不补"（MP_AID_REPLAY_MS）——
                 //     用户盯着窗听了几秒才松手时，这一补会盖在当下的声音上，听起来就是"多出一串和声"。
-                if (mpAid && mpAidLast && !mpAidLast.ok &&
+                // ★ 第四十八轮：`queued` 的不要再补 —— 那一声已经被"等上下文活过来"的队列
+                //   接住了（第一次点击时 resume 还没落地是最常见的情形），再补就是双声。
+                if (mpAid && mpAidLast && !mpAidLast.ok && !mpAidLast.queued &&
                     (Date.now() - (mpAid.openedAt || 0)) < MP_AID_REPLAY_MS) {
                     try { mpReplayAid('arp'); } catch (err) {}
                 }
@@ -7297,6 +7549,124 @@
         stage.addEventListener('pointerup', finish);
         stage.addEventListener('pointercancel', finish);
         stage.addEventListener('lostpointercapture', finish);
+    }
+
+    // ============================================================
+    // 手势模式（第四十八轮，取代顶行原来的「错题练习」入口）
+    // ------------------------------------------------------------
+    //   用户要的："打开后服务于盲点操作，保留卡片的交互逻辑，同时全屏左滑上一个、
+    //   右滑下一个和弦。"
+    //   · 「盲点/盲操作」= 眼睛不用看屏幕：不按住、不找按钮，面板任意位置横着一划就换和弦。
+    //   · 「保留卡片的交互逻辑」= 长按揭示答案、上滑报错、下滑听辨辅助**一个都不动**；
+    //     我们只在"明显是横着划"（|dx| > |dy|·1.2 且超容差）时才接手，
+    //     所以竖着按、按住了不动，全部照旧走 bindStageGesture 那一套。
+    //   · 左缘 36px 不接（那里是"右滑收起面板"的地盘，见 bindEdgeSwipe）。
+    //   左右方向与原来"按住左右滑"一致：往左 = 上一个，往右 = 下一个。
+    //   想整体摘掉这个功能：把 GESTURE_MODE_ENABLED 改成 false（按钮会自己隐藏）。
+    // ============================================================
+    const GESTURE_MODE_ENABLED = true;
+    const GESTURE_KEY = 'chord_gesture_mode_v1';
+    const MP_MODE_NOTE_GESTURE = '手势模式：左滑上一个 · 右滑下一个（长按照旧看答案）';
+    const MP_SWIPE_SLOP = 14;      // 起手容差：小于这么多像素不算"要滑"
+    const MP_SWIPE_STEP = 64;      // 每滑过这么多算走一格（不按住时手更飘，比按住那套的 48 宽一点）
+    const MP_SWIPE_FLICK = 42;     // 快速一甩的兜底：一甩没走到一格也算一步
+    let gestureMode = false;
+
+    function mpSyncModeNote() {
+        if (!els || !els.mpModeNote) return;
+        // 错题练习优先显示它自己那句（两个模式互斥，正常不会同时开）
+        if (practiceMode) {
+            els.mpModeNote.textContent = MP_MODE_NOTE_PRACTICE;
+            els.mpModeNote.hidden = false;
+            return;
+        }
+        if (gestureMode) {
+            els.mpModeNote.textContent = MP_MODE_NOTE_GESTURE;
+            els.mpModeNote.hidden = false;
+            return;
+        }
+        els.mpModeNote.hidden = true;
+    }
+
+    function applyGestureUi(on) {
+        gestureMode = !!on;
+        if (els && els.mpGesture) {
+            els.mpGesture.classList.toggle('is-on', gestureMode);
+            els.mpGesture.setAttribute('aria-pressed', gestureMode ? 'true' : 'false');
+            els.mpGesture.innerHTML = iconSvg('i-swipe') + (gestureMode ? '手势开' : '手势模式');
+        }
+        if (els && els.mpSheet) els.mpSheet.classList.toggle('is-gesture', gestureMode);
+        mpSyncModeNote();
+        try { localStorage.setItem(GESTURE_KEY, gestureMode ? '1' : '0'); } catch (e) {}
+        return gestureMode;
+    }
+
+    // 全屏横滑 → 上一个 / 下一个。
+    //   ★ 挂在 .mp-sheet 的**捕获**阶段：按钮、发声键这些自己的点击语义不受影响
+    //     （起手点落在 button/.mp-tones 上就整个跳过这次手势）。
+    function bindSheetSwipe() {
+        const sheet = els && els.mpSheet;
+        if (!sheet || !GESTURE_MODE_ENABLED) return;
+        let st = null;      // { id, x0, y0, anchor, t0, active, steps }
+
+        const blocked = (t) => !!(t && t.closest && t.closest(
+            'button, a, input, textarea, select, .mp-tones'
+        ));
+
+        sheet.addEventListener('pointerdown', (e) => {
+            if (!gestureMode || st) return;
+            if (!mpExpanded || !data || !data.chords.length) return;
+            if (mpAid || mpErrorCtx) return;              // 浮窗开着 → 让浮窗自己处理
+            if (e.isPrimary === false) return;            // 只认主指针（双指误触不算）
+            if (blocked(e.target)) return;
+            const r = sheet.getBoundingClientRect();
+            if (e.clientX - r.left <= MP_EDGE_ZONE) return;   // 左缘留给"右滑收起"
+            st = { id: e.pointerId, x0: e.clientX, y0: e.clientY, anchor: e.clientX,
+                   t0: Date.now(), active: false, steps: 0 };
+        }, true);
+
+        sheet.addEventListener('pointermove', (e) => {
+            if (!st || (e.pointerId != null && e.pointerId !== st.id)) return;
+            const dx = e.clientX - st.x0;
+            const dy = e.clientY - st.y0;
+            if (!st.active) {
+                if (Math.abs(dx) < MP_SWIPE_SLOP && Math.abs(dy) < MP_SWIPE_SLOP) return;
+                // 竖着为主 → 不是横划（滚动 / 上滑报错 / 下滑辅助都归舞台那一套）
+                if (Math.abs(dx) < Math.abs(dy) * 1.2) { st = null; return; }
+                // 已经长按武装 → 让位给"按住左右滑"，绝不双翻
+                if (mpGesture && mpGesture.phase === 'armed') { st = null; return; }
+                st.active = true;
+                // 掐掉舞台上那颗还没武装的手势：否则松手时会顺手"揭示一下"
+                mpCancelGesture();
+            }
+            // 每跨过一格走一步，锚点跟着走（左右互通：划回来不用先回到起点）
+            let guard = 0;
+            while (guard++ < 12) {
+                const d = e.clientX - st.anchor;
+                if (d <= -MP_SWIPE_STEP) { st.anchor -= MP_SWIPE_STEP; st.steps++; mpJump(-1); }
+                else if (d >= MP_SWIPE_STEP) { st.anchor += MP_SWIPE_STEP; st.steps++; mpJump(1); }
+                else break;
+            }
+            e.stopPropagation();
+        }, true);
+
+        const finish = (e) => {
+            if (!st) return;
+            if (e && e.pointerId != null && e.pointerId !== st.id) return;
+            const s = st;
+            st = null;
+            if (!s.active) return;
+            // 一甩没滑满一格（快而短）→ 也认一次，盲操时手感更实
+            if (e && e.type === 'pointerup' && s.steps === 0) {
+                const dx = e.clientX - s.x0;
+                const dt = Math.max(1, Date.now() - s.t0);
+                if (Math.abs(dx) >= MP_SWIPE_FLICK && Math.abs(dx) / dt > 0.25) {
+                    mpJump(dx > 0 ? 1 : -1);
+                }
+            }
+        };
+        sheet.addEventListener('pointerup', finish, true);
+        sheet.addEventListener('pointercancel', finish, true);
     }
 
     // ============================================================
@@ -7674,9 +8044,16 @@
         //   "关窗后从头开始 / 直接变成下一首"。这是本次"概率性复现"的主因。
         cancelAutoNext();
         // ★ 第四十七轮：暂停前先把正在响的音淡掉（只削尾），否则开窗那一下也是"啪"的一声。
+        // ★ 第四十八轮：**只有音量真能写的时候才 await 这个斜坡**。
+        //   iOS 的 <audio>.volume 是只读的 → mpFadeOutEl 立刻返回（本来也就没有斜坡），
+        //   但它一旦被 await，整条链就交出了用户手势的同步栈 → 后面那声"开窗和弦"
+        //   排程时 resume 被拒 / 上下文还没回来 → 窗开了没声（用户报的那条音路）。
+        //   iOS 上现在全程同步跑到 playInstantChord，等于把这一声重新放回手势里。
         const wasPlaying = !!(chordAudioEl && !chordAudioEl.paused && !chordAudioEl.ended);
         if (chordAudioEl && wasPlaying) {
-            await mpFadeOutEl(chordAudioEl, MP_CUT_FADE_MS);
+            if (mpVolumeWritable(chordAudioEl)) {
+                await mpFadeOutEl(chordAudioEl, MP_CUT_FADE_MS);
+            }
             try { chordAudioEl.pause(); } catch (e) {}
             mpRestoreVol(chordAudioEl);
         }
@@ -7778,8 +8155,12 @@
         const c = data.chords[mpAid.measure];
         if (!c) return;
         if (!mpAidSetLevel(c, lv)) return;
-        mpStopAidVoices();
-        playInstantChord(mpAid.playMidis, 'arp').catch(() => {});
+        // ★ 第四十八轮（用户）：**切档后放柱式，不放分解**。
+        //   要分辨的是"有没有七音 / 九音"，分解会把四个音一个个亮出来，判断依据变成
+        //   "听第几个音变了"；柱式是同时响，比较的才是**色彩**本身。
+        //   （开窗那一声仍是分解，那是"这个和弦刚才是这么弹的"的交代，不动。）
+        mpStopAidVoices(MP_VOICE_FADE_MS);
+        playInstantChord(mpAid.playMidis, 'block').catch(() => {});
     }
 
     // 和弦音角色 → 中文标注（chordToneSpelled 返回的是英文 role）
@@ -7857,9 +8238,12 @@
         });
     }
 
-    function mpStopAidVoices() {
+    // 收声：第四十八轮起走**淡出**（mpKillVoices），不再硬 stop()。
+    //   关窗 / 重放柱式 / 切档对比都会走到这里，硬停就是"啪"一声
+    //   （正在响的钢琴音从任意振幅一步归零 → 波形不连续）。
+    function mpStopAidVoices(ms) {
         if (!mpAid) return;
-        mpAid.sources.forEach((s) => { try { s.stop(); } catch (e) {} });   // 已结束的 stop() 无害
+        mpKillVoices(mpAid.sources, ms == null ? MP_VOICE_FADE_MS : ms);
         mpAid.sources = [];
     }
 
@@ -8140,7 +8524,11 @@
                 + (on ? '退出错题' : '错题练习');
             els.mpExitPractice.classList.toggle('is-on', !!on);
         }
-        if (els && els.dbPractice) els.dbPractice.disabled = !!on;   // 错题中禁用数据库页入口（已在错题里）
+        // 错题中禁用数据库页入口（已在错题里）；★ 第四十八轮：面板顶行那颗键没了，
+        //   "无调性不记错题" 这道闸门要挪到**唯一还活着的入口**（数据库页那张卡）上。
+        if (els && els.dbPractice) {
+            els.dbPractice.disabled = !!on || !!(settings && settings.atonal);
+        }
         // 无调性不记账 → 进错题练习没有题可练，入口置灰（用户 2026-10-24）
         if (els && els.mpExitPractice && !on) {
             const lock = !!(settings && settings.atonal);
@@ -8149,8 +8537,8 @@
             els.mpExitPractice.title = lock ? '无调性模式不记错题，进不了错题练习' : '';
         }
         if (els && els.mpModeNote) {
-            els.mpModeNote.textContent = MP_MODE_NOTE_PRACTICE;
-            els.mpModeNote.hidden = !on;
+            // ★ 第四十八轮：小字改成统一收口（错题练习 / 手势模式 / 都没有）
+            mpSyncModeNote();
         }
         mpPaintProgress();
         updateHint();
@@ -8382,7 +8770,7 @@
         // ---- 错题练习入口：有没有可练的组合决定按钮态 ----
         if (els.dbPractice) {
             const list = topPracticeCombos(5);
-            els.dbPractice.disabled = (list.length === 0);
+            els.dbPractice.disabled = (list.length === 0) || !!(settings && settings.atonal);
             if (els.dbPracticeStatus) {
                 els.dbPracticeStatus.textContent = list.length
                     ? '已攒到 ' + list.length + ' 组常错的组合（错 ≥2 次）—— 用 Ⅰ 级和弦串起来连着练，不计入统计'
@@ -8708,7 +9096,17 @@
             const c = (data && data.chords) ? data.chords[m] : null;
             return c ? uiActualMidis(c) : null;
         },
-        _aidCompare: (lv) => { mpAidCompare(lv); return mpAid ? mpAid.level : null; },        _getAidLevel: () => (mpAid ? {
+        _aidCompare: (lv) => { mpAidCompare(lv); return mpAid ? mpAid.level : null; },
+        // ---- 第四十八轮：即时发声（自测用；验收要模拟"上下文不在跑"）----
+        _playInstant: (midis, style) => playInstantChord(midis, style),
+        _getInstantQueue: () => mpInstantQueue.length,
+        _wakeInstant: () => { mpWakeInstant(); return mpLastInstantReq; },
+        // ---- 第四十八轮：手势模式 / 当前小节 / 揭示态（自测用）----
+        _getGestureMode: () => gestureMode,
+        _setGestureMode: (on) => applyGestureUi(on),
+        _getMpMeasure: () => mpMeasure,
+        _getMpRevealed: () => !!(els && els.mpStage && els.mpStage.classList.contains('is-revealed')),
+        _getAidLevel: () => (mpAid ? {
             level: mpAid.level, orig: mpAid.origLevel,
             display: mpAid.midis.slice(), src: mpAid.srcMidis.slice(),
             play: mpAid.playMidis.slice(),
